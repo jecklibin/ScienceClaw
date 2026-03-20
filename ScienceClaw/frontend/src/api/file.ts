@@ -13,6 +13,7 @@ export interface FileInfo {
   upload_date: string;
   metadata?: Record<string, any>;
   file_url?: string;
+  category?: 'result' | 'process';
 }
 
 
@@ -107,20 +108,26 @@ export async function getFileDownloadUrl(
 }
 
 /**
- * Download a file with authentication and trigger browser save dialog.
- * Uses apiClient (which attaches Bearer token) to fetch the file as a Blob,
- * then creates a temporary <a> element to trigger the download.
+ * Fetch file content as a Blob using file_url or signed URL with authentication.
  */
-export async function triggerAuthenticatedDownload(fileInfo: FileInfo): Promise<void> {
+export async function fetchFileBlob(fileInfo: FileInfo): Promise<Blob> {
   let requestUrl = fileInfo.file_url || '';
   if (!requestUrl) {
     const signed = await createFileSignedUrl(fileInfo.file_id);
     requestUrl = signed.signed_url;
   }
   requestUrl = requestUrl.replace(/^\/api\/v1/, '');
-
   const response = await apiClient.get(requestUrl, { responseType: 'blob' });
-  const blob: Blob = response.data;
+  return response.data;
+}
+
+/**
+ * Download a file with authentication and trigger browser save dialog.
+ * Uses apiClient (which attaches Bearer token) to fetch the file as a Blob,
+ * then creates a temporary <a> element to trigger the download.
+ */
+export async function triggerAuthenticatedDownload(fileInfo: FileInfo): Promise<void> {
+  const blob = await fetchFileBlob(fileInfo);
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;

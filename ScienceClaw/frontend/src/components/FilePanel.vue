@@ -40,13 +40,41 @@
           </div>
         </div>
 
+        <!-- Round Files Mode -->
+        <div v-else-if="isRoundFilesMode" class="flex flex-col h-full w-full">
+          <header class="relative flex items-center pt-5 pr-4 pl-4 pb-3 border-b border-gray-100 dark:border-gray-800">
+            <div class="absolute top-0 left-4 right-4 h-[2px] rounded-full bg-gradient-to-r from-emerald-500 via-blue-500 to-indigo-500"></div>
+            <div class="flex items-center gap-3">
+              <button @click="showFileListPanel"
+                class="p-2 -ml-2 rounded-xl text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-all duration-200 flex-shrink-0"
+                :title="$t('All Files in This Task')">
+                <ArrowLeft class="size-4.5" />
+              </button>
+              <div class="flex flex-col">
+                <h1 class="text-base font-bold text-[var(--text-primary)]">{{ $t('Files in this round') }}</h1>
+                <span class="text-xs text-[var(--text-tertiary)]">{{ roundFiles.length }} {{ $t('files') }}</span>
+              </div>
+            </div>
+            <div class="flex-1"></div>
+            <div class="flex items-center gap-2">
+              <button @click="hideFilePanel"
+                class="p-2 rounded-xl hover:bg-gray-100 dark:hover:bg-gray-800 transition-all duration-200 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
+                <X class="size-4.5" />
+              </button>
+            </div>
+          </header>
+          <div class="flex-1 min-h-0 flex flex-col overflow-hidden">
+            <RoundFileListContent :files="roundFiles" @file-click="handleFileClick" />
+          </div>
+        </div>
+
         <!-- Single File Mode -->
         <div v-else-if="fileInfo && fileType" class="flex flex-col h-full w-full overflow-hidden">
           <!-- Header with gradient accent -->
           <header class="relative flex items-center px-5 pt-5 pb-3 border-b border-gray-100 dark:border-gray-800 flex-shrink-0">
             <div class="absolute top-0 left-5 right-5 h-[2px] rounded-full bg-gradient-to-r from-blue-500 via-indigo-500 to-purple-500"></div>
             <div class="flex items-center gap-3 flex-1 min-w-0">
-              <button @click="showFileListPanel"
+              <button @click="goBackFromFile"
                 class="p-2 -ml-2 rounded-xl text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-all duration-200 flex-shrink-0"
                 :title="$t('Back to file list')">
                 <ArrowLeft class="size-4.5" />
@@ -93,6 +121,7 @@ import { useResizeObserver } from '../composables/useResizeObserver'
 import { eventBus } from '../utils/eventBus'
 import { EVENT_SHOW_TOOL_PANEL } from '../constants/event'
 import SessionFileListContent from './SessionFileListContent.vue'
+import RoundFileListContent from './RoundFilesPopover.vue'
 
 const { t } = useI18n()
 
@@ -103,7 +132,10 @@ const {
   showFilePanel,
   showFileListPanel,
   hideFilePanel,
-  isListMode
+  goBackFromFile,
+  isListMode,
+  isRoundFilesMode,
+  roundFiles,
 } = useFilePanel()
 
 const handleFileClick = (file: FileInfo) => {

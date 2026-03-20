@@ -395,6 +395,72 @@ def _extract_sandbox_file_paths(events: List[Dict[str, Any]]) -> Set[str]:
     return paths
 
 
+# ── 轮次文件快照 / diff ──
+
+_ROUND_FILES_EXCLUDE_DIRS = {"_diagnostic", "tools_staging", "__pycache__", ".git"}
+_ROUND_FILES_EXCLUDE_NAMES = {"CONTEXT.md", "planner.md", "AGENTS.md"}
+
+
+def _snapshot_workspace_files(workspace_dir: _Path) -> Dict[str, float]:
+    """Return {relative_path: mtime} for every file under *workspace_dir*."""
+    snap: Dict[str, float] = {}
+    if not workspace_dir.is_dir():
+        return snap
+    for fp in workspace_dir.rglob("*"):
+        if not fp.is_file():
+            continue
+        try:
+            rel = str(fp.relative_to(workspace_dir))
+            snap[rel] = fp.stat().st_mtime
+        except (OSError, ValueError):
+            continue
+    return snap
+
+
+def _diff_workspace_files(
+    pre: Dict[str, float],
+    post: Dict[str, float],
+    workspace_dir: _Path,
+    session_id: str,
+) -> List[Dict[str, Any]]:
+    """Compare snapshots and return new/modified files, excluding system artefacts."""
+    changed: List[Dict[str, Any]] = []
+    for rel, mtime in post.items():
+        top_dir = rel.split("/", 1)[0] if "/" in rel else ""
+        if top_dir in _ROUND_FILES_EXCLUDE_DIRS:
+            continue
+        basename = rel.rsplit("/", 1)[-1]
+        if basename in _ROUND_FILES_EXCLUDE_NAMES:
+            continue
+        if basename.startswith("."):
+            continue
+
+        prev_mtime = pre.get(rel)
+        if prev_mtime is not None and prev_mtime >= mtime:
+            continue
+
+        fp = workspace_dir / rel
+        try:
+            stat = fp.stat()
+            upload_date = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+            size = stat.st_size
+        except OSError:
+            continue
+
+        category = "research_data" if top_dir == "research_data" else "output"
+        abs_path = str(fp)
+        changed.append({
+            "file_id": abs_path,
+            "filename": basename,
+            "relative_path": rel,
+            "size": size,
+            "upload_date": upload_date,
+            "file_url": f"/api/v1/sessions/{session_id}/sandbox-file/download?path={abs_path}",
+            "category": category,
+        })
+    return changed
+
+
 async def _sandbox_file_list(directory: str) -> List[Dict[str, Any]]:
     """Call sandbox REST API to list files in a directory."""
     base = _get_sandbox_rest_base()
@@ -1391,6 +1457,9 @@ async def _agent_background_worker(
     setattr(session, "status", SessionStatus.RUNNING)
     await session.save()
 
+    # Snapshot workspace before agent execution for round-level file tracking
+    pre_file_snapshot = _snapshot_workspace_files(session.vm_root_dir)
+
     statistics: Dict[str, Any] = {}
     _chunk_buffer: list[str] = []
 
@@ -1524,10 +1593,22 @@ async def _agent_background_worker(
         except Exception:
             logger.debug("tool auto-detect skipped", exc_info=True)
 
+        # Compute files created/modified during this round
+        round_files: List[Dict[str, Any]] = []
+        try:
+            post_file_snapshot = _snapshot_workspace_files(session.vm_root_dir)
+            round_files = _diff_workspace_files(
+                pre_file_snapshot, post_file_snapshot,
+                session.vm_root_dir, session_id,
+            )
+        except Exception:
+            logger.debug("round_files diff failed", exc_info=True)
+
         done_event = _wrap_event("done", {
             "event_id": _new_event_id(),
             "timestamp": _now_ts(),
             "statistics": statistics,
+            "round_files": round_files,
         })
         _append_session_event(session, done_event)
         await session.save()
@@ -1682,6 +1763,22 @@ async def unshare_session(session_id: str, current_user: User = Depends(require_
 # 沙盒文件管理
 # ═══════════════════════════════════════════════════════════════════
 
+def _classify_file(rel_path: str) -> str:
+    """Classify a workspace file by its relative path into a UI category."""
+    top_dir = rel_path.split("/", 1)[0] if "/" in rel_path else ""
+    basename = rel_path.rsplit("/", 1)[-1]
+
+    if top_dir in ("_diagnostic", "tools_staging", "__pycache__"):
+        return "process"
+    if basename in ("CONTEXT.md", "planner.md", "AGENTS.md") or basename.startswith("."):
+        return "process"
+    if top_dir in ("research_data",):
+        return "process"
+    if basename.endswith(".pyc"):
+        return "process"
+    return "result"
+
+
 @router.get("/{session_id}/files", response_model=ApiResponse)
 async def list_session_files(session_id: str, current_user: User = Depends(require_user)) -> ApiResponse:
     """列出 session workspace 目录（/home/scienceclaw/{session_id}/）下的所有文件。"""
@@ -1700,6 +1797,10 @@ async def list_session_files(session_id: str, current_user: User = Depends(requi
                 continue
             abs_path = str(file_path)
             try:
+                rel_path = str(file_path.relative_to(workspace_dir))
+            except ValueError:
+                rel_path = file_path.name
+            try:
                 stat = file_path.stat()
                 upload_date = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
                 file_size = stat.st_size
@@ -1713,6 +1814,7 @@ async def list_session_files(session_id: str, current_user: User = Depends(requi
                 "upload_date": upload_date,
                 "content_type": "text/plain",
                 "file_url": f"/api/v1/sessions/{session_id}/sandbox-file/download?path={abs_path}",
+                "category": _classify_file(rel_path),
                 "metadata": {"sandbox_path": abs_path, "session_id": session_id},
             })
 

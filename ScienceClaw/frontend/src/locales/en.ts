@@ -97,6 +97,13 @@ export default {
   'Please download the file to view its content': 'Please download the file to view its content',
   'Download': 'Download',
   'View all files in this task': 'View all files in this task',
+  'Files in this round': 'Files in this conversation round',
+  'files': 'files',
+  'Result files': 'Result files',
+  'Process files': 'Process files',
+  'System files': 'System files',
+  'Preview': 'Preview',
+  'No files in this round': 'No files in this round',
   // File Upload
   'Upload failed': 'Upload failed',
   'Uploading...': 'Uploading...',

@@ -57,9 +57,22 @@ export interface StatisticsData {
   token_count?: number;
 }
 
+/** 轮次文件信息（done 事件中携带） */
+export interface RoundFileInfo {
+  file_id: string;
+  filename: string;
+  relative_path: string;
+  size: number;
+  upload_date: string;
+  file_url: string;
+  category: 'output' | 'research_data';
+}
+
 export interface DoneEventData extends BaseEventData {
   /** 执行统计信息 */
   statistics?: StatisticsData;
+  /** 本轮新增/修改的文件列表 */
+  round_files?: RoundFileInfo[];
 }
 
 export interface WaitEventData extends BaseEventData {

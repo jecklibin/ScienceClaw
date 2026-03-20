@@ -556,12 +556,6 @@ async def _arun_deep_agent_stream(
 
                     if isinstance(msg_chunk, AIMessageChunk):
                         logger.info(f"[DeepAgent] AIMessageChunk: {msg_chunk}")
-                        # logger.info(f"[DeepAgent] AIMessageChunk: content={msg_chunk.content!r}, tool_call_chunks={getattr(msg_chunk, 'tool_call_chunks', None)}, additional_kwargs={msg_chunk.additional_kwargs}")
-                        # 提取 token 使用量（通常在最后一个 chunk 中）
-                        token_info = _extract_token_usage(msg_chunk)
-                        if token_info["input_tokens"] or token_info["output_tokens"]:
-                            logger.info(f"[DeepAgent] Token usage from chunk: input={token_info['input_tokens']}, output={token_info['output_tokens']}")
-                            middleware.add_tokens(token_info["input_tokens"], token_info["output_tokens"])
 
                         reasoning = (msg_chunk.additional_kwargs or {}).get("reasoning_content", "")
                         if isinstance(reasoning, str) and reasoning:

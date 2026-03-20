@@ -1,5 +1,5 @@
 import type { FileInfo } from '../api/file';
-import type { ToolMetaData, StatisticsData } from './event';
+import type { ToolMetaData, StatisticsData, RoundFileInfo } from './event';
 
 export type MessageType = "user" | "assistant" | "tool" | "step" | "attachments" | "thinking";
 
@@ -16,6 +16,8 @@ export interface MessageContent extends BaseContent {
   content: string;
   /** 该轮对话的统计信息 */
   statistics?: StatisticsData;
+  /** 本轮新增/修改的文件列表 */
+  round_files?: RoundFileInfo[];
 }
 
 export interface ToolContent extends BaseContent {

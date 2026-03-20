@@ -708,17 +708,16 @@ const handleDoneEvent = (doneData: DoneEventData) => {
   _streamingMsgIndex.value = null;
   isLoading.value = false;
 
-  // 将统计信息附加到最后一条 assistant 消息
-  if (doneData.statistics) {
-    // 从后往前找到最后一条 assistant 消息
+  // 将统计信息和本轮文件列表附加到最后一条 assistant 消息
+  if (doneData.statistics || doneData.round_files?.length) {
     for (let i = messages.value.length - 1; i >= 0; i--) {
       if (messages.value[i].type === 'assistant') {
-        // 使用展开运算符创建新对象以触发响应式更新
         messages.value[i] = {
           ...messages.value[i],
           content: {
             ...messages.value[i].content,
-            statistics: doneData.statistics
+            ...(doneData.statistics ? { statistics: doneData.statistics } : {}),
+            ...(doneData.round_files?.length ? { round_files: doneData.round_files } : {}),
           } as MessageContent
         };
         break;

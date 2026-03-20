@@ -112,6 +112,13 @@ export default {
   'Please download the file to view its content': '请下载文件以查看其内容',
   'Download': '下载',
   'View all files in this task': '查看会话文件',
+  'Files in this round': '本轮对话文件',
+  'files': '个文件',
+  'Result files': '结果文件',
+  'Process files': '过程文件',
+  'System files': '系统文件',
+  'Preview': '预览',
+  'No files in this round': '本轮没有产生文件',
   // File Upload
   'Upload failed': '上传失败',
   'Uploading...': '上传中...',

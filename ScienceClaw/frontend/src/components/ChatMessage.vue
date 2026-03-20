@@ -88,6 +88,17 @@
         >
           <PdfIcon :size="16" />
         </button>
+        <template v-if="roundFiles.length > 0">
+          <div class="msg-action-divider"></div>
+          <button
+            class="msg-action-btn msg-action-btn--files"
+            @click="showRoundFilesPanel(roundFiles)"
+            :title="`查看本轮对话文件 (${roundFiles.length})`"
+          >
+            <FolderOpen class="w-4 h-4" />
+            <span class="text-[11px] font-medium ml-0.5 tabular-nums">{{ roundFiles.length }}</span>
+          </button>
+        </template>
       </div>
 
       <!-- 统计信息组 - 统一胶囊风格 -->
@@ -123,6 +134,7 @@
 
   <!-- Markdown 增强功能组件 -->
   <MarkdownEnhancements ref="markdownEnhancementsRef" />
+
 </template>
 
 <script setup lang="ts">
@@ -133,7 +145,7 @@ import DOMPurify from 'dompurify';
 import hljs from 'highlight.js';
 import katex from 'katex';
 import mermaid from 'mermaid';
-import { CheckIcon, ThumbsUpIcon, ThumbsDownIcon, CopyIcon, ClockIcon, WrenchIcon, ArrowDownIcon, ArrowUpIcon } from 'lucide-vue-next';
+import { CheckIcon, ThumbsUpIcon, ThumbsDownIcon, CopyIcon, ClockIcon, WrenchIcon, ArrowDownIcon, ArrowUpIcon, FolderOpen } from 'lucide-vue-next';
 import PdfIcon from './icons/PdfIcon.vue';
 import { computed, ref, onMounted, nextTick, watch } from 'vue';
 import { ToolContent, StepContent } from '../types/message';
@@ -146,6 +158,7 @@ import SuggestedQuestions from './SuggestedQuestions.vue';
 import { transformSrc, domPurifyConfig } from '../utils/content';
 import { formatMarkdown } from '../utils/markdownFormatter';
 import MarkdownEnhancements from './MarkdownEnhancements.vue';
+import { useFilePanel } from '../composables/useFilePanel';
 
 import RobotAvatar from './icons/RobotAvatar.vue';
 
@@ -523,6 +536,10 @@ const copyMessage = async () => {
 const handleConvertToPdf = () => {
   emit('convertToPdf');
 };
+
+// 本轮文件
+const roundFiles = computed(() => messageContent.value.round_files || []);
+const { showRoundFilesPanel } = useFilePanel();
 
 // 处理 Markdown 内容区域的点击事件（图片 Lightbox + 代码块全屏）
 const handleMarkdownClick = (event: MouseEvent) => {
@@ -904,6 +921,13 @@ const parseContent = (markdown: string) => {
 
 .msg-action-btn--copied {
   @apply text-green-600 dark:text-green-400;
+}
+
+.msg-action-btn--files {
+  @apply flex items-center gap-0;
+  @apply w-auto px-1.5;
+  @apply text-blue-600 dark:text-blue-400;
+  @apply hover:bg-blue-100/80 dark:hover:bg-blue-900/30;
 }
 
 .msg-action-divider {
