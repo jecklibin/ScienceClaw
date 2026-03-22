@@ -112,6 +112,7 @@ class ChatRequest(BaseModel):
     event_id: Optional[str] = Field(default=None, description="Event ID")
     attachments: Optional[List[str]] = Field(default=None, description="Attachment path list")
     language: Optional[str] = Field(default=None, description="User interface language (e.g. 'zh', 'en')")
+    model_config_id: Optional[str] = Field(default=None, description="Model config ID to use (overrides session default)")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1641,6 +1642,19 @@ async def chat_with_session(
             raise HTTPException(status_code=403, detail="Access denied")
     except ScienceSessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    # Hot-swap model config if the user switched models mid-conversation
+    if body.model_config_id:
+        current_mc = getattr(session, "model_config", None)
+        current_mc_id = current_mc.get("id") if isinstance(current_mc, dict) else None
+        if body.model_config_id != current_mc_id:
+            mc = await get_model_config(body.model_config_id)
+            if mc:
+                if not mc.is_system and mc.user_id != current_user.id:
+                    raise HTTPException(status_code=403, detail="Cannot use this model")
+                session.model_config = mc.model_dump()
+                await session.save()
+                logger.info(f"[Chat] Model switched for session {session_id}: {current_mc_id} → {body.model_config_id}")
 
     existing_task = _agent_tasks.get(session_id)
     is_reconnect = existing_task is not None and not existing_task.done()

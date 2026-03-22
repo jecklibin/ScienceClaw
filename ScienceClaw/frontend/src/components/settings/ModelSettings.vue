@@ -202,7 +202,7 @@
 
     <!-- Edit/Add Dialog -->
     <Dialog v-model:open="isEditOpen">
-      <DialogContent class="sm:max-w-[500px] p-0 overflow-hidden bg-white/95 dark:bg-gray-900/95 backdrop-blur-xl rounded-2xl shadow-2xl border border-gray-200/60 dark:border-gray-700/40">
+      <DialogContent class="sm:max-w-[780px] p-0 overflow-hidden bg-white/95 dark:bg-gray-900/95 backdrop-blur-xl rounded-2xl shadow-2xl border border-gray-200/60 dark:border-gray-700/40">
         <DialogHeader class="px-6 py-4 border-b border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/30 flex flex-row items-center justify-between">
           <DialogTitle class="text-lg font-bold text-gray-800 dark:text-gray-100 flex items-center gap-2">
             <div class="size-8 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center">
@@ -218,12 +218,12 @@
                 <label class="text-sm font-medium text-[var(--text-secondary)]">{{ t('Provider') }} <span class="text-red-500">*</span></label>
                 <div class="grid grid-cols-3 gap-2">
                     <button 
-                        v-for="p in ['openai', 'anthropic', 'deepseek', 'google', 'meta', 'qwen', 'taichu', 'other']" 
+                        v-for="p in ['openai', 'anthropic', 'deepseek', 'gemini', 'glm', 'qwen', 'kimi', 'minimax', 'taichu', 'other']" 
                         :key="p"
                         type="button"
                         class="px-3 py-2 rounded-lg text-xs font-medium border transition-all capitalize flex items-center justify-center gap-1.5"
                         :class="form.provider === p ? 'bg-blue-50 border-blue-200 text-blue-700 ring-1 ring-blue-200' : 'bg-[var(--background-white-main)] border-[var(--border-main)] text-[var(--text-secondary)] hover:bg-[var(--fill-tsp-gray-main)]'"
-                        @click="form.provider = p"
+                        @click="selectProvider(p)"
                     >
                         <ProviderIcon :provider="p" class="size-4" />
                         {{ p }}
@@ -232,7 +232,7 @@
             </div>
 
             <!-- Display Name & Model Name -->
-            <div class="grid grid-cols-2 gap-4">
+            <div class="grid grid-cols-[2fr_3fr] gap-4">
                  <div class="grid gap-2">
                     <label class="text-sm font-medium text-[var(--text-secondary)]">{{ t('Display Name') }} <span class="text-red-500">*</span></label>
                     <input 
@@ -243,19 +243,55 @@
                 </div>
                 <div class="grid gap-2">
                     <label class="text-sm font-medium text-[var(--text-secondary)]">{{ t('Model ID') }} <span class="text-red-500">*</span></label>
-                    <input 
-                    v-model="form.model_name" 
+                    <div v-if="form.provider !== 'other' && providerModels.length > 0" class="relative" ref="dropdownRef">
+                        <button
+                            type="button"
+                            class="flex h-9 w-full items-center justify-between rounded-md border border-[var(--border-main)] bg-[var(--fill-input-chat)] px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--border-dark)]"
+                            @click="modelDropdownOpen = !modelDropdownOpen"
+                        >
+                            <span :class="form.model_name ? 'text-[var(--text-primary)]' : 'text-[var(--text-disable)]'">
+                                {{ form.model_name || t('Select a model') }}
+                            </span>
+                            <ChevronDown class="size-4 text-gray-400 shrink-0 transition-transform" :class="modelDropdownOpen && 'rotate-180'" />
+                        </button>
+                        <div v-if="modelDropdownOpen" class="absolute z-50 mt-1 w-full rounded-lg border border-[var(--border-main)] bg-white dark:bg-gray-800 shadow-lg overflow-hidden">
+                            <div class="max-h-48 overflow-y-auto py-1">
+                                <button
+                                    v-for="m in providerModels"
+                                    :key="m"
+                                    type="button"
+                                    class="flex w-full items-center px-3 py-2 text-sm hover:bg-blue-50 dark:hover:bg-blue-900/30 transition-colors"
+                                    :class="form.model_name === m ? 'bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 font-medium' : 'text-[var(--text-primary)]'"
+                                    @click="selectModel(m)"
+                                >
+                                    {{ m }}
+                                </button>
+                            </div>
+                            <div class="border-t border-[var(--border-light)] p-2">
+                                <input
+                                    v-model="customModelInput"
+                                    class="flex h-8 w-full rounded-md border border-[var(--border-main)] bg-[var(--fill-input-chat)] px-2 py-1 text-xs shadow-sm placeholder:text-[var(--text-disable)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--border-dark)]"
+                                    :placeholder="t('Enter other model')"
+                                    @keydown.enter.prevent="applyCustomModel"
+                                />
+                            </div>
+                        </div>
+                    </div>
+                    <input
+                    v-else
+                    v-model="form.model_name"
+                    @input="onModelSelect"
                     class="flex h-9 w-full rounded-md border border-[var(--border-main)] bg-[var(--fill-input-chat)] px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-[var(--text-disable)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--border-dark)] disabled:cursor-not-allowed disabled:opacity-50"
                     placeholder="e.g. gpt-4-turbo"
                     />
                 </div>
             </div>
 
-            <!-- Base URL -->
-            <div class="grid gap-2">
+            <!-- Base URL (hidden for Gemini — uses Google AI SDK directly) -->
+            <div v-if="form.provider !== 'gemini'" class="grid gap-2">
                 <label class="text-sm font-medium text-[var(--text-secondary)] flex items-center gap-1">
                     {{ t('Base URL') }}
-                    <span class="text-[10px] text-[var(--text-tertiary)] font-normal ml-auto" v-if="form.provider === 'openai'">Default: https://api.openai.com/v1</span>
+                    <span class="text-[10px] text-[var(--text-tertiary)] font-normal ml-auto" v-if="!form.base_url && form.provider !== 'other'">{{ t('Please fill in manually') }}</span>
                 </label>
                 <input 
                 v-model="form.base_url" 
@@ -330,9 +366,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, reactive, computed } from 'vue';
+import { ref, onMounted, onBeforeUnmount, reactive, computed } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { Plus, Pencil, Trash2, Loader2, Box, CheckCircle2, ShieldCheck, Globe, Key, Gift, Sparkles, ExternalLink, Radar } from 'lucide-vue-next';
+import { Plus, Pencil, Trash2, Loader2, Box, CheckCircle2, ShieldCheck, Globe, Key, Gift, Sparkles, ExternalLink, Radar, ChevronDown } from 'lucide-vue-next';
 import ProviderIcon from '../icons/ProviderIcon.vue';
 import { 
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter 
@@ -345,12 +381,70 @@ import { showSuccessToast, showErrorToast } from '@/utils/toast';
 
 const { t } = useI18n();
 
+const PROVIDER_CONFIG: Record<string, { base_url: string; models: string[] }> = {
+  openai: {
+    base_url: 'https://api.openai.com/v1',
+    models: [
+      'gpt-5.4', 'gpt-5.3', 'gpt-5.2', 'gpt-5.1', 'gpt-4.5',
+    ],
+  },
+  anthropic: {
+    base_url: 'https://api.anthropic.com/v1',
+    models: [
+      'Claude Opus 4.6', 'Claude Sonnet 4.6',
+      'Claude Opus 4.5', 'Claude Sonnet 4',
+      'Claude 3.7 Sonnet',
+    ],
+  },
+  deepseek: {
+    base_url: 'https://api.deepseek.com',
+    models: ['deepseek-chat', 'deepseek-reasoner'],
+  },
+  gemini: {
+    base_url: '',
+    models: [
+      'gemini-3.1-pro-preview', 'gemini-3.1-flash-preview', 'gemini-3.1-flash-lite-preview', 'gemini-3-deep-think-preview',
+    ],
+  },
+  glm: {
+    base_url: 'https://open.bigmodel.cn/api/paas/v4',
+    models: [
+      'GLM-5', 'GLM-4.7', 'GLM-4', 'GLM-3', 'ChatGLM3',
+    ],
+  },
+  qwen: {
+    base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    models: [
+      'Qwen3', 'Qwen2.5-72B', 'Qwen2.5-32B', 'Qwen2.5-14B', 'Qwen2.5-7B',
+    ],
+  },
+  kimi: {
+    base_url: 'https://api.moonshot.ai/v1',
+    models: [
+      'kimi-k2.5', 'kimi-k2-0905-preview', 'kimi-k2-turbo-preview', 'kimi-k2-0711-preview', 'kimi-k2-thinking', 'kimi-k2-thinking-turbo',
+    ],
+  },
+  minimax: {
+    base_url: 'https://api.minimax.chat/v1',
+    models: [
+      'MiniMax-M1', 'MiniMax-T1', 'abab6.5s', 'abab6.5', 'abab5.5',
+    ],
+  },
+  taichu: {
+    base_url: '',
+    models: ['taichu_llm'],
+  },
+};
+
 const models = ref<ModelConfig[]>([]);
 const loading = ref(false);
 const saving = ref(false);
 const detecting = ref(false);
 const isEditOpen = ref(false);
 const editingModel = ref<ModelConfig | null>(null);
+const modelDropdownOpen = ref(false);
+const customModelInput = ref('');
+const dropdownRef = ref<HTMLElement | null>(null);
 
 const form = reactive({
   name: '',
@@ -363,6 +457,54 @@ const form = reactive({
 
 const systemModels = computed(() => models.value.filter(m => m.is_system));
 const userModels = computed(() => models.value.filter(m => !m.is_system));
+
+const providerModels = computed(() => {
+  const config = PROVIDER_CONFIG[form.provider];
+  return config?.models || [];
+});
+
+const selectProvider = (p: string) => {
+  form.provider = p;
+  modelDropdownOpen.value = false;
+  customModelInput.value = '';
+  if (p !== 'other') {
+    const config = PROVIDER_CONFIG[p];
+    if (config) {
+      form.base_url = config.base_url;
+      const first = config.models[0] || '';
+      form.model_name = first;
+      form.name = first;
+    }
+  }
+};
+
+const onModelSelect = () => {
+  if (form.model_name && (!form.name || providerModels.value.includes(form.name))) {
+    form.name = form.model_name;
+  }
+};
+
+const selectModel = (m: string) => {
+  form.model_name = m;
+  form.name = m;
+  modelDropdownOpen.value = false;
+  customModelInput.value = '';
+};
+
+const applyCustomModel = () => {
+  const val = customModelInput.value.trim();
+  if (!val) return;
+  form.model_name = val;
+  form.name = val;
+  modelDropdownOpen.value = false;
+  customModelInput.value = '';
+};
+
+const onClickOutside = (e: MouseEvent) => {
+  if (dropdownRef.value && !dropdownRef.value.contains(e.target as Node)) {
+    modelDropdownOpen.value = false;
+  }
+};
 
 const fetchModels = async () => {
   loading.value = true;
@@ -386,10 +528,12 @@ const openEditModal = (model: ModelConfig | null) => {
     form.api_key = '';
     form.context_window = model.context_window ?? null;
   } else {
-    form.name = '';
-    form.provider = 'openai';
-    form.model_name = '';
-    form.base_url = '';
+    const defaultProvider = 'openai';
+    const firstModel = PROVIDER_CONFIG[defaultProvider]?.models[0] || '';
+    form.name = firstModel;
+    form.provider = defaultProvider;
+    form.model_name = firstModel;
+    form.base_url = PROVIDER_CONFIG[defaultProvider]?.base_url || '';
     form.api_key = '';
     form.context_window = null;
   }
@@ -435,12 +579,8 @@ const saveModel = async () => {
     await fetchModels();
   } catch (err: any) {
     console.error(err);
-    // Backend returns 400 for verification failure
-    if (err.response?.data?.detail) {
-        showErrorToast(t('Verification Failed') + ': ' + err.response.data.detail);
-    } else {
-        showErrorToast(t('Operation failed'));
-    }
+    const detail = err.response?.data?.detail || err.response?.data?.message || err.message || String(err);
+    showErrorToast(t('Operation failed') + ': ' + detail);
   } finally {
     saving.value = false;
   }
@@ -485,5 +625,10 @@ const confirmDelete = async (model: ModelConfig) => {
 
 onMounted(() => {
   fetchModels();
+  document.addEventListener('click', onClickOutside);
+});
+
+onBeforeUnmount(() => {
+  document.removeEventListener('click', onClickOutside);
 });
 </script>

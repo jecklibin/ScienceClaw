@@ -217,7 +217,7 @@ apiClient.interceptors.response.use(
           apiError.code = data.code;
           apiError.message = data.msg;
         } else {
-          apiError.message = data.message || error.response.statusText || 'Request failed';
+          apiError.message = data.detail || data.message || error.response.statusText || 'Request failed';
         }
         apiError.details = data;
       } else {

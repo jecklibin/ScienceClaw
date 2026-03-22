@@ -71,6 +71,25 @@ try:
 except Exception as e:
     logger.warning(f"[Engine] Failed to patch langchain-openai for reasoning_content: {e}")
 
+
+def _create_gemini_model(
+    model_name: str,
+    api_key: str,
+    max_tokens: int,
+    streaming: bool,
+    extra_kwargs: Dict[str, Any],
+) -> BaseChatModel:
+    """Create a ChatGoogleGenerativeAI instance for Gemini models."""
+    from langchain_google_genai import ChatGoogleGenerativeAI
+
+    return ChatGoogleGenerativeAI(
+        model=model_name,
+        google_api_key=api_key,
+        max_output_tokens=max_tokens,
+        max_retries=3,
+        timeout=120,
+    )
+
 # model_name 子串 → context window (tokens)
 # 匹配顺序：从上到下，先匹配先生效（更具体的模式放前面）
 # 最后更新：2026-03
@@ -162,7 +181,13 @@ _KNOWN_CONTEXT_WINDOWS: list[tuple[str, int]] = [
     ("llama-3.1",               131_072),
     ("llama-3",                 8_192),
     # ── Moonshot / Kimi ──
-    ("kimi-k2",                 256_000),
+    ("kimi-k2.5",                 256_000),
+    ("kimi-k2-0905-preview",      256_000),
+    ("kimi-k2-turbo-preview",     256_000),
+    ("kimi-k2-thinking-turbo",    256_000),
+    ("kimi-k2-thinking",          256_000),
+    ("kimi-k2-0711-preview",      128_000),
+    ("kimi-k2",                   128_000),
     ("kimi",                    128_000),
     ("moonshot-v1-128k",        128_000),
     ("moonshot-v1-32k",         32_000),
@@ -348,11 +373,12 @@ class _SafeChatOpenAI(ChatOpenAI):
             yield chunk
 
 
-def _apply_profile(model: ChatOpenAI, context_window: int) -> ChatOpenAI:
+def _apply_profile(model: BaseChatModel, context_window: int) -> BaseChatModel:
     """Set model profile so deepagents SummarizationMiddleware can auto-compute
     context window thresholds (trigger / keep) using fraction-based settings."""
-    if not model.profile or "max_input_tokens" not in model.profile:
-        model.profile = {"max_input_tokens": context_window}
+    if hasattr(model, "profile"):
+        if not model.profile or "max_input_tokens" not in model.profile:
+            model.profile = {"max_input_tokens": context_window}
     return model
 
 
@@ -380,10 +406,23 @@ def get_llm_model(
 
     if config:
         model_name = config.get("model_name", settings.model_ds_name)
+        provider = config.get("provider", "")
         ctx_window = _resolve_context_window(
             model_name,
             explicit=config.get("context_window"),
         )
+
+        if provider == "gemini":
+            api_key = config.get("api_key") or settings.model_ds_api_key
+            model = _create_gemini_model(
+                model_name=model_name,
+                api_key=api_key,
+                max_tokens=effective_max_tokens,
+                streaming=streaming,
+                extra_kwargs=extra_kwargs,
+            )
+            return _apply_profile(model, ctx_window)
+
         model = _SafeChatOpenAI(
             model=model_name,
             base_url=config.get("base_url") or settings.model_ds_base_url,

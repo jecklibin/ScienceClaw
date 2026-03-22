@@ -23,10 +23,12 @@ const iconSrc = computed(() => {
   if (p === 'openai') return '/openai.svg';
   if (p === 'anthropic') return '/anthropic.svg';
   if (p === 'deepseek') return '/deepseek-color.svg';
-  if (p === 'google') return '/google-color.svg';
-  if (p === 'meta') return '/meta-color.svg';
+  if (p === 'google' || p === 'gemini') return '/gemini-color.svg';
   if (p === 'qwen' || p === 'alibaba') return '/qwen-color.svg';
+  if (p === 'kimi' || p === 'moonshot') return '/kimi-color.svg';
+  if (p === 'minimax') return '/minimax-color.svg';
   if (p === 'taichu' || p === 'aimass') return '/taichu-color.svg';
+  if (p === 'glm' || p === 'zhipu') return '/glm-color.svg';
   return null;
 });
 </script>

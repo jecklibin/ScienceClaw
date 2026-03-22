@@ -18,6 +18,7 @@ export interface ChatRequest {
   event_id?: string;
   attachments?: string[];
   language?: string;
+  model_config_id?: string;
 }
 
 export async function createSession(data: CreateSessionRequest): Promise<Session> {

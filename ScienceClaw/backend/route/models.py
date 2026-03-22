@@ -22,26 +22,71 @@ async def verify_model_connection(provider: str, base_url: str | None, api_key: 
     """
     Verify model availability by making a simple request.
     """
+    logger.info(f"[verify_model] provider={provider}, model_name={model_name}, base_url={base_url}, has_api_key={bool(api_key)}")
     try:
-        # Construct ChatOpenAI (supports OpenAI-compatible APIs like DeepSeek, Qwen etc.)
-        # Ensure we have minimal config
         if not api_key:
             raise ValueError("API Key is required for verification")
+
+        if provider == "gemini":
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            logger.info("[verify_model] Using ChatGoogleGenerativeAI for Gemini")
+            chat = ChatGoogleGenerativeAI(
+                model=model_name,
+                google_api_key=api_key,
+                max_output_tokens=5,
+                timeout=10,
+            )
+        else:
+            logger.info(f"[verify_model] Using ChatOpenAI, base_url={base_url or '(default)'}")
+            chat = ChatOpenAI(
+                model=model_name,
+                api_key=api_key,
+                base_url=base_url if base_url else None,
+                max_tokens=5,
+                timeout=10,
+            )
         
-        chat = ChatOpenAI(
-            model=model_name,
-            api_key=api_key,
-            base_url=base_url if base_url else None,
-            max_tokens=5,
-            timeout=10 # Short timeout
-        )
-        
-        # Invoke a simple "Hello"
+        logger.info("[verify_model] Sending test message...")
         await chat.ainvoke([HumanMessage(content="Hi")])
+        logger.info("[verify_model] Verification succeeded")
         return True
+    except HTTPException:
+        raise
     except Exception as e:
-        # Log the error if needed
-        raise HTTPException(status_code=400, detail=f"Model verification failed: {str(e)}")
+        logger.error(f"[verify_model] Verification failed: {type(e).__name__}: {e}")
+        detail = _extract_api_error(e)
+        raise HTTPException(status_code=400, detail=detail)
+
+
+def _extract_api_error(e: Exception) -> str:
+    """Extract the original API error message from provider SDK exceptions."""
+    import json as _json
+
+    # openai SDK errors (NotFoundError, AuthenticationError, etc.) have a `body` dict
+    body = getattr(e, 'body', None)
+    if isinstance(body, dict):
+        err_obj = body.get('error', body)
+        if isinstance(err_obj, dict):
+            msg = err_obj.get('message') or err_obj.get('msg')
+            err_type = err_obj.get('type', '')
+            if msg:
+                return f"{msg} ({err_type})" if err_type else str(msg)
+
+    # Some SDKs attach a `response` object with the raw HTTP body
+    resp = getattr(e, 'response', None)
+    if resp is not None:
+        try:
+            text = resp.text if hasattr(resp, 'text') else str(resp)
+            data = _json.loads(text)
+            err_obj = data.get('error', data)
+            if isinstance(err_obj, dict):
+                msg = err_obj.get('message') or err_obj.get('msg')
+                if msg:
+                    return str(msg)
+        except Exception:
+            pass
+
+    return str(e)
 
 @router.get("", response_model=ApiResponse)
 async def list_models(current_user: User = Depends(require_user)):
@@ -58,7 +103,8 @@ async def list_models(current_user: User = Depends(require_user)):
 @router.post("", response_model=ApiResponse)
 async def create_model(body: CreateModelRequest, current_user: User = Depends(require_user)):
     """Add a user defined model"""
-    # Verify first
+    logger.info(f"[create_model] provider={body.provider}, model_name={body.model_name}, "
+                f"name={body.name}, base_url={body.base_url}, has_api_key={bool(body.api_key)}")
     await verify_model_connection(body.provider, body.base_url, body.api_key, body.model_name)
 
     model_id = str(uuid.uuid4())
@@ -117,6 +163,26 @@ async def _probe_context_window_via_api(base_url: str | None, api_key: str | Non
     return None
 
 
+async def _probe_gemini_context_window(api_key: str | None, model_name: str) -> int | None:
+    """Probe context window via Google Generative AI API."""
+    if not api_key:
+        return None
+    import httpx
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}?key={api_key}"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url)
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            val = data.get("inputTokenLimit")
+            if isinstance(val, int) and val >= 1024:
+                return val
+    except Exception:
+        pass
+    return None
+
+
 @router.post("/detect-context-window", response_model=ApiResponse)
 async def detect_context_window(body: DetectContextWindowRequest, current_user: User = Depends(require_user)):
     """Detect context window: try local table first, then probe via API."""
@@ -134,7 +200,10 @@ async def detect_context_window(body: DetectContextWindowRequest, current_user: 
             api_key = api_key or existing.get("api_key")
             base_url = base_url or existing.get("base_url")
 
-    probed = await _probe_context_window_via_api(base_url, api_key, body.model_name)
+    if body.provider == "gemini":
+        probed = await _probe_gemini_context_window(api_key, body.model_name)
+    else:
+        probed = await _probe_context_window_via_api(base_url, api_key, body.model_name)
     if probed is not None:
         return ApiResponse(data={"context_window": probed, "source": "api"})
 

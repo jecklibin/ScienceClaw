@@ -952,6 +952,7 @@ const chat = async (message: string = '', files: FileInfo[] = [], reconnect: boo
         event_id: lastEventId.value,
         attachments: files.map((file: FileInfo) => file.file_id),
         language: locale.value,
+        model_config_id: selectedModelId.value || undefined,
       },
       {
         onOpen: () => {
