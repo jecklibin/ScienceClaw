@@ -504,13 +504,55 @@ page.on("load", on_load)
 # Start on about:blank — let user decide where to go
 page.goto("about:blank")
 
+# ── Command file execution (for AI assistant) ───────────────────────
+import traceback as _tb
+
+def _execute_command(page, cmd_path, result_path):
+    """Execute a command file and write result."""
+    try:
+        code = open(cmd_path, 'r', encoding='utf-8').read()
+        os.remove(cmd_path)
+    except Exception:
+        return
+
+    # Pause event capture during AI script execution
+    try:
+        page.evaluate("window.__rpa_paused = true")
+    except Exception:
+        pass
+
+    result = {"success": False, "output": "", "error": None}
+    try:
+        ns = {"page": page, "os": os, "json": json}
+        exec(code, ns)
+        if "run" in ns and callable(ns["run"]):
+            ret = ns["run"](page)
+            result = {"success": True, "output": str(ret) if ret else "ok", "error": None}
+        else:
+            result = {"success": False, "output": "", "error": "No run(page) function defined"}
+    except Exception as e:
+        result = {"success": False, "output": "", "error": _tb.format_exc()}
+
+    # Resume event capture
+    try:
+        page.evaluate("window.__rpa_paused = false")
+    except Exception:
+        pass
+
+    with open(result_path, 'w', encoding='utf-8') as f:
+        json.dump(result, f)
+
+CMD_PATH = "/tmp/rpa_command.py"
+CMD_RESULT_PATH = "/tmp/rpa_command_result.json"
+
 print("READY", flush=True)
 
-# Keep alive — use page.wait_for_timeout instead of time.sleep
-# so Playwright's event loop keeps processing expose_function callbacks
+# Main loop — process commands and keep Playwright event loop alive
 try:
     while True:
-        page.wait_for_timeout(1000)
+        if os.path.exists(CMD_PATH):
+            _execute_command(page, CMD_PATH, CMD_RESULT_PATH)
+        page.wait_for_timeout(500)
 except KeyboardInterrupt:
     browser.close()
     p.stop()
