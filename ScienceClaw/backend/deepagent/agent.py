@@ -71,6 +71,8 @@ _BUILTIN_SKILLS_DIR = os.environ.get("BUILTIN_SKILLS_DIR", "/app/builtin_skills"
 _BUILTIN_SKILLS_ROUTE = "/builtin-skills/"
 _EXTERNAL_SKILLS_ROUTE = "/skills/"
 _WORKSPACE_DIR = os.environ.get("WORKSPACE_DIR", "/home/scienceclaw")
+_SKILLS_SUBDIR = ".skills"  # session-local skill files for sandbox execution
+_SANDBOX_WORKSPACE_DIR = os.environ.get("SANDBOX_WORKSPACE_DIR", "/home/scienceclaw")  # 沙箱内 workspace 路径（与后端共享卷）
 
 # ───────────────────────────────────────────────────────────────────
 # Backend 构建
@@ -108,6 +110,51 @@ def _build_backend(session_id: str, sandbox: FullSandboxBackend,
         return sandbox
 
 
+async def _inject_skills_to_sandbox(
+    sandbox: FullSandboxBackend,
+    workspace: str,
+    user_id: str,
+    blocked_skills: Set[str],
+) -> int:
+    """将用户的 MongoDB 技能文件写入沙箱 {workspace}/.skills/{name}/ 目录。
+
+    这样 agent 执行 skill.py 时可以在沙箱文件系统中找到文件。
+    返回成功注入的技能数量。
+    """
+    from backend.mongodb.db import db as _db
+
+    col = _db.get_collection("skills")
+    filt = {"user_id": user_id, "blocked": {"$ne": True}}
+    if blocked_skills:
+        filt["name"] = {"$nin": list(blocked_skills)}
+
+    skills_dir = f"{workspace}/{_SKILLS_SUBDIR}"
+    injected = 0
+
+    async for doc in col.find(filt, {"name": 1, "files": 1}):
+        skill_name = doc.get("name", "")
+        files = doc.get("files", {})
+        if not skill_name or not files:
+            continue
+
+        for fname, content in files.items():
+            if not content:
+                continue
+            file_path = f"{skills_dir}/{skill_name}/{fname}"
+            try:
+                result = await sandbox.awrite(file_path, content)
+                if hasattr(result, "error") and result.error:
+                    logger.warning(f"[Skills] 注入失败 {file_path}: {result.error}")
+            except Exception as exc:
+                logger.warning(f"[Skills] 注入失败 {file_path}: {exc}")
+
+        injected += 1
+
+    if injected:
+        logger.info(f"[Skills] 已注入 {injected} 个技能到沙箱 {skills_dir}/")
+    return injected
+
+
 # ───────────────────────────────────────────────────────────────────
 # 系统提示词
 # ───────────────────────────────────────────────────────────────────
@@ -128,6 +175,7 @@ Always respond in {language_instruction}.
 - **Skill-first approach**: ALWAYS check available skills (`/builtin-skills/` and `/skills/`) before starting any task. If a skill matches, `read_file` its SKILL.md and follow the workflow. Do NOT reinvent what a skill already provides.
 - **Research tasks**: When the user's request involves research, reports, reviews, surveys, literature analysis, discoveries, or any deep investigation topic, ALWAYS check and consider `/skills/deep-research/SKILL.md` first.
 - **SKILL.md files are instruction documents** — use `read_file` to read them, NEVER `execute` them as scripts.
+- **Executing skill scripts**: When a skill contains executable files (e.g., `skill.py`), they are available in your workspace at `{workspace_dir}/.skills/<skill_name>/`. Use this absolute path when running skill scripts via `execute`. Example: `execute("python3 {workspace_dir}/.skills/my-skill/skill.py")`.
 - Solve problems proactively. Only ask questions when the intent or requirements are truly unclear.
 
 ## Workspace
@@ -346,30 +394,43 @@ async def deep_agent(
         session_id=session_id,
         user_id=user_id or "default_user",
         base_dir=_WORKSPACE_DIR,
+        sandbox_base_dir=_SANDBOX_WORKSPACE_DIR,
         execute_timeout=ts.sandbox_exec_timeout,
         max_output_chars=ts.max_output_chars,
     )
-    
+
     sandbox_info = None
-    actual_workspace = sandbox.workspace  # /home/scienceclaw/{session_id}（与后端共享卷）
+    # sandbox_workspace: 沙箱内路径（如 /home/scienceclaw/{sid}），用于 system prompt、exec_dir
+    # local_workspace:   backend 本地路径（如 D:\...\workspace\{sid}），用于本地文件 I/O
+    sandbox_workspace = sandbox.workspace
+    local_workspace = os.path.join(_WORKSPACE_DIR, session_id)
     
     ctx = await sandbox.get_context()
     if ctx.get("success"):
         sandbox_info = ctx.get("data")
+
+    # 1.5 将用户技能文件注入沙箱（使 execute 能找到 skill.py）
+    if user_id:
+        try:
+            await _inject_skills_to_sandbox(
+                sandbox, sandbox_workspace, user_id, blocked_skills,
+            )
+        except Exception as exc:
+            logger.warning(f"[Skills] 技能注入沙箱失败: {exc}")
 
     # 2. 构建复合后端（可能包含 Skills 路由）
     backend = _build_backend(session_id, sandbox, user_id=user_id, blocked_skills=blocked_skills)
 
     # 工具结果自动落盘中间件：大型工具结果写入文件，Agent 按需 read_file 读取
     offload_middleware = ToolResultOffloadMiddleware(
-        workspace_dir=actual_workspace,
+        workspace_dir=sandbox_workspace,
         backend=sandbox,
     )
 
     # ── 诊断模式：记录 LLM 每步看到的完整上下文 ──
     diag: Optional[DiagnosticLogger] = None
     if diagnostic_enabled:
-        diag = DiagnosticLogger(actual_workspace, session_id)
+        diag = DiagnosticLogger(local_workspace, session_id)
         offload_middleware._diagnostic = diag
 
     # 中间件执行顺序：offload（修改结果）→ SSE（监控记录）
@@ -381,7 +442,7 @@ async def deep_agent(
     }
 
     # 4. 注入系统提示词
-    system_prompt = get_system_prompt(actual_workspace, sandbox_info, language=language)
+    system_prompt = get_system_prompt(sandbox_workspace, sandbox_info, language=language)
     agent_kwargs["system_prompt"] = system_prompt
 
     if diag:
@@ -415,7 +476,7 @@ async def deep_agent(
                     "## Notes\n")
         logger.info(f"[Memory] 初始化全局 Memory: {_global_mem}")
 
-    _session_mem = os.path.join(actual_workspace, "CONTEXT.md")
+    _session_mem = os.path.join(local_workspace, "CONTEXT.md")
     if not os.path.isfile(_session_mem):
         with open(_session_mem, "w") as f:
             f.write("# Session Context (this session only)\n\n"
@@ -452,12 +513,13 @@ async def deep_agent(
     # 使子 agent 在处理 skill/tool 相关任务时遵循相同的工作流。
     _subagent_policy = f"""\n
 ## Workspace
-Your workspace directory is {actual_workspace}/.
+Your workspace directory is {sandbox_workspace}/.
 All files should be created under this directory using absolute paths.
 SKILL.md files are instruction documents — use `read_file` to read them, NEVER `execute` them.
+When a skill contains executable files (e.g., skill.py), use the sandbox-local path: `{sandbox_workspace}/.skills/<skill_name>/skill.py`.
 
 ## Skills CLI (CRITICAL)
-NEVER use `npx skills`. Use `skills` directly. When installing: `HOME={actual_workspace} skills add <package> -g -y --agent '*'`. ALL flags are mandatory — omitting any will hang on interactive prompts.
+NEVER use `npx skills`. Use `skills` directly. When installing: `HOME={sandbox_workspace} skills add <package> -g -y --agent '*'`. ALL flags are mandatory — omitting any will hang on interactive prompts.
 
 ## Task Resources
 - **Existing skill?** → `read_file` the SKILL.md and follow it. Check `/skills/` for local installs first.
@@ -477,7 +539,7 @@ Always use `write_file` to workspace then `propose_skill_save` / `propose_tool_s
     GENERAL_PURPOSE_SUBAGENT["system_prompt"] = DEFAULT_SUBAGENT_PROMPT
 
     logger.info(
-        f"[Agent] session={session_id}, workspace={actual_workspace}, "
+        f"[Agent] session={session_id}, workspace={sandbox_workspace}, "
         f"middleware={sse_middleware.agent_name}, context_window={context_window:,}"
         f"{', diagnostic=ON' if diag else ''}"
     )
@@ -518,17 +580,18 @@ async def deep_agent_eval(
         session_id=session_id,
         user_id="eval_runner",
         base_dir=_WORKSPACE_DIR,
+        sandbox_base_dir=_SANDBOX_WORKSPACE_DIR,
         execute_timeout=ts.sandbox_exec_timeout,
         max_output_chars=ts.max_output_chars,
     )
 
-    actual_workspace = sandbox.workspace
+    sandbox_workspace = sandbox.workspace
     sandbox_info = None
     ctx = await sandbox.get_context()
     if ctx.get("success"):
         sandbox_info = ctx.get("data")
 
-    system_prompt = _get_eval_system_prompt(actual_workspace, sandbox_info)
+    system_prompt = _get_eval_system_prompt(sandbox_workspace, sandbox_info)
 
     agent_kwargs: Dict[str, Any] = {
         "model": model,
@@ -570,5 +633,5 @@ async def deep_agent_eval(
         agent_kwargs["skills"] = resolved_sources
 
     agent = create_deep_agent(**agent_kwargs)
-    logger.info(f"[EvalAgent] session={session_id}, workspace={actual_workspace}, skills={resolved_sources}")
+    logger.info(f"[EvalAgent] session={session_id}, workspace={sandbox_workspace}, skills={resolved_sources}")
     return agent, middleware

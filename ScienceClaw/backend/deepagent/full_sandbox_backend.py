@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 _SANDBOX_URL = os.environ.get("SANDBOX_REST_URL", "http://localhost:18080").rstrip("/")
 _BASE_WORKSPACE = os.environ.get("WORKSPACE_DIR", "/home/scienceclaw")
+_SANDBOX_WORKSPACE = os.environ.get("SANDBOX_WORKSPACE_DIR", "/home/scienceclaw")
 _EXECUTE_TIMEOUT = 600
 _MAX_OUTPUT_CHARS = 50000
 _CIRCUIT_BREAKER_THRESHOLD = 3
@@ -95,6 +96,7 @@ class FullSandboxBackend(SandboxBackendProtocol):
         user_id: str,
         sandbox_url: str = _SANDBOX_URL,
         base_dir: str = _BASE_WORKSPACE,
+        sandbox_base_dir: str = _SANDBOX_WORKSPACE,
         execute_timeout: int = _EXECUTE_TIMEOUT,
         max_output_chars: int = _MAX_OUTPUT_CHARS,
     ) -> None:
@@ -102,7 +104,9 @@ class FullSandboxBackend(SandboxBackendProtocol):
         self._user_id = user_id
         self._sandbox_url = sandbox_url
         self._base_dir = base_dir
-        self._remote_workspace = os.path.join(base_dir, session_id)
+        # _remote_workspace 是沙箱内的路径，用于 exec_dir / system prompt 等
+        # 当 backend 与 sandbox 不共享文件系统时，这个路径与 base_dir 不同
+        self._remote_workspace = f"{sandbox_base_dir}/{session_id}"
         self._execute_timeout = execute_timeout
         self._max_output_chars = max_output_chars
         self._shell_session_id: Optional[str] = None
