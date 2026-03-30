@@ -1,48 +1,42 @@
-import logging
-import os
 import json
-from typing import List, Dict, Any
+import logging
+from datetime import datetime, timezone
+from typing import Dict, Any
+
+from backend.mongodb.db import db
 
 logger = logging.getLogger(__name__)
 
-# Same directory used by the skills API in route/sessions.py
-_EXTERNAL_SKILLS_DIR = os.environ.get("EXTERNAL_SKILLS_DIR", "/app/Skills")
 
 class SkillExporter:
-    """Export recorded skills to MCP format"""
+    """Export recorded RPA skills to MongoDB."""
 
-    def __init__(self, workspace_path: str = None):
-        self.workspace_path = workspace_path or _EXTERNAL_SKILLS_DIR
-        os.makedirs(self.workspace_path, exist_ok=True)
-
-    def export_skill(
+    async def export_skill(
         self,
+        user_id: str,
         skill_name: str,
         description: str,
         script: str,
-        params: Dict[str, Any]
+        params: Dict[str, Any],
     ) -> str:
-        """Export skill as MCP tool"""
+        """Export skill to MongoDB skills collection.
 
-        skill_dir = os.path.join(self.workspace_path, skill_name)
-        os.makedirs(skill_dir, exist_ok=True)
-
+        Returns the skill name on success.
+        """
         # Generate input schema
         input_schema = {
             "type": "object",
             "properties": {},
-            "required": []
+            "required": [],
         }
-
         for param_name, param_info in params.items():
             input_schema["properties"][param_name] = {
                 "type": param_info.get("type", "string"),
-                "description": param_info.get("description", "")
+                "description": param_info.get("description", ""),
             }
             if param_info.get("required", False):
                 input_schema["required"].append(param_name)
 
-        # Create SKILL.md with YAML front-matter (required by skills API)
         skill_md = f"""---
 name: {skill_name}
 description: {description}
@@ -63,14 +57,30 @@ description: {description}
 See `skill.py` for the Playwright implementation.
 """
 
-        skill_md_path = os.path.join(skill_dir, "SKILL.md")
-        with open(skill_md_path, "w", encoding="utf-8") as f:
-            f.write(skill_md)
+        now = datetime.now(timezone.utc)
+        col = db.get_collection("skills")
+        await col.update_one(
+            {"user_id": user_id, "name": skill_name},
+            {
+                "$set": {
+                    "files": {
+                        "SKILL.md": skill_md,
+                        "skill.py": script,
+                    },
+                    "description": description,
+                    "params": params,
+                    "updated_at": now,
+                },
+                "$setOnInsert": {
+                    "user_id": user_id,
+                    "name": skill_name,
+                    "source": "rpa",
+                    "blocked": False,
+                    "created_at": now,
+                },
+            },
+            upsert=True,
+        )
 
-        # Save script
-        script_path = os.path.join(skill_dir, "skill.py")
-        with open(script_path, "w", encoding="utf-8") as f:
-            f.write(script)
-
-        logger.info(f"Skill exported to {skill_dir}")
-        return skill_dir
+        logger.info(f"Skill '{skill_name}' exported to MongoDB for user {user_id}")
+        return skill_name

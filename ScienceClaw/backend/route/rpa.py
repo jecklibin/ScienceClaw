@@ -159,15 +159,16 @@ async def save_skill(
     steps = [step.model_dump() for step in session.steps]
     script = generator.generate_script(steps, request.params)
 
-    skill_dir = exporter.export_skill(
-        request.skill_name,
-        request.description,
-        script,
-        request.params,
+    skill_name = await exporter.export_skill(
+        user_id=str(current_user.id),
+        skill_name=request.skill_name,
+        description=request.description,
+        script=script,
+        params=request.params,
     )
 
     session.status = "saved"
-    return {"status": "success", "skill_dir": skill_dir}
+    return {"status": "success", "skill_name": skill_name}
 
 
 @router.post("/session/{session_id}/chat")
