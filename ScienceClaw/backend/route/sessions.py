@@ -764,20 +764,26 @@ async def list_skills(current_user: User = Depends(require_user)) -> ApiResponse
     """列出所有 skills（内置排前面，不可屏蔽/删除）+ 外置 skills。"""
     try:
         builtin = _list_skill_dirs(_BUILTIN_SKILLS_DIR, builtin=True)
-        external = _list_skill_dirs(_EXTERNAL_SKILLS_DIR, builtin=False)
 
-        col = _db.get_collection("blocked_skills")
-        blocked_docs = col.find({"user_id": current_user.id}, {"skill_name": 1})
-        blocked_names: set = set()
-        async for doc in blocked_docs:
-            name = doc.get("skill_name")
-            if name:
-                blocked_names.add(name)
+        # User's external skills from MongoDB
+        col = _db.get_collection("skills")
+        cursor = col.find(
+            {"user_id": current_user.id},
+            {"name": 1, "description": 1, "files": 1, "blocked": 1}
+        )
+        external = []
+        async for doc in cursor:
+            files = list(doc.get("files", {}).keys())
+            external.append({
+                "name": doc.get("name", ""),
+                "description": doc.get("description", ""),
+                "files": files,
+                "builtin": False,
+                "blocked": doc.get("blocked", False),
+            })
 
         for s in builtin:
             s["blocked"] = False
-        for s in external:
-            s["blocked"] = s["name"] in blocked_names
 
         return ApiResponse(data=builtin + external)
     except Exception as exc:
@@ -793,13 +799,16 @@ async def toggle_block_skill(
 ) -> ApiResponse:
     """屏蔽或取消屏蔽一个外置 skill。"""
     try:
-        col = _db.get_collection("blocked_skills")
-        filt = {"user_id": current_user.id, "skill_name": skill_name}
-        if body.blocked:
-            await col.update_one(filt, {"$set": filt}, upsert=True)
-        else:
-            await col.delete_one(filt)
+        col = _db.get_collection("skills")
+        result = await col.update_one(
+            {"user_id": current_user.id, "name": skill_name},
+            {"$set": {"blocked": body.blocked}},
+        )
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
         return ApiResponse(data={"skill_name": skill_name, "blocked": body.blocked})
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("toggle_block_skill failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -810,18 +819,14 @@ async def delete_skill(
     skill_name: str,
     current_user: User = Depends(require_user),
 ) -> ApiResponse:
-    """彻底删除一个外置 skill 目录。"""
+    """彻底删除一个外置 skill。"""
     try:
-        skill_path = _Path(_EXTERNAL_SKILLS_DIR) / skill_name
-        if not skill_path.is_dir():
+        col = _db.get_collection("skills")
+        result = await col.delete_one(
+            {"user_id": current_user.id, "name": skill_name}
+        )
+        if result.deleted_count == 0:
             raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
-        resolved = skill_path.resolve()
-        base_resolved = _Path(_EXTERNAL_SKILLS_DIR).resolve()
-        if not str(resolved).startswith(str(base_resolved)):
-            raise HTTPException(status_code=403, detail="Invalid skill path")
-        shutil.rmtree(resolved)
-        col = _db.get_collection("blocked_skills")
-        await col.delete_many({"skill_name": skill_name})
         return ApiResponse(data={"skill_name": skill_name, "deleted": True})
     except HTTPException:
         raise
@@ -840,7 +845,7 @@ async def save_skill_from_session(
     body: SaveSkillRequest,
     current_user: User = Depends(require_user),
 ) -> ApiResponse:
-    """Copy a skill from the session workspace to the permanent Skills directory."""
+    """Save a skill from session workspace to MongoDB."""
     try:
         session = await async_get_science_session(session_id)
         if session.user_id != current_user.id:
@@ -861,16 +866,16 @@ async def save_skill_from_session(
             None,
         )
 
-        dst = _Path(_EXTERNAL_SKILLS_DIR) / skill_name
+        col = _db.get_collection("skills")
 
         if src is None:
-            # Agent 可能直接编辑了 /skills/ 目录下的已有 skill（in-place 编辑），
-            # 此时 workspace 里没有副本，但 /skills/ 已经是最新版本
-            if dst.is_dir() and (dst / "SKILL.md").is_file():
-                logger.info(
-                    f"[Skills] Skill '{skill_name}' not in workspace but already exists "
-                    f"in {dst}, treating as in-place update"
-                )
+            # Agent 可能通过 MongoSkillBackend 直接写入了 MongoDB（in-place 编辑），
+            # 此时 workspace 里没有副本，但 MongoDB 已经是最新版本
+            existing = await col.find_one(
+                {"user_id": current_user.id, "name": skill_name},
+                {"_id": 1}
+            )
+            if existing:
                 return ApiResponse(data={"skill_name": skill_name, "saved": True})
             raise HTTPException(
                 status_code=404,
@@ -878,11 +883,51 @@ async def save_skill_from_session(
                        f"(checked .agents/skills/, skills/, and {skill_name}/)",
             )
 
-        if dst.exists():
-            shutil.rmtree(dst)
-        shutil.copytree(src, dst)
+        # Read all files from the skill directory
+        files = {}
+        for fp in src.rglob("*"):
+            if fp.is_file():
+                rel = str(fp.relative_to(src))
+                try:
+                    files[rel] = fp.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
 
-        logger.info(f"[Skills] Saved skill '{skill_name}' from session {session_id} to {dst}")
+        # Parse description from SKILL.md frontmatter
+        description = ""
+        skill_md = files.get("SKILL.md", "")
+        fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", skill_md, re.DOTALL)
+        if fm_match:
+            try:
+                fm = _yaml.safe_load(fm_match.group(1))
+                if isinstance(fm, dict):
+                    description = fm.get("description", "")
+            except Exception:
+                pass
+
+        # Upsert to MongoDB
+        now = datetime.now(timezone.utc)
+        await col.update_one(
+            {"user_id": current_user.id, "name": skill_name},
+            {
+                "$set": {
+                    "files": files,
+                    "description": description,
+                    "updated_at": now,
+                },
+                "$setOnInsert": {
+                    "user_id": current_user.id,
+                    "name": skill_name,
+                    "source": "agent",
+                    "blocked": False,
+                    "params": {},
+                    "created_at": now,
+                },
+            },
+            upsert=True,
+        )
+
+        logger.info(f"[Skills] Saved skill '{skill_name}' from session {session_id} to MongoDB")
         return ApiResponse(data={"skill_name": skill_name, "saved": True})
     except ScienceSessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -901,24 +946,20 @@ async def list_skill_files(
 ) -> ApiResponse:
     """列出某个外置 skill 内部的文件结构。"""
     try:
-        skill_path = _Path(_EXTERNAL_SKILLS_DIR) / skill_name
-        if not skill_path.is_dir():
+        col = _db.get_collection("skills")
+        doc = await col.find_one(
+            {"user_id": current_user.id, "name": skill_name},
+            {"files": 1}
+        )
+        if not doc:
             raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
-        target = skill_path / path if path else skill_path
-        target_resolved = target.resolve()
-        if not str(target_resolved).startswith(str(skill_path.resolve())):
-            raise HTTPException(status_code=403, detail="Invalid path")
-        if not target_resolved.is_dir():
-            raise HTTPException(status_code=404, detail="Directory not found")
+
         items = []
-        for child in sorted(target_resolved.iterdir()):
-            if child.name.startswith("."):
-                continue
-            rel = str(child.relative_to(skill_path))
+        for fname in sorted(doc.get("files", {}).keys()):
             items.append({
-                "name": child.name,
-                "path": rel,
-                "type": "directory" if child.is_dir() else "file",
+                "name": fname,
+                "path": fname,
+                "type": "file",
             })
         return ApiResponse(data=items)
     except HTTPException:
@@ -940,15 +981,16 @@ async def read_skill_file(
 ) -> ApiResponse:
     """读取某个外置 skill 内的文件内容。"""
     try:
-        skill_path = _Path(_EXTERNAL_SKILLS_DIR) / skill_name
-        if not skill_path.is_dir():
+        col = _db.get_collection("skills")
+        doc = await col.find_one(
+            {"user_id": current_user.id, "name": skill_name},
+            {f"files.{body.file}": 1}
+        )
+        if not doc:
             raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
-        file_path = (skill_path / body.file).resolve()
-        if not str(file_path).startswith(str(skill_path.resolve())):
-            raise HTTPException(status_code=403, detail="Invalid file path")
-        if not file_path.is_file():
+        content = doc.get("files", {}).get(body.file)
+        if content is None:
             raise HTTPException(status_code=404, detail="File not found")
-        content = file_path.read_text(encoding="utf-8", errors="replace")
         return ApiResponse(data={"file": body.file, "content": content})
     except HTTPException:
         raise
