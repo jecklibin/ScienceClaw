@@ -39,11 +39,10 @@ from backend.deepagent.tooluniverse_tools import (
     tooluniverse_run,
 )
 from backend.deepagent.full_sandbox_backend import FullSandboxBackend
-from backend.deepagent.filtered_backend import FilteredFilesystemBackend
+from backend.deepagent.mongo_skill_backend import MongoSkillBackend
 from backend.deepagent.sse_middleware import SSEMonitoringMiddleware
 from backend.deepagent.offload_middleware import ToolResultOffloadMiddleware
 from backend.deepagent.diagnostic import DIAGNOSTIC_ENABLED, DiagnosticLogger
-from backend.deepagent.dir_watcher import watcher as _dir_watcher
 from backend.config import settings
 
 # ───────────────────────────────────────────────────────────────────
@@ -69,7 +68,6 @@ except ImportError:
 # ───────────────────────────────────────────────────────────────────
 
 _BUILTIN_SKILLS_DIR = os.environ.get("BUILTIN_SKILLS_DIR", "/app/builtin_skills")
-_EXTERNAL_SKILLS_DIR = os.environ.get("EXTERNAL_SKILLS_DIR", "/app/Skills")
 _BUILTIN_SKILLS_ROUTE = "/builtin-skills/"
 _EXTERNAL_SKILLS_ROUTE = "/skills/"
 _WORKSPACE_DIR = os.environ.get("WORKSPACE_DIR", "/home/scienceclaw")
@@ -79,12 +77,13 @@ _WORKSPACE_DIR = os.environ.get("WORKSPACE_DIR", "/home/scienceclaw")
 # ───────────────────────────────────────────────────────────────────
 
 
-def _build_backend(session_id: str, sandbox: FullSandboxBackend, blocked_skills: Set[str] | None = None):
+def _build_backend(session_id: str, sandbox: FullSandboxBackend,
+                    user_id: str | None = None, blocked_skills: Set[str] | None = None):
     """
     构建 CompositeBackend 工厂函数（会话级隔离）：
       - 默认: 传入的 FullSandboxBackend 实例
       - /builtin-skills/ 路由: FilesystemBackend（内置 skills，始终加载）
-      - /skills/          路由: FilteredFilesystemBackend（外置 skills，过滤屏蔽项）
+      - /skills/          路由: MongoSkillBackend（MongoDB 多租户 skills）
     """
     routes = {}
 
@@ -95,17 +94,15 @@ def _build_backend(session_id: str, sandbox: FullSandboxBackend, blocked_skills:
             virtual_mode=True,
         )
 
-    if os.path.isdir(_EXTERNAL_SKILLS_DIR):
-        logger.info(f"[Skills] 外置 skills: {_EXTERNAL_SKILLS_DIR} → {_EXTERNAL_SKILLS_ROUTE}"
+    if user_id:
+        logger.info(f"[Skills] MongoDB skills for user={user_id} → {_EXTERNAL_SKILLS_ROUTE}"
                      f" (blocked: {blocked_skills or set()})")
-        routes[_EXTERNAL_SKILLS_ROUTE] = FilteredFilesystemBackend(
-            root_dir=_EXTERNAL_SKILLS_DIR,
-            virtual_mode=True,
-            blocked_skills=blocked_skills or set(),
+        routes[_EXTERNAL_SKILLS_ROUTE] = MongoSkillBackend(
+            user_id=user_id,
+            blocked_skills=blocked_skills,
         )
 
     if routes:
-        # 返回工厂函数以确保路由生效
         return lambda rt: CompositeBackend(default=sandbox, routes=routes)
     else:
         return sandbox
@@ -275,17 +272,10 @@ def _collect_tools(blocked_tools: Set[str] | None = None) -> List:
 # ───────────────────────────────────────────────────────────────────
 
 async def get_blocked_skills(user_id: str) -> Set[str]:
-    """从 MongoDB 查询用户屏蔽的 skills 列表。"""
+    """从 MongoDB skills 集合查询用户屏蔽的 skills 列表。"""
     try:
-        from backend.mongodb.db import db
-        col = db.get_collection("blocked_skills")
-        cursor = col.find({"user_id": user_id}, {"skill_name": 1})
-        blocked = set()
-        async for doc in cursor:
-            name = doc.get("skill_name")
-            if name:
-                blocked.add(name)
-        return blocked
+        from backend.mongodb.db import get_blocked_skill_names
+        return await get_blocked_skill_names(user_id)
     except Exception as exc:
         logger.warning(f"[Skills] 查询屏蔽列表失败: {exc}")
         return set()
@@ -341,8 +331,7 @@ async def deep_agent(
         blocked_skills = await get_blocked_skills(user_id)
         blocked_tools = await get_blocked_tools(user_id)
 
-    # ── 检测 Tools/Skills 目录变更并按需重新加载 ──
-    _dir_watcher.has_changed(_EXTERNAL_SKILLS_DIR)
+    # ── 检测 Tools 目录变更并按需重新加载 ──
 
     tools = _collect_tools(blocked_tools=blocked_tools)
 
@@ -369,7 +358,7 @@ async def deep_agent(
         sandbox_info = ctx.get("data")
 
     # 2. 构建复合后端（可能包含 Skills 路由）
-    backend = _build_backend(session_id, sandbox, blocked_skills=blocked_skills)
+    backend = _build_backend(session_id, sandbox, user_id=user_id, blocked_skills=blocked_skills)
 
     # 工具结果自动落盘中间件：大型工具结果写入文件，Agent 按需 read_file 读取
     offload_middleware = ToolResultOffloadMiddleware(
@@ -403,7 +392,7 @@ async def deep_agent(
     skills_sources: List[str] = []
     if os.path.isdir(_BUILTIN_SKILLS_DIR):
         skills_sources.append(_BUILTIN_SKILLS_ROUTE)
-    if os.path.isdir(_EXTERNAL_SKILLS_DIR):
+    if user_id:
         skills_sources.append(_EXTERNAL_SKILLS_ROUTE)
 
     if skills_sources:
@@ -559,19 +548,18 @@ async def deep_agent_eval(
                     root_dir=_BUILTIN_SKILLS_DIR, virtual_mode=True,
                 )
                 resolved_sources.append(_BUILTIN_SKILLS_ROUTE)
-            elif src == _EXTERNAL_SKILLS_ROUTE and os.path.isdir(_EXTERNAL_SKILLS_DIR):
-                routes[_EXTERNAL_SKILLS_ROUTE] = FilteredFilesystemBackend(
-                    root_dir=_EXTERNAL_SKILLS_DIR, virtual_mode=True,
+            elif src == _EXTERNAL_SKILLS_ROUTE:
+                routes[_EXTERNAL_SKILLS_ROUTE] = MongoSkillBackend(
+                    user_id="eval_runner",
                     blocked_skills=set(),
                 )
                 resolved_sources.append(_EXTERNAL_SKILLS_ROUTE)
     else:
-        if os.path.isdir(_EXTERNAL_SKILLS_DIR):
-            routes[_EXTERNAL_SKILLS_ROUTE] = FilteredFilesystemBackend(
-                root_dir=_EXTERNAL_SKILLS_DIR, virtual_mode=True,
-                blocked_skills=set(),
-            )
-            resolved_sources.append(_EXTERNAL_SKILLS_ROUTE)
+        routes[_EXTERNAL_SKILLS_ROUTE] = MongoSkillBackend(
+            user_id="eval_runner",
+            blocked_skills=set(),
+        )
+        resolved_sources.append(_EXTERNAL_SKILLS_ROUTE)
 
     if routes:
         agent_kwargs["backend"] = lambda rt: CompositeBackend(default=sandbox, routes=routes)
