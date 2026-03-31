@@ -44,12 +44,6 @@ Start by understanding the user's intent. The current conversation might already
 
 Proactively ask questions about edge cases, input/output formats, example files, success criteria, and dependencies. Wait to write test prompts until you've got this part ironed out.
 
-**Use `web_search` and `web_crawl` to research.** When the skill involves external APIs, services, data sources, or technical workflows you're not 100% sure about, use `seekr_sdk` (`from seekr_sdk import web_search, web_crawl`) to verify current information before writing instructions. This includes:
-- Confirming API endpoints, parameters, and response formats are still valid
-- Looking up best practices, official documentation, or community patterns
-- Finding similar skills or workflows for inspiration
-- Verifying that libraries, tools, or services mentioned in the skill actually exist and work as described
-
 Come prepared with context to reduce burden on the user.
 
 ### Write the SKILL.md
@@ -449,35 +443,6 @@ You are running inside the **ScienceClaw** environment. The core skill-creation 
 - **No browser display**: The sandbox has no display. Do NOT try to `open` HTML files. Instead, save generated HTML/results to the workspace directory — the user can view files through the frontend file viewer.
 - **Sandbox execution**: All commands run in a remote sandbox container. Use absolute paths under the workspace directory.
 
-### Web Research Best Practices (CRITICAL)
-
-When writing or improving a skill, the instructions you write may reference external APIs, services, libraries, or technical workflows. **Do NOT assume URLs, endpoints, or API formats from memory — they may be outdated or wrong.** Always verify via `seekr_sdk` first.
-
-**DO NOT blindly guess URLs or API endpoints.** If you need to include API calls, code examples, or service references in a skill's instructions:
-
-1. **Search first**: `web_search("service_name API documentation 2026")` to find current docs
-2. **Crawl the docs**: `web_crawl("<documentation_url>")` to confirm endpoints, parameters, and response formats
-3. **Then write the instructions** based on verified, working information
-
-**Anti-pattern (NEVER do this):**
-```
-# Writing skill instructions with guessed URLs:
-"Call https://api.example.com/v1/data to get ..."   # might be 404
-"Use https://api.example.com/v2/endpoint ..."        # might not exist
-# ... multiple guessed URL variations in the skill body ...
-```
-
-**Correct pattern:**
-```python
-from seekr_sdk import web_search, web_crawl
-# Verify the API/service before writing instructions
-results = web_search("example.com API documentation current endpoint")
-doc = web_crawl("https://docs.example.com/api-reference")
-# Now write skill instructions with confirmed information
-```
-
-This applies to **all phases** — initial drafting, upgrading existing skills, and writing code examples within skills. External APIs and services change frequently; search engines exist for a reason.
-
 ### Skill Save Workflow (CRITICAL)
 
 After the skill is created (or modified) and the user is satisfied:
@@ -649,6 +614,6 @@ The `description` field in YAML frontmatter is the primary trigger mechanism —
 1. **Missing YAML frontmatter**: This is the #1 cause of skills not working. Every SKILL.md **must** start with `---` fenced YAML containing `name` and `description`. Without it, the skill appears in the Available Skills list with an empty description, and the agent will never know when to use it — effectively making the skill invisible. Always verify the frontmatter is present before saving.
 2. **Vague or missing description**: Even with frontmatter, a weak description like `"A useful skill"` won't trigger reliably. The description must clearly state what the skill does AND list specific trigger phrases/contexts. Include both Chinese and English terms if the skill may be used bilingually.
 3. **Writing directly to `/skills/`**: The skills directory is read-only in the sandbox. Always write to the session workspace first, then use `propose_skill_save`.
-4. **Guessing URLs or API details in instructions**: When skill instructions reference external APIs, services, or documentation, verify them via `web_search` / `web_crawl` first. Don't write instructions with assumed URLs — they may be outdated or wrong.
+4. **Guessing URLs or API details in instructions**: When skill instructions reference external APIs, services, or documentation, verify them before writing. Don't write instructions with assumed URLs — they may be outdated or wrong.
 5. **Overly rigid instructions**: Prefer explaining **why** over heavy-handed MUST/NEVER rules. The agent using the skill is intelligent — convey reasoning so it can adapt to edge cases.
 6. **SKILL.md too long**: Keep under 500 lines. If approaching this limit, split into `references/` files with clear pointers from the main SKILL.md.

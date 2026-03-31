@@ -3,36 +3,32 @@
     <DialogContent class="w-[380px] md:w-[95vw] md:max-w-[920px] rounded-2xl border border-gray-200/60 dark:border-gray-700/40 shadow-2xl overflow-hidden p-0">
       <DialogTitle></DialogTitle>
       <DialogDescription></DialogDescription>
-      
-      <SettingsTabs 
-        :tabs="tabs" 
+
+      <SettingsTabs
+        :tabs="tabs"
         :default-tab="defaultTab"
         :current-sub-page="currentSubPage"
         :sub-page-configs="subPageConfigs"
         @tab-change="onTabChange"
         @navigate-to-profile="navigateToProfile"
         @back="goBack">
-        
+
         <template #account>
           <AccountSettings @navigate-to-profile="navigateToProfile" />
         </template>
-        
+
         <template #account-profile>
           <ProfileSettings @back="goBack" />
         </template>
 
-        <template #im-binding>
-          <LarkBindingSettings @back="goBack" />
-        </template>
-        
         <template #personalization>
           <PersonalizationSettings />
         </template>
-        
+
         <template #settings>
           <GeneralSettings />
         </template>
-        
+
         <template #models>
           <ModelSettings />
         </template>
@@ -49,19 +45,15 @@
           <NotificationSettings />
         </template>
 
-        <template #im>
-          <IMSystemSettings :is-admin="isAdmin" @navigate-to-binding="navigateToBinding" />
-        </template>
-        
       </SettingsTabs>
-      
+
     </DialogContent>
   </Dialog>
 </template>
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { UserRound, Settings2, Box, ListTodo, Brain, Bell, BarChart3, Bot } from 'lucide-vue-next'
+import { UserRound, Settings2, Box, ListTodo, Brain, Bell, BarChart3 } from 'lucide-vue-next'
 import {
   Dialog,
   DialogContent,
@@ -78,14 +70,10 @@ import TaskSettings from './TaskSettings.vue'
 import PersonalizationSettings from './PersonalizationSettings.vue'
 import NotificationSettings from './NotificationSettings.vue'
 import TokenStatistics from './TokenStatistics.vue'
-import LarkBindingSettings from './LarkBindingSettings.vue'
-import IMSystemSettings from './IMSystemSettings.vue'
 import type { TabItem, SubPageConfig } from './SettingsTabs.vue'
-import { useAuth } from '@/composables/useAuth'
 
 // Use global settings dialog state
 const { isSettingsDialogOpen, defaultTab } = useSettingsDialog()
-const { isAdmin } = useAuth()
 
 // Navigation state for sub-pages
 const currentSubPage = ref<string | null>(null)
@@ -127,11 +115,6 @@ const tabs = computed<TabItem[]>(() => {
       id: 'notifications',
       label: 'Notifications',
       icon: Bell
-    },
-    {
-      id: 'im',
-      label: 'IM',
-      icon: Bot
     }
   ]
   return baseTabs
@@ -143,11 +126,6 @@ const subPageConfigs: SubPageConfig[] = [
     id: 'profile',
     title: 'Profile',
     parentTabId: 'account'
-  },
-  {
-    id: 'binding',
-    title: 'Lark Binding',
-    parentTabId: 'im'
   }
 ]
 
@@ -161,10 +139,6 @@ const onTabChange = (tabId: string) => {
 // Navigate to profile sub-page
 const navigateToProfile = () => {
   currentSubPage.value = 'profile'
-}
-
-const navigateToBinding = () => {
-  currentSubPage.value = 'binding'
 }
 
 // Go back to main view

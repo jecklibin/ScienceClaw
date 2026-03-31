@@ -32,12 +32,7 @@ from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend, FilesystemBackend
 from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT, DEFAULT_SUBAGENT_PROMPT
 from backend.deepagent.engine import get_llm_model
-from backend.deepagent.tools import web_search, web_crawl, propose_skill_save, propose_tool_save, eval_skill, grade_eval
-from backend.deepagent.tooluniverse_tools import (
-    tooluniverse_search,
-    tooluniverse_info,
-    tooluniverse_run,
-)
+from backend.deepagent.tools import propose_skill_save, propose_tool_save, eval_skill, grade_eval
 from backend.deepagent.full_sandbox_backend import FullSandboxBackend
 from backend.deepagent.mongo_skill_backend import MongoSkillBackend
 from backend.deepagent.sse_middleware import SSEMonitoringMiddleware
@@ -169,11 +164,9 @@ Always respond in {language_instruction}.
 ## Core Principles
 - Adapt to the conversation. Chat naturally for casual topics, but take concrete actions when the user asks for tasks or problem-solving.
 - Prefer execution over explanation. If a task can be solved through code or tools, implement and execute the solution instead of only describing it.
-- **Real-time information**: For any question involving current or up-to-date information, you MUST use `web_search` — NEVER answer from training data alone.
 - **Write files, not chat**: When the user asks to write, create, or generate code/scripts/files, ALWAYS use `write_file` to create real files — never just paste code in chat.
 - **Write → Execute → Fix loop**: After writing ANY executable script, you MUST immediately run it via `execute` to verify correctness. If it fails, fix and re-run.
 - **Skill-first approach**: ALWAYS check available skills (`/builtin-skills/` and `/skills/`) before starting any task. If a skill matches, `read_file` its SKILL.md and follow the workflow. Do NOT reinvent what a skill already provides.
-- **Research tasks**: When the user's request involves research, reports, reviews, surveys, literature analysis, discoveries, or any deep investigation topic, ALWAYS check and consider `/skills/deep-research/SKILL.md` first.
 - **SKILL.md files are instruction documents** — use `read_file` to read them, NEVER `execute` them as scripts.
 - **Executing skill scripts**: When a skill contains executable files (e.g., `skill.py`), they are available in your workspace at `{workspace_dir}/.skills/<skill_name>/`. Use this absolute path when running skill scripts via `execute`. Example: `execute("python3 {workspace_dir}/.skills/my-skill/skill.py")`.
 - Solve problems proactively. Only ask questions when the intent or requirements are truly unclear.
@@ -186,7 +179,7 @@ Your workspace directory is {workspace_dir}/.
 ## Sandbox Boundary
 The sandbox is an isolated execution environment. Scripts running in the sandbox CANNOT import or call your tools directly (`from functions import ...` will FAIL with `ModuleNotFoundError`).
 
-**Data flow**: Use YOUR tools (web_search, web_crawl, tooluniverse_run, etc.) to gather data → save results to workspace files via `write_file` → write sandbox scripts that READ those files. NEVER call your tools from within sandbox scripts.
+**Data flow**: Use YOUR tools to gather data → save results to workspace files via `write_file` → write sandbox scripts that READ those files. NEVER call your tools from within sandbox scripts.
 
 **Large tool results** are automatically saved to `research_data/` files (raw format). To use them in sandbox scripts: `read_file` the data → write a clean JSON file via a Python script with `json.dump()` → sandbox scripts read that clean file.
 
@@ -200,7 +193,7 @@ The sandbox is an isolated execution environment. Scripts running in the sandbox
 
 ### Step 2: Execute
 - If a skill matched → follow the skill's workflow completely.
-- Otherwise, use tools directly. Priority: existing skills > built-in tools > ToolUniverse > web_search.
+- Otherwise, use tools directly. Priority: existing skills > built-in tools.
 - **Before `propose_tool_save`**: read `/builtin-skills/tool-creator/SKILL.md` first.
 - **Before `propose_skill_save`**: read `/builtin-skills/skill-creator/SKILL.md` first.
 - Build incrementally — one component per tool call. Test via `execute` after writing.
@@ -280,9 +273,8 @@ def _get_eval_system_prompt(workspace_dir: str, sandbox_env: str | None = None) 
 # ───────────────────────────────────────────────────────────────────
 
 _STATIC_TOOLS = [
-    web_search, web_crawl, propose_skill_save, propose_tool_save,
+    propose_skill_save, propose_tool_save,
     eval_skill, grade_eval,
-    tooluniverse_search, tooluniverse_info, tooluniverse_run,
 ]
 
 
@@ -523,10 +515,7 @@ NEVER use `npx skills`. Use `skills` directly. When installing: `HOME={sandbox_w
 
 ## Task Resources
 - **Existing skill?** → `read_file` the SKILL.md and follow it. Check `/skills/` for local installs first.
-- **Research / reports / reviews / surveys / discoveries?** → `read_file("/skills/deep-research/SKILL.md")` and follow its workflow.
-- **Need a capability?** → Check built-in tools, then `read_file("/builtin-skills/tooluniverse/SKILL.md")`.
 - **PDF processing?** → `read_file("/builtin-skills/pdf/SKILL.md")`. For form filling, also read FORMS.md.
-- **Need external info?** → `web_search` / `web_crawl`.
 - **Create a tool** → `read_file("/builtin-skills/tool-creator/SKILL.md")`. NEVER write to /app/Tools/ directly.
 - **Create a skill** → `read_file("/builtin-skills/skill-creator/SKILL.md")`. NEVER write to `/skills/` directly.
 - **Find ecosystem skill** → `read_file("/builtin-skills/find-skills/SKILL.md")`. After 2-3 failures, create from scratch.
@@ -568,7 +557,7 @@ async def deep_agent_eval(
     ts = _TS()
     model = get_llm_model(model_config, max_tokens_override=ts.max_tokens)
 
-    eval_tools = [web_search, web_crawl]
+    eval_tools = []
 
     middleware = SSEMonitoringMiddleware(
         agent_name="EvalAgent",

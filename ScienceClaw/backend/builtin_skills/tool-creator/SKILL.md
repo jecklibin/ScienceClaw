@@ -63,7 +63,6 @@ All `@tool` functions execute in the **sandbox container** — the same environm
 - `pydantic` — Data validation
 - `langchain_core` — Required for `@tool` decorator
 - `pyyaml` — YAML parsing
-- `seekr_sdk` — Provides `web_search`, `web_crawl`, `web_crawl_many` for internet search and page crawling. When writing `@tool` functions that need to search the web or crawl pages, **always prefer `seekr_sdk` over raw `httpx` calls**. See the "Web-Enabled Tool (using seekr_sdk)" example below.
 
 Since tools run in the same sandbox where you test them, **if your test passes in the sandbox, the tool will also work in production**. If a tool needs a package not in this list, install it in the sandbox Dockerfile (docker-compose.yml sandbox service).
 
@@ -110,7 +109,6 @@ Based on the requirements, write a complete tool file following the format above
 - Add proper error handling (try/except, input validation)
 - Log inputs and outputs
 - Keep it focused — one tool does one thing well
-- If the tool needs web search or crawling, use `seekr_sdk` (available in both backend and sandbox)
 
 ### Step 3: Test the @tool in Sandbox
 
@@ -186,34 +184,12 @@ This ensures the original tool remains untouched while you iterate.
 
 When a tool depends on an external API and it starts failing (e.g., HTTP 404/403/500, empty responses, changed data format):
 
-**DO NOT blindly guess URL variations or probe endpoints.** If the first 1–2 attempts fail, STOP and use `seekr_sdk` to diagnose:
+**DO NOT blindly guess URL variations or probe endpoints.** If the first 1–2 attempts fail, STOP and investigate:
 
-1. **Search for the cause**: `web_search("Dukascopy datafeed API 404 2026")` or `web_search("<service_name> API deprecated")`
-2. **Search for alternatives**: `web_search("free gold price API hourly JSON 2026")` or `web_search("<domain> alternative API")`
-3. **Verify new API docs**: `web_crawl("<documentation_url>")` to confirm correct endpoints, parameters, and response formats before writing code
+1. **Search for the cause**: Check if the API has been deprecated or changed
+2. **Search for alternatives**: Look for alternative APIs that provide the same data
+3. **Verify new API docs**: Confirm correct endpoints, parameters, and response formats before writing code
 4. **Then implement the fix** based on confirmed, working information
-
-**Anti-pattern (NEVER do this):**
-```
-# Wasting tokens and time guessing URLs:
-httpx.get("https://api.example.com/v1/data")   # 404
-httpx.get("https://api.example.com/v2/data")   # 404
-httpx.get("https://api.example.com/data/v1")   # 404
-httpx.get("https://www.example.com/api/data")  # 404
-# ... 10 more blind guesses ...
-```
-
-**Correct pattern:**
-```python
-from seekr_sdk import web_search, web_crawl
-# First attempt failed with 404 → immediately search for answers
-results = web_search("example.com API changes 2026 alternative endpoint")
-# Read the relevant documentation
-doc = web_crawl("https://docs.newapi.com/gold-price")
-# Now implement with confirmed information
-```
-
-This applies to **both creating new tools and upgrading existing ones**. External APIs change frequently — always verify availability via search before investing time in code changes.
 
 ### Step 4: Side-by-Side Comparison
 
@@ -316,42 +292,6 @@ def check_weather(city: str) -> dict:
         return {"error": str(exc)}
 ```
 
-### Web-Enabled Tool (using seekr_sdk)
-
-```python
-import logging
-from typing import Any, Dict
-from langchain_core.tools import tool
-from seekr_sdk import web_search, web_crawl
-
-logger = logging.getLogger(__name__)
-
-
-@tool
-def gold_price(query: str = "gold price") -> Dict[str, Any]:
-    """查询实时金价（黄金现货/spot）并返回信息。
-
-    当用户询问"gold price / 金价 / 黄金价格 / 实时金价"等需要联网获取最新价格时使用。
-    通过 seekr_sdk 搜索互联网获取最新金价数据。
-
-    Args:
-        query: 用户查询文本，通常传入 "gold price" 即可。
-
-    Returns:
-        包含金价信息的字典
-    """
-    logger.info(f"[gold_price] query={query!r}")
-    results = web_search("current gold price USD per ounce spot")
-    snippets = []
-    for r in results[:5]:
-        snippets.append(f"- {r.get('title', '')}: {r.get('content', '')}")
-    summary = "\n".join(snippets)
-    logger.info(f"[gold_price] found {len(results)} results")
-    return {"ok": True, "search_results": summary, "source_count": len(results)}
-```
-
-Key point: `seekr_sdk` functions (`web_search`, `web_crawl`, `web_crawl_many`) are plain Python functions — they work in `@tool` functions and standalone scripts (both run in the sandbox). Always prefer them over raw `httpx` for web search and crawling.
-
 ### Aggregation Tool (Calling Other Tools)
 
 ```python
@@ -422,5 +362,5 @@ Sometimes the agent writes a one-off script during a task and realizes (or the u
 5. **Importing unavailable packages**: Since tools run in the sandbox, test your tool there first — if it imports fine during testing, it will work in production too.
 6. **Writing to Tools/ directly**: Never do this. Always use the workspace → `propose_tool_save` flow.
 7. **Tested code ≠ saved code**: NEVER write a standalone script first and then rewrite it as an `@tool`. Always write the `@tool` function first, test that exact function, then copy (not rewrite) it to `tools_staging/`. The tested file must be identical to the saved file.
-8. **Using raw httpx for web search/crawl**: When the tool needs to search or crawl the web, always use `seekr_sdk` (`from seekr_sdk import web_search, web_crawl`). Do NOT use `httpx` to directly scrape websites — it cannot render JavaScript and is fragile against website changes.
-9. **Blindly guessing URLs when an API fails**: When an external API returns errors (404, 403, etc.), do NOT try multiple URL variations hoping one works. After 1–2 failed attempts, use `web_search` from `seekr_sdk` to find out why the API is failing and what alternatives exist. Blind URL probing wastes tokens, time, and almost never succeeds — search engines exist for a reason.
+8. **Using raw httpx for web scraping**: Do NOT use `httpx` to directly scrape websites — it cannot render JavaScript and is fragile against website changes. Use proper HTTP clients with appropriate error handling.
+9. **Blindly guessing URLs when an API fails**: When an external API returns errors (404, 403, etc.), do NOT try multiple URL variations hoping one works. After 1–2 failed attempts, investigate why the API is failing and what alternatives exist. Blind URL probing wastes tokens, time, and almost never succeeds.

@@ -1,12 +1,10 @@
 import { ref } from 'vue';
 
 const visible = ref(false);
-const shared = ref(false);
 
 export function useSessionFileList() {
-    const showSessionFileList = (isShared: boolean = false) => {
+    const showSessionFileList = () => {
         visible.value = true;
-        shared.value = isShared;
     }
 
     const hideSessionFileList = () => {
@@ -15,8 +13,7 @@ export function useSessionFileList() {
 
     return {
         visible,
-        shared,
         showSessionFileList,
         hideSessionFileList
     }
-} 
+}

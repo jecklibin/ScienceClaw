@@ -10,7 +10,6 @@ services:
     cpus: ${SANDBOX_CPUS:-4}
     environment:
       TZ: Asia/Shanghai
-      WEBSEARCH_URL: http://websearch:8068
     volumes:
     - ./Skills:/skills:ro
     - ./Tools:/app/Tools:ro
@@ -36,32 +35,9 @@ services:
     volumes:
     - scienceclaw_mongo_data:/data/db
     restart: unless-stopped
-  searxng:
-    image: swr.cn-north-4.myhuaweicloud.com/claw/scienceclaw-searxng:release-v0.0.4
-    environment:
-      SEARXNG_BASE_URL: http://localhost:8080/
-      SEARXNG_LIMITER: 'false'
-      TZ: Asia/Shanghai
-    volumes:
-    - ./ScienceClaw/websearch/config/settings.yml:/etc/searxng/settings.yml
-    ports:
-    - 26080:8080
+  redis:
+    image: swr.cn-north-4.myhuaweicloud.com/claw/scienceclaw-redis:release-v0.0.4
     restart: unless-stopped
-  websearch:
-    image: swr.cn-north-4.myhuaweicloud.com/claw/scienceclaw-websearch:release-v0.0.4
-    environment:
-      SEARXNG_HOST: searxng
-      SEARXNG_PORT: 8080
-      API_HOST: 0.0.0.0
-      API_PORT: 8068
-      TZ: Asia/Shanghai
-      API_KEY: fdsfkjikmii
-    ports:
-    - 8068:8068
-    restart: unless-stopped
-    depends_on:
-      searxng:
-        condition: service_started
   backend:
     image: swr.cn-north-4.myhuaweicloud.com/claw/scienceclaw-backend:release-v0.0.4
     volumes:
@@ -89,16 +65,7 @@ services:
       MONGODB_PORT: 27017
       MONGODB_USER: scienceone
       MONGODB_PASSWORD: Yp51Bi1eEjC77sAt
-      WEBSEARCH_API_KEY: fdsfkjikmii
-      WEBSEARCH_BASE_URL: http://websearch:8068
-      WEBSEARCH_URL: http://websearch:8068
       TASK_SERVICE_API_KEY: ${TASK_SERVICE_API_KEY:-}
-      IM_ENABLED: 'true'
-      IM_RESPONSE_TIMEOUT: 300
-      IM_MAX_MESSAGE_LENGTH: 4000
-      LARK_ENABLED: 'true'
-      LARK_APP_ID: ${LARK_APP_ID-}
-      LARK_APP_SECRET: ${LARK_APP_SECRET-}
     ports:
     - 12001:8000
     command: 'python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
@@ -111,8 +78,6 @@ services:
         condition: service_started
       mongo:
         condition: service_started
-      websearch:
-        condition: service_started
     healthcheck:
       test:
       - CMD-SHELL
@@ -120,9 +85,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 30
-  redis:
-    image: swr.cn-north-4.myhuaweicloud.com/claw/scienceclaw-redis:release-v0.0.4
-    restart: unless-stopped
   scheduler_api:
     image: swr.cn-north-4.myhuaweicloud.com/claw/scienceclaw-task-service:release-v0.0.4
     environment:

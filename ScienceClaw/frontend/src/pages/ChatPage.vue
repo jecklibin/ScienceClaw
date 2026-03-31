@@ -15,73 +15,6 @@
               </span>
             </div>
             <div class="flex items-center gap-2 flex-shrink-0">
-              <span class="relative flex-shrink-0" aria-expanded="false" aria-haspopup="dialog">
-                <Popover>
-                  <PopoverTrigger>
-                    <button
-                      class="h-8 w-8 rounded-xl inline-flex items-center justify-center border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800 hover:shadow-sm transition-all duration-200 me-1.5">
-                      <ShareIcon color="var(--icon-secondary)" />
-                    </button>
-                  </PopoverTrigger>
-                  <PopoverContent>
-                    <div
-                      class="w-[380px] flex flex-col rounded-2xl bg-white dark:bg-[#1e1e1e] shadow-xl shadow-black/10 border border-gray-100 dark:border-gray-800"
-                      style="max-width: calc(-16px + 100vw);">
-                      <div class="flex flex-col p-4 gap-1">
-                        <!-- Private mode option -->
-                        <div @click="handleShareModeChange('private')"
-                          :class="{'pointer-events-none opacity-50': sharingLoading}"
-                          class="flex items-center gap-3 px-3 py-3 rounded-xl cursor-pointer transition-all duration-200 hover:bg-gray-50 dark:hover:bg-gray-900/50">
-                          <div
-                            :class="shareMode === 'private' ? 'bg-gradient-to-br from-blue-500 to-indigo-600 text-white' : 'bg-gray-100 dark:bg-gray-800 text-[var(--text-secondary)]'"
-                            class="size-9 rounded-xl flex items-center justify-center transition-colors">
-                            <Lock :size="16" /></div>
-                          <div class="flex flex-col flex-1 min-w-0">
-                            <div class="text-sm font-semibold text-[var(--text-primary)]">{{ t('Private Only') }}</div>
-                            <div class="text-xs text-[var(--text-tertiary)]">{{ t('Only visible to you') }}</div>
-                          </div><Check :size="18" :class="shareMode === 'private' ? 'ml-auto text-blue-500' : 'ml-auto invisible'" />
-                        </div>
-                        <!-- Public mode option -->
-                        <div @click="handleShareModeChange('public')"
-                          :class="{'pointer-events-none opacity-50': sharingLoading}"
-                          class="flex items-center gap-3 px-3 py-3 rounded-xl cursor-pointer transition-all duration-200 hover:bg-gray-50 dark:hover:bg-gray-900/50">
-                          <div
-                            :class="shareMode === 'public' ? 'bg-gradient-to-br from-blue-500 to-indigo-600 text-white' : 'bg-gray-100 dark:bg-gray-800 text-[var(--text-secondary)]'"
-                            class="size-9 rounded-xl flex items-center justify-center transition-colors">
-                            <Globe :size="16" /></div>
-                          <div class="flex flex-col flex-1 min-w-0">
-                            <div class="text-sm font-semibold text-[var(--text-primary)]">{{ t('Public Access') }}</div>
-                            <div class="text-xs text-[var(--text-tertiary)]">{{ t('Anyone with the link can view') }}</div>
-                          </div><Check :size="18" :class="shareMode === 'public' ? 'ml-auto text-blue-500' : 'ml-auto invisible'" />
-                        </div>
-                        <div class="border-t border-gray-100 dark:border-gray-800 mt-1"></div>
-                        
-                        <!-- Show instant share button when in private mode -->
-                        <div v-if="shareMode === 'private'">
-                          <button @click.stop="handleInstantShare"
-                            :disabled="sharingLoading"
-                            class="inline-flex items-center justify-center whitespace-nowrap font-semibold transition-all duration-200 bg-gradient-to-r from-blue-500 to-indigo-600 text-white h-[38px] px-4 rounded-xl gap-2 text-sm w-full mt-3 shadow-md hover:shadow-lg hover:shadow-indigo-500/20 active:scale-[0.97] disabled:opacity-50 disabled:cursor-not-allowed">
-                            <div v-if="sharingLoading" class="size-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
-                            <Link v-else :size="15" />
-                            {{ sharingLoading ? t('Sharing...') : t('Share Instantly') }}
-                          </button>
-                        </div>
-                        
-                        <!-- Show copy link button when in public mode -->
-                        <div v-else>
-                          <button @click.stop="handleCopyLink"
-                            :class="linkCopied ? 'inline-flex items-center justify-center whitespace-nowrap font-medium transition-all duration-200 bg-white dark:bg-[#2a2a2a] text-[var(--text-primary)] border border-gray-200 dark:border-gray-700 h-[38px] px-4 rounded-xl gap-2 text-sm w-full mt-3' : 'inline-flex items-center justify-center whitespace-nowrap font-semibold transition-all duration-200 bg-gradient-to-r from-blue-500 to-indigo-600 text-white h-[38px] px-4 rounded-xl gap-2 text-sm w-full mt-3 shadow-md hover:shadow-lg hover:shadow-indigo-500/20 active:scale-[0.97]'"
-                            data-tabindex="" tabindex="-1">
-                            <Link v-if="!linkCopied" :size="16" stroke="currentColor" :stroke-width="2" />
-                            <Check v-else :size="16" color="var(--text-primary)" />
-                            {{ linkCopied ? t('Link Copied') : t('Copy Link') }}
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  </PopoverContent>
-                </Popover>
-              </span>
               <button @click="handleFileListShow"
                 class="h-8 w-8 rounded-xl inline-flex items-center justify-center border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800 hover:shadow-sm transition-all duration-200">
                 <FileSearch class="text-[var(--icon-secondary)]" :size="16" />
@@ -256,18 +189,14 @@ import {
 } from '../types/event';
 import ToolPanel from '../components/ToolPanel.vue'
 import PlanPanel from '../components/PlanPanel.vue';
-import { ArrowDown, FileSearch, PanelLeft, Lock, Globe, Link, Check, Package, Wrench, X } from 'lucide-vue-next';
-import ShareIcon from '@/components/icons/ShareIcon.vue';
+import { ArrowDown, FileSearch, PanelLeft, Package, Wrench, X } from 'lucide-vue-next';
 import { showErrorToast, showSuccessToast } from '../utils/toast';
 import type { FileInfo } from '../api/file';
 import { useLeftPanel } from '../composables/useLeftPanel'
 import { useSessionListUpdate } from '../composables/useSessionListUpdate'
-import { useSessionFileList } from '../composables/useSessionFileList'
 import { useFilePanel } from '../composables/useFilePanel'
 import { useAuth } from '../composables/useAuth' // Import useAuth
-import { copyToClipboard } from '../utils/dom'
 import { SessionStatus } from '../types/response';
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import LoadingIndicator from '@/components/ui/LoadingIndicator.vue';
 import { listModels, type ModelConfig } from '../api/models';
 import { useSettingsDialog } from '../composables/useSettingsDialog';
@@ -281,7 +210,6 @@ import type { ActivityItem } from '../components/ActivityPanel.vue';
 
 const router = useRouter()
 const { t, locale } = useI18n()
-const { shared } = useSessionFileList()
 const { hideFilePanel, showFileListPanel } = useFilePanel()
 const { currentUser } = useAuth()
 const { updateSessionTitle } = useSessionListUpdate()
@@ -310,9 +238,6 @@ const createInitialState = () => ({
   lastEventId: undefined as string | undefined,
   cancelCurrentChat: null as (() => void) | null,
   attachments: [] as FileInfo[],
-  shareMode: 'private' as 'private' | 'public', // Default to private mode
-  linkCopied: false,
-  sharingLoading: false, // Loading state for share operations
   mode: 'deep' as string,
   thinkingContent: '' as string, // Thinking event content
   activityItems: [] as ActivityItem[], // Activity panel timeline items
@@ -340,9 +265,6 @@ const {
   lastEventId,
   cancelCurrentChat,
   attachments,
-  shareMode,
-  linkCopied,
-  sharingLoading,
   mode,
   thinkingContent,
   activityItems,
@@ -1044,7 +966,6 @@ const restoreSession = async () => {
     title.value = session.title;
     updateSessionTitle(sessionId.value, session.title);
   }
-  shareMode.value = session.is_shared ? 'public' : 'private';
   if (session.mode) {
     mode.value = session.mode;
   }
@@ -1272,56 +1193,7 @@ const handleStop = () => {
 }
 
 const handleFileListShow = () => {
-  shared.value = false
   showFileListPanel()
-}
-
-// Share functionality handlers
-const handleShareModeChange = async (mode: 'private' | 'public') => {
-  if (!sessionId.value || sharingLoading.value) return;
-  
-  // If mode is same as current, no need to call API
-  if (shareMode.value === mode) {
-    linkCopied.value = false;
-    return;
-  }
-  
-  try {
-    sharingLoading.value = true;
-    
-    if (mode === 'public') {
-      await agentApi.shareSession(sessionId.value);
-    } else {
-      await agentApi.unshareSession(sessionId.value);
-    }
-    
-    shareMode.value = mode;
-    linkCopied.value = false;
-  } catch (error) {
-    console.error('Error changing share mode:', error);
-    showErrorToast(t('Failed to change sharing settings'));
-  } finally {
-    sharingLoading.value = false;
-  }
-}
-
-const handleInstantShare = async () => {
-  if (!sessionId.value) return;
-  
-  try {
-    sharingLoading.value = true;
-    await agentApi.shareSession(sessionId.value);
-    shareMode.value = 'public';
-    linkCopied.value = false;
-    
-    // Auto copy link after sharing
-    await handleCopyLink();
-  } catch (error) {
-    console.error('Error sharing session:', error);
-    showErrorToast(t('Failed to share session'));
-  } finally {
-    sharingLoading.value = false;
-  }
 }
 
 const formatStatsDuration = (ms: number): string => {
@@ -1336,29 +1208,6 @@ const formatTokenCount = (count: number): string => {
   if (count < 1000) return `${count}`;
   return `${(count / 1000).toFixed(1)}K`;
 };
-
-const handleCopyLink = async () => {
-  if (!sessionId.value) return;
-  
-  const shareUrl = `${window.location.origin}/share/${sessionId.value}`;
-  
-  try {
-    const success = await copyToClipboard(shareUrl);
-    
-    if (success) {
-      linkCopied.value = true;
-      setTimeout(() => {
-        linkCopied.value = false;
-      }, 3000);
-      showSuccessToast(t('Link copied to clipboard'));
-    } else {
-      showErrorToast(t('Failed to copy link'));
-    }
-  } catch (error) {
-    console.error('Error copying share link:', error);
-    showErrorToast(t('Failed to copy link'));
-  }
-}
 </script>
 
 <style scoped>

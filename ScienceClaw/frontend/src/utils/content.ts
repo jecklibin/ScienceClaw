@@ -19,7 +19,7 @@ export const transformSrc = (src: string) => {
 };
 
 export const domPurifyConfig = {
-  ADD_TAGS: ['molecule-viewer', 'html-viewer'],
+  ADD_TAGS: ['html-viewer'],
   ADD_ATTR: [
     'src', 'alt',
     // Mermaid attributes

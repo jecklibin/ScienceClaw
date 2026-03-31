@@ -37,22 +37,11 @@ class Settings(BaseSettings):
     xelatex_cmd: str = os.environ.get("XELATEX_CMD", "/usr/local/texlive/2025/bin/universal-darwin/xelatex")
     pandoc_cmd: str = os.environ.get("PANDOC_CMD", "/usr/local/bin/pandoc")
 
-    # 网页搜索服务（websearch 微服务）
-    websearch_base_url: str = os.environ.get("WEBSEARCH_BASE_URL", "http://websearch:8068")
-    websearch_api_key: str = os.environ.get("WEBSEARCH_API_KEY", "")
-
     # 沙盒服务（MCP 协议）
     sandbox_mcp_url: str = os.environ.get("SANDBOX_MCP_URL", "http://sandbox:8080/mcp")
 
     # 任务调度服务调用聊天接口时的 API Key（可选）
     task_service_api_key: str = os.environ.get("TASK_SERVICE_API_KEY", "")
-    im_enabled: bool = os.environ.get("IM_ENABLED", "false").lower() == "true"
-    im_response_timeout: int = int(os.environ.get("IM_RESPONSE_TIMEOUT", "300"))
-    im_max_message_length: int = int(os.environ.get("IM_MAX_MESSAGE_LENGTH", "4000"))
-
-    lark_enabled: bool = os.environ.get("LARK_ENABLED", "false").lower() == "true"
-    lark_app_id: str = os.environ.get("LARK_APP_ID", "")
-    lark_app_secret: str = os.environ.get("LARK_APP_SECRET", "")
 
     # class Config:
     #     env_prefix = 'APP_'

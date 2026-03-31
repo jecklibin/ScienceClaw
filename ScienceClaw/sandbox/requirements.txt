@@ -1,6 +1,3 @@
-# ── ToolUniverse（最慢，极少变动）─────────────────────────────────
-tooluniverse
-
 # ── RPA 录制与自动化 ───────────────────────────────────────────
 playwright
 playwright-stealth

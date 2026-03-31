@@ -25,10 +25,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # Install all Python dependencies (BuildKit cache)
 COPY ./requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    pip install -r requirements.txt 
-
-# Install seekr_sdk (single-file client for websearch microservice)
-COPY ./seekr_sdk.py /usr/local/lib/python3.13/site-packages/seekr_sdk.py
+    pip install -r requirements.txt
 
 # Copy backend code
 COPY . /app/backend

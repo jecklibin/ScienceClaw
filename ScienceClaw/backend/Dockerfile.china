@@ -23,10 +23,7 @@ RUN apt-get update \
 
 # Install all Python dependencies (BuildKit cache)
 COPY ./requirements.txt .
-RUN pip install -r requirements.txt 
-
-# Install seekr_sdk (single-file client for websearch microservice)
-COPY ./seekr_sdk.py /usr/local/lib/python3.13/site-packages/seekr_sdk.py
+RUN pip install -r requirements.txt
 
 # Copy backend code
 COPY . /app/backend

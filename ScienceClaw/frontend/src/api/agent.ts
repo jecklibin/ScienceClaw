@@ -70,21 +70,6 @@ export async function stopSession(sessionId: string): Promise<void> {
   await apiClient.post(`/sessions/${sessionId}/stop`);
 }
 
-export async function shareSession(sessionId: string): Promise<{session_id: string, is_shared: boolean}> {
-  const response = await apiClient.post<ApiResponse<{session_id: string, is_shared: boolean}>>(`/sessions/${sessionId}/share`);
-  return response.data.data;
-}
-
-export async function unshareSession(sessionId: string): Promise<{session_id: string, is_shared: boolean}> {
-  const response = await apiClient.delete<ApiResponse<{session_id: string, is_shared: boolean}>>(`/sessions/${sessionId}/share`);
-  return response.data.data;
-}
-
-export async function getSharedSession(sessionId: string): Promise<SessionDetail> {
-  const response = await apiClient.get<ApiResponse<SessionDetail>>(`/sessions/shared/${sessionId}`);
-  return response.data.data;
-}
-
 export async function clearUnreadMessageCount(sessionId: string): Promise<void> {
   await apiClient.post(`/sessions/${sessionId}/clear_unread_message_count`);
 }
@@ -107,11 +92,6 @@ export async function getVNCUrl(sessionId: string, expireMinutes: number = 15): 
 
 export const getSessionFiles = async (session_id: string): Promise<FileInfo[]> => {
   const response = await apiClient.get<ApiResponse<FileInfo[]>>(`/sessions/${session_id}/files`);
-  return response.data.data;
-};
-
-export const getSharedSessionFiles = async (session_id: string): Promise<FileInfo[]> => {
-  const response = await apiClient.get<ApiResponse<FileInfo[]>>(`/sessions/${session_id}/share/files`);
   return response.data.data;
 };
 

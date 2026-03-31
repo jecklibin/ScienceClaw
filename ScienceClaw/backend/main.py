@@ -1,7 +1,7 @@
 """
 FastAPI 应用入口 — 精简版。
 
-挂载路由：auth / models / sessions / file
+挂载路由：auth / models / sessions / file / rpa / chat / statistics
 启动时：连接 MongoDB → 初始化系统模型 → 创建默认 admin
 """
 import os
@@ -16,17 +16,13 @@ from backend.route.auth import router as auth_router
 from backend.route.sessions import router as sessions_router, cleanup_orphaned_sessions, graceful_shutdown_agents
 from backend.route.file import router as file_router
 from backend.route.models import router as models_router
-from backend.route.tooluniverse import router as tooluniverse_router
 from backend.route.task_settings import router as task_settings_router
 from backend.route.memory import router as memory_router
-from backend.route.science import router as science_router
 from backend.route.chat import router as chat_router
 from backend.route.statistics import router as statistics_router
-from backend.route.im import router as im_router, start_im_runtime, stop_im_runtime
 from backend.route.rpa import router as rpa_router
 from backend.models import init_system_models
 from backend.user.bootstrap import ensure_admin_user
-from backend.im.migrations import backfill_session_sources
 
 
 @asynccontextmanager
@@ -44,23 +40,11 @@ async def lifespan(app: FastAPI):
         await cleanup_orphaned_sessions()
     except Exception as e:
         logger.error(f"Failed to cleanup orphaned sessions: {e}")
-    try:
-        await backfill_session_sources()
-    except Exception as e:
-        logger.error(f"Failed to backfill session sources: {e}")
-    try:
-        await start_im_runtime()
-    except Exception as e:
-        logger.error(f"Failed to start lark long connection: {e}")
     yield
     try:
         await graceful_shutdown_agents()
     except Exception as e:
         logger.error(f"Failed to gracefully shutdown agents: {e}")
-    try:
-        await stop_im_runtime()
-    except Exception as e:
-        logger.error(f"Failed to stop lark long connection: {e}")
     await db.close()
 
 
@@ -103,13 +87,10 @@ def create_app() -> FastAPI:
     app.include_router(sessions_router, prefix="/api/v1")
     app.include_router(file_router, prefix="/api/v1")
     app.include_router(models_router, prefix="/api/v1")
-    app.include_router(tooluniverse_router, prefix="/api/v1")
     app.include_router(task_settings_router, prefix="/api/v1")
     app.include_router(memory_router, prefix="/api/v1")
-    app.include_router(science_router, prefix="/api/v1")
     app.include_router(chat_router, prefix="/api/v1")
     app.include_router(statistics_router, prefix="/api/v1")
-    app.include_router(im_router, prefix="/api/v1")
     app.include_router(rpa_router, prefix="/api/v1/rpa")
 
     logger.info("FastAPI initialized with /api/v1 endpoints")

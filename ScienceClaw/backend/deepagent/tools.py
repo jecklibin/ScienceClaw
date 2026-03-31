@@ -1,12 +1,7 @@
 """
-DeepAgents 内置工具集 — 网页搜索与爬取。
+DeepAgents 内置工具集。
 
-提供 web_search / web_crawl 两个工具，通过调用 websearch 微服务（SearXNG + Crawl4AI）
-替代原来的 Tavily internet_search。
-
-特性：
-  - 支持多输入：用 | 分隔多个 query 或 URL，一次调用完成多个任务
-  - 异步并行：多个 query 使用 asyncio.gather 并发请求
+提供 propose_skill_save / propose_tool_save / eval_skill / grade_eval 等工具。
 """
 from __future__ import annotations
 
@@ -14,59 +9,9 @@ import asyncio
 import logging
 import os
 
-import httpx
 from langchain_core.tools import tool
 
 logger = logging.getLogger(__name__)
-
-_WEBSEARCH_BASE_URL = os.environ.get("WEBSEARCH_BASE_URL", "http://websearch:8068")
-_WEBSEARCH_API_KEY = os.environ.get("WEBSEARCH_API_KEY", "")
-_REQUEST_TIMEOUT = 120
-
-
-def _headers() -> dict:
-    h: dict[str, str] = {"Content-Type": "application/json"}
-    if _WEBSEARCH_API_KEY:
-        h["apikey"] = _WEBSEARCH_API_KEY
-    return h
-
-
-async def _search_one_async(client: httpx.AsyncClient, query: str, limit: int = 10) -> dict:
-    try:
-        resp = await client.post(
-            f"{_WEBSEARCH_BASE_URL}/web_search",
-            json={"query": query, "limit": limit},
-            headers=_headers(),
-            timeout=_REQUEST_TIMEOUT,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return {
-            "query": query,
-            "results": [
-                {"title": r.get("title", ""), "url": r.get("url", ""), "content": r.get("content", "")}
-                for r in data.get("results", [])
-            ],
-        }
-    except Exception as exc:
-        logger.error(f"[web_search] query={query!r} failed: {exc}")
-        return {"query": query, "results": [], "error": str(exc)}
-
-
-async def _crawl_batch_async(url_list: list[str]) -> dict:
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{_WEBSEARCH_BASE_URL}/crawl_urls",
-                json={"urls": url_list},
-                headers=_headers(),
-                timeout=_REQUEST_TIMEOUT,
-            )
-            resp.raise_for_status()
-            return resp.json()
-    except Exception as exc:
-        logger.error(f"[web_crawl] crawl failed: {exc}")
-        return {"results": {}, "failed_urls": url_list, "error": str(exc)}
 
 
 def _run_async(coro):
@@ -79,38 +24,6 @@ def _run_async(coro):
     import concurrent.futures
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         return pool.submit(asyncio.run, coro).result()
-
-
-@tool
-def web_search(queries: str) -> dict:
-    """Search the internet for real-time information using one or more search queries.
-
-    Returns titles, snippets and URLs from search engine results.
-    To search for MULTIPLE topics at once, separate each query with a pipe '|'.
-    All queries will be executed in parallel for faster results.
-
-    Args:
-        queries: One or more search queries separated by '|'.
-                 Example single: "latest AI research papers"
-                 Example multi:  "python async tutorial|rust vs go performance|climate change 2025"
-
-    Returns:
-        A dict containing a 'searches' list, where each element has 'query' and
-        'results' (list of {title, url, content}).
-    """
-    query_list = [q.strip() for q in queries.split("|") if q.strip()]
-    if not query_list:
-        return {"searches": [], "error": "No valid queries provided"}
-
-    logger.info(f"[web_search] Executing {len(query_list)} queries: {query_list}")
-
-    async def _do_search():
-        async with httpx.AsyncClient() as client:
-            tasks = [_search_one_async(client, q) for q in query_list]
-            return await asyncio.gather(*tasks)
-
-    results = _run_async(_do_search())
-    return {"searches": list(results)}
 
 
 @tool
@@ -457,25 +370,3 @@ def grade_eval(eval_dir: str, assertions_json: str) -> str:
     return "\n".join(lines)
 
 
-@tool
-def web_crawl(urls: str) -> dict:
-    """Crawl one or more web pages to extract their full text content.
-
-    Use this tool after web_search when you need the detailed content of specific
-    web pages. Separate multiple URLs with a pipe '|'. All URLs are crawled in
-    parallel by the backend service.
-
-    Args:
-        urls: One or more URLs separated by '|'.
-              Example single: "https://example.com/article"
-              Example multi:  "https://example.com/page1|https://example.com/page2|https://other.com/doc"
-
-    Returns:
-        A dict with 'results' (mapping URL -> page text content) and 'failed_urls'.
-    """
-    url_list = [u.strip() for u in urls.split("|") if u.strip()]
-    if not url_list:
-        return {"results": {}, "failed_urls": [], "error": "No valid URLs provided"}
-
-    logger.info(f"[web_crawl] Crawling {len(url_list)} URLs")
-    return _run_async(_crawl_batch_async(url_list))

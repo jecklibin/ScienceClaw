@@ -10,7 +10,6 @@
         class="relative flex flex-col items-center rounded-2xl overflow-hidden bg-gradient-to-br from-blue-500 to-indigo-600 text-white p-3.5 ltr:rounded-br-sm rtl:rounded-bl-sm shadow-lg shadow-blue-500/15">
         <template v-for="(part, index) in parseContent(messageContent.content)" :key="index">
           <div v-if="part.type === 'html'" v-html="part.content" class="w-full text-white/95 [&_a]:text-white [&_a]:underline [&_code]:bg-white/20 [&_code]:rounded [&_code]:px-1"></div>
-          <molecule-viewer v-else-if="part.type === 'molecule'" :src="part.src || ''" class="w-full my-2" />
           <image-viewer v-else-if="part.type === 'image'" :src="part.src || ''" :alt="part.alt" class="w-full my-2" />
           <html-viewer v-else-if="part.type === 'html-file'" :src="part.src || ''" class="w-full my-2" />
           <suggested-questions v-else-if="part.type === 'questions'" :questions="part.questions || []" @click="emit('suggestionClick', $event)" />
@@ -43,7 +42,6 @@
       >
         <template v-for="(part, index) in parseContent(messageContent.content)" :key="index">
           <div v-if="part.type === 'html'" v-html="part.content"></div>
-          <molecule-viewer v-else-if="part.type === 'molecule'" :src="part.src || ''" class="w-full my-2" />
           <image-viewer v-else-if="part.type === 'image'" :src="part.src || ''" :alt="part.alt" class="w-full my-2" />
           <html-viewer v-else-if="part.type === 'html-file'" :src="part.src || ''" class="w-full my-2" />
           <suggested-questions v-else-if="part.type === 'questions'" :questions="part.questions || []" @click="emit('suggestionClick', $event)" />
@@ -153,7 +151,6 @@ import { useRelativeTime } from '../composables/useTime';
 import AttachmentsMessage from './AttachmentsMessage.vue';
 import ImageViewer from './ImageViewer.vue';
 import HtmlViewer from './HtmlViewer.vue';
-import MoleculeViewer from './MoleculeViewer.vue';
 import SuggestedQuestions from './SuggestedQuestions.vue';
 import { transformSrc, domPurifyConfig } from '../utils/content';
 import { formatMarkdown } from '../utils/markdownFormatter';
@@ -602,20 +599,6 @@ const { relativeTime } = useRelativeTime();
 // DOMPurify 配置
 DOMPurify.setConfig(domPurifyConfig);
 
-// 添加 DOMPurify hook 处理 molecule-viewer
-DOMPurify.addHook('afterSanitizeAttributes', (node) => {
-  if (node.tagName.toLowerCase() === 'molecule-viewer') {
-    if (node.hasAttribute('src')) {
-      const src = node.getAttribute('src');
-      if (src && (src.startsWith('/api/') || src.startsWith('http'))) {
-        node.setAttribute('src', src);
-      } else {
-        node.removeAttribute('src');
-      }
-    }
-  }
-});
-
 // 渲染 Markdown 为 HTML
 const renderMarkdown = (text: string): string => {
   if (typeof text !== 'string') return '';
@@ -802,9 +785,6 @@ const parseContent = (markdown: string) => {
       const tagName = el.tagName.toLowerCase();
 
       // 特殊组件
-      if (tagName === 'molecule-viewer') {
-        return [{ type: 'molecule', src: transformSrc(el.getAttribute('src') || '') }];
-      }
       if (tagName === 'html-viewer') {
         return [{ type: 'html-file', src: transformSrc(el.getAttribute('src') || '') }];
       }

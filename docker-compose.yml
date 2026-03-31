@@ -13,7 +13,6 @@ services:
     cpus: ${SANDBOX_CPUS:-4}
     environment:
       TZ: Asia/Shanghai
-      WEBSEARCH_URL: http://websearch:8068
     volumes:
       - ./Skills:/skills:ro
       - ./Tools:/app/Tools:ro
@@ -44,44 +43,9 @@ services:
     image: redis:7-alpine
     restart: unless-stopped
 
-  # ── SearXNG 搜索引擎（websearch 服务的依赖） ──
-  searxng:
-    image: searxng/searxng:latest
-    environment:
-      SEARXNG_BASE_URL: http://localhost:8080/
-      SEARXNG_LIMITER: "false"
-      TZ: Asia/Shanghai
-    volumes:
-      - ./ScienceClaw/websearch/config/settings.yml:/etc/searxng/settings.yml
-    ports:
-      - "26080:8080"
-    restart: unless-stopped
-
-  # ── 网页搜索 + 爬取服务（替代 Tavily） ──
-  websearch:
-    build:
-      context: ./ScienceClaw/websearch
-      dockerfile: Dockerfile
-    image: scienceclaw-websearch:local
-    environment:
-      SEARXNG_HOST: searxng
-      SEARXNG_PORT: 8080
-      API_HOST: "0.0.0.0"
-      API_PORT: 8068
-      TZ: Asia/Shanghai
-      API_KEY: "fdsfkjikmii"
-    ports:
-      - "8068:8068"
-    restart: unless-stopped
-    depends_on:
-      searxng:
-        condition: service_started
-
   backend:
     build:
       context: ./ScienceClaw/backend
-      additional_contexts:
-        websearch: ./ScienceClaw/websearch
     image: scienceclaw-backend:local
     volumes:
       - ./ScienceClaw/backend:/app/backend
@@ -111,18 +75,8 @@ services:
       MONGODB_USER: scienceone
       MONGODB_PASSWORD: Yp51Bi1eEjC77sAt
       TASK_SERVICE_API_KEY: ${TASK_SERVICE_API_KEY:-}
-      WEBSEARCH_API_KEY: "fdsfkjikmii"
-      # 网页搜索服务地址（Docker 内部通信）
-      WEBSEARCH_BASE_URL: http://websearch:8068
-      WEBSEARCH_URL: http://websearch:8068
       # 诊断模式：记录每步 LLM 调用的完整上下文，用于质量分析（设为空或删除此行关闭）
       DIAGNOSTIC_MODE: "1"
-      IM_ENABLED: "true"
-      IM_RESPONSE_TIMEOUT: 300
-      IM_MAX_MESSAGE_LENGTH: 4000
-      LARK_ENABLED: "true"
-      LARK_APP_ID: ${LARK_APP_ID-}
-      LARK_APP_SECRET: ${LARK_APP_SECRET-}
     ports:
       - "12001:8000"
     command: >
@@ -132,8 +86,6 @@ services:
       sandbox:
         condition: service_started
       mongo:
-        condition: service_started
-      websearch:
         condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/api/v1/auth/status >/dev/null || exit 1"]

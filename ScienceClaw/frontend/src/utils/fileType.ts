@@ -16,7 +16,6 @@ import UnknownFilePreview from '../components/filePreviews/UnknownFilePreview.vu
 import MarkdownFilePreview from '../components/filePreviews/MarkdownFilePreview.vue';
 import CodeFilePreview from '../components/filePreviews/CodeFilePreview.vue';
 import ImageFilePreview from '../components/filePreviews/ImageFilePreview.vue';
-import MoleculeFilePreview from '../components/filePreviews/MoleculeFilePreview.vue';
 import ExcelFilePreview from '../components/filePreviews/ExcelFilePreview.vue';
 import PdfFilePreview from '../components/filePreviews/PdfFilePreview.vue';
 import DocxFilePreview from '../components/filePreviews/DocxFilePreview.vue';
@@ -56,10 +55,6 @@ const audioFileExtensions = [
 
 const archiveFileExtensions = [
   'zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz', 'lzma',
-];
-
-const moleculeFileExtensions = [
-  'mol', 'sdf', 'pdb', 'cif', 'xyz'
 ];
 
 export const getFileType = (filename: string): FileType => {
@@ -103,14 +98,6 @@ export const getFileType = (filename: string): FileType => {
     return {
       icon: PptFileIcon,
       preview: UnknownFilePreview,
-    };
-  }
-
-  // Molecule files
-  if (file_extension && moleculeFileExtensions.includes(file_extension)) {
-    return {
-      icon: CodeFileIcon,
-      preview: MoleculeFilePreview,
     };
   }
 
@@ -223,11 +210,6 @@ export const getFileTypeText = (filename: string): string => {
   // Archive files
   if (archiveFileExtensions.includes(file_extension)) {
     return t('Archive');
-  }
-
-  // Molecule files
-  if (moleculeFileExtensions.includes(file_extension)) {
-    return t('Molecule');
   }
 
   // Default

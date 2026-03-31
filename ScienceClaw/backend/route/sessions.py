@@ -4,14 +4,11 @@ Sessions 路由。
 路由：
   PUT    /sessions                          → 创建会话
   GET    /sessions                          → 会话列表
-  GET    /sessions/shared/{session_id}      → 获取已分享会话（无需认证）
   GET    /sessions/{session_id}             → 会话详情
   DELETE /sessions/{session_id}             → 删除会话
   POST   /sessions/{session_id}/chat                      → 聊天（SSE）
   POST   /sessions/{session_id}/stop                      → 停止会话
   POST   /sessions/{session_id}/clear_unread_message_count → 清零未读消息计数
-  POST   /sessions/{session_id}/share       → 开启分享
-  DELETE /sessions/{session_id}/share       → 取消分享
   GET    /sessions/{session_id}/files       → 沙盒文件列表
   GET    /sessions/{session_id}/sandbox-file → 读取沙盒文件
 """
@@ -88,10 +85,8 @@ class ListSessionItem(BaseModel):
     latest_message_at: Optional[int] = Field(default=None, description="Latest message timestamp")
     status: str = Field(default=SessionStatus.PENDING, description="Session status")
     unread_message_count: int = Field(default=0, description="Unread message count")
-    is_shared: bool = Field(default=False, description="Whether shared")
     mode: str = Field(default="deep", description="Session mode")
     pinned: bool = Field(default=False, description="Whether pinned")
-    source: Optional[str] = Field(default=None, description="Session source (e.g. wechat, lark)")
 
 
 class ListSessionData(BaseModel):
@@ -103,7 +98,6 @@ class GetSessionData(BaseModel):
     title: Optional[str] = Field(default=None, description="Session title")
     status: str = Field(default=SessionStatus.PENDING, description="Session status")
     events: List[Dict[str, Any]] = Field(default_factory=list, description="Session events list")
-    is_shared: bool = Field(default=False, description="Whether shared")
     mode: str = Field(default="deep", description="Session mode")
     model_config_id: Optional[str] = Field(default=None, description="Model config ID")
 
@@ -145,10 +139,8 @@ def _session_to_list_item(session) -> ListSessionItem:
         latest_message_at=getattr(session, "latest_message_at", None),
         status=getattr(session, "status", SessionStatus.PENDING),
         unread_message_count=getattr(session, "unread_message_count", 0),
-        is_shared=getattr(session, "is_shared", False),
         mode=getattr(session, "mode", "deep"),
         pinned=getattr(session, "pinned", False),
-        source=getattr(session, "source", None),
     )
 
 
@@ -681,31 +673,6 @@ async def list_sessions(current_user: User = Depends(require_user)) -> ApiRespon
     items = [_session_to_list_item(s) for s in sessions]
     return ApiResponse(data=ListSessionData(sessions=items).model_dump())
 
-
-@router.get("/shared/{session_id}", response_model=ApiResponse)
-async def get_shared_session(session_id: str) -> ApiResponse:
-    """获取已分享的会话（无需认证）"""
-    try:
-        session = await async_get_science_session(session_id)
-        if not getattr(session, "is_shared", False):
-            raise HTTPException(status_code=404, detail="Shared session not found")
-
-        events = getattr(session, "events", []) or []
-        return ApiResponse(data=GetSessionData(
-            session_id=session.session_id,
-            title=getattr(session, "title", None),
-            status=getattr(session, "status", SessionStatus.PENDING),
-            events=events,
-            is_shared=True,
-            mode=getattr(session, "mode", "deep"),
-        ).model_dump())
-    except ScienceSessionNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Shared session not found") from exc
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception("get_shared_session failed")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1291,7 +1258,6 @@ async def get_session(session_id: str, current_user: User = Depends(require_user
             title=getattr(session, "title", None),
             status=getattr(session, "status", SessionStatus.PENDING),
             events=events,
-            is_shared=getattr(session, "is_shared", False),
             mode=getattr(session, "mode", "deep"),
             model_config_id=mc_id,
         ).model_dump())
@@ -1520,11 +1486,8 @@ async def _agent_background_worker(
     language: Optional[str] = None,
 ) -> None:
     """Run agent in a background task. Results are saved to DB and pushed to SSE."""
-    from backend.notifications import publish as _notify
 
     user_attachments = attachments or []
-    _is_im = getattr(session, "source", None) in ("wechat", "lark")
-    _im_user_id = getattr(session, "user_id", None)
 
     if message.strip():
         user_event = _wrap_event("message", {
@@ -1536,12 +1499,6 @@ async def _agent_background_worker(
         })
         _append_session_event(session, user_event)
         await session.save()
-        if _is_im and _im_user_id:
-            _notify("session_updated", {
-                "session_id": session_id,
-                "user_id": _im_user_id,
-                "session_event": user_event,
-            })
 
     session.reset_cancel()
     setattr(session, "status", SessionStatus.RUNNING)
@@ -1555,12 +1512,6 @@ async def _agent_background_worker(
 
     def _emit(evt_name: str, data_json: str) -> None:
         _emit_to_sse(session_id, {"event": evt_name, "data": data_json})
-        if _is_im and _im_user_id:
-            _notify("session_updated", {
-                "session_id": session_id,
-                "user_id": _im_user_id,
-                "session_event": {"event": evt_name, "data": json.loads(data_json)},
-            })
 
     # Generate title after the first user message
     if message.strip() and not (getattr(session, "title", None) or "").strip():
@@ -1831,42 +1782,6 @@ async def chat_with_session(
                 _agent_queues.pop(session_id, None)
 
     return EventSourceResponse(event_generator())
-
-
-@router.post("/{session_id}/share", response_model=ApiResponse)
-async def share_session(session_id: str, current_user: User = Depends(require_user)) -> ApiResponse:
-    try:
-        session = await async_get_science_session(session_id)
-        if session.user_id != current_user.id:
-            raise HTTPException(status_code=403, detail="Access denied")
-        session.is_shared = True
-        await session.save()
-        return ApiResponse(data={"session_id": session_id, "is_shared": True})
-    except ScienceSessionNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception("share_session failed")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@router.delete("/{session_id}/share", response_model=ApiResponse)
-async def unshare_session(session_id: str, current_user: User = Depends(require_user)) -> ApiResponse:
-    try:
-        session = await async_get_science_session(session_id)
-        if session.user_id != current_user.id:
-            raise HTTPException(status_code=403, detail="Access denied")
-        session.is_shared = False
-        await session.save()
-        return ApiResponse(data={"session_id": session_id, "is_shared": False})
-    except ScienceSessionNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception("unshare_session failed")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 # ═══════════════════════════════════════════════════════════════════

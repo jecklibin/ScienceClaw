@@ -85,7 +85,7 @@ import { ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import type { FileInfo } from '../api/file';
 import { triggerAuthenticatedDownload } from '../api/file';
-import { getSessionFiles, getSharedSessionFiles } from '../api/agent';
+import { getSessionFiles } from '../api/agent';
 import { formatRelativeTime, parseISODateTime } from '../utils/time';
 import { getFileType } from '../utils/fileType';
 import { useSessionFileList } from '../composables/useSessionFileList';
@@ -94,7 +94,7 @@ import { useFilePanel } from '../composables/useFilePanel';
 const route = useRoute();
 const files = ref<FileInfo[]>([]);
 const { showFilePanel } = useFilePanel();
-const { visible, hideSessionFileList, shared } = useSessionFileList();
+const { visible, hideSessionFileList } = useSessionFileList();
 
 const getFileExt = (name: string) => {
     const parts = name.split('.');
@@ -114,7 +114,7 @@ const getFileColor = (name: string) => {
 
 const fetchFiles = async (sessionId: string) => {
     if (!sessionId) return;
-    files.value = shared.value ? await getSharedSessionFiles(sessionId) : await getSessionFiles(sessionId);
+    files.value = await getSessionFiles(sessionId);
 };
 
 const downloadFile = async (fileInfo: FileInfo) => { try { await triggerAuthenticatedDownload(fileInfo); } catch (err) { console.error('Download failed:', err); } };

@@ -69,23 +69,6 @@ class MongoDB:
         await cls.db.skills.create_index(
             [("user_id", 1), ("blocked", 1)]
         )
-        await cls.db.im_user_bindings.create_index(
-            [("platform", 1), ("platform_user_id", 1)], unique=True
-        )
-        await cls.db.im_user_bindings.create_index(
-            [("platform", 1), ("science_user_id", 1), ("status", 1)]
-        )
-        await cls.db.im_chat_sessions.create_index(
-            [("platform", 1), ("platform_chat_id", 1), ("science_user_id", 1), ("status", 1)]
-        )
-        await cls.db.im_chat_sessions.create_index([("updated_at", -1)])
-        await cls.db.im_message_dedup.create_index(
-            [("platform", 1), ("message_id", 1)], unique=True
-        )
-        await cls.db.im_message_dedup.create_index(
-            "created_at",
-            expireAfterSeconds=86400
-        )
 
     @classmethod
     def get_collection(cls, collection_name: str):

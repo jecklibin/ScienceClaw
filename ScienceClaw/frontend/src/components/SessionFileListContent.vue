@@ -95,10 +95,9 @@ import { ref, computed, onMounted } from 'vue';
 import { useRoute } from 'vue-router';
 import type { FileInfo } from '../api/file';
 import { triggerAuthenticatedDownload } from '../api/file';
-import { getSessionFiles, getSharedSessionFiles } from '../api/agent';
+import { getSessionFiles } from '../api/agent';
 import { formatRelativeTime, parseISODateTime } from '../utils/time';
 import { getFileType } from '../utils/fileType';
-import { useSessionFileList } from '../composables/useSessionFileList';
 import FilePreviewModal from './FilePreviewModal.vue';
 
 const emit = defineEmits<{
@@ -107,7 +106,6 @@ const emit = defineEmits<{
 
 const route = useRoute();
 const files = ref<FileInfo[]>([]);
-const { shared } = useSessionFileList();
 
 const processExpanded = ref(false);
 const previewFile = ref<FileInfo | null>(null);
@@ -149,11 +147,7 @@ const fetchFiles = async (sessionId: string) => {
     }
     let response: FileInfo[] = [];
     try {
-        if (shared.value) {
-            response = await getSharedSessionFiles(sessionId);
-        } else {
-            response = await getSessionFiles(sessionId);
-        }
+        response = await getSessionFiles(sessionId);
         files.value = response;
     } catch (e) {
         console.error("fetch files error", e)

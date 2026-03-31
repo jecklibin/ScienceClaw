@@ -59,7 +59,6 @@ class ScienceSession:
     created_at: int = 0
     updated_at: int = 0
     unread_message_count: int = 0
-    is_shared: bool = False
     latest_message: str = ""
     latest_message_at: int = 0
     pinned: bool = False
@@ -121,13 +120,11 @@ class ScienceSession:
             "status": self.status,
             "updated_at": int(time.time()),
             "unread_message_count": self.unread_message_count,
-            "is_shared": self.is_shared,
             "latest_message": self.latest_message,
             "latest_message_at": self.latest_message_at,
             "model_config": self.model_config,
             "events": self.events,
             "pinned": self.pinned,
-            "source": self.source,
         }
         await db.get_collection("sessions").update_one(
             {"_id": self.session_id},
@@ -254,11 +251,9 @@ async def async_get_science_session(session_id: str) -> ScienceSession:
         created_at=doc.get("created_at", 0),
         updated_at=doc.get("updated_at", 0),
         unread_message_count=doc.get("unread_message_count", 0),
-        is_shared=doc.get("is_shared", False),
         latest_message=doc.get("latest_message", ""),
         latest_message_at=doc.get("latest_message_at", 0),
         pinned=doc.get("pinned", False),
-        source=doc.get("source"),
     )
 
     async with _sessions_lock:
@@ -300,7 +295,6 @@ async def async_list_science_sessions(user_id: Optional[str] = None) -> List[Sci
             created_at=doc.get("created_at", 0),
             updated_at=doc.get("updated_at", 0),
             unread_message_count=doc.get("unread_message_count", 0),
-            is_shared=doc.get("is_shared", False),
             latest_message=doc.get("latest_message", ""),
             latest_message_at=doc.get("latest_message_at", 0),
             pinned=doc.get("pinned", False),

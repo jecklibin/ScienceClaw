@@ -3,7 +3,6 @@ export * from './client';
 export * from './auth';
 export * from './agent';
 export * from './file';
-export * from './im';
 
 // Export commonly used types and functions
 export type { ApiResponse, ApiError } from './client';
