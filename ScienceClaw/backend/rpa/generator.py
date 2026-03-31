@@ -13,14 +13,58 @@ class PlaywrightGenerator:
     The generator simply translates the locator objects into Playwright API calls.
     """
 
+    # Boilerplate that wraps execute_skill into a directly-executable script.
+    # Connects to the sandbox's browser via CDP.
+    RUNNER_TEMPLATE = '''\
+import asyncio
+import sys
+import httpx
+from playwright.async_api import async_playwright
+
+
+async def _get_cdp_url() -> str:
+    """Fetch CDP WebSocket URL from the local sandbox API."""
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get("http://127.0.0.1:8080/v1/browser/info")
+        resp.raise_for_status()
+        return resp.json()["data"]["cdp_url"]
+
+
+{execute_skill_func}
+
+
+async def main():
+    kwargs = {{}}
+    for arg in sys.argv[1:]:
+        if arg.startswith("--") and "=" in arg:
+            k, v = arg[2:].split("=", 1)
+            kwargs[k] = v
+
+    cdp_url = await _get_cdp_url()
+    pw = await async_playwright().start()
+    browser = await pw.chromium.connect_over_cdp(cdp_url)
+    context = await browser.new_context(no_viewport=True)
+    page = await context.new_page()
+    page.set_default_timeout(15000)
+    try:
+        await execute_skill(page, **kwargs)
+        print("SKILL_SUCCESS")
+    except Exception as e:
+        print(f"SKILL_ERROR: {{e}}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        await context.close()
+        await pw.stop()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+'''
+
     def generate_script(self, steps: List[Dict[str, Any]], params: Dict[str, Any] = None) -> str:
         params = params or {}
 
         lines = [
-            "import os, asyncio",
-            'os.environ["DISPLAY"] = ":99"',
-            "from playwright.async_api import async_playwright",
-            "",
             "",
             "async def execute_skill(page, **kwargs):",
             '    """Auto-generated skill from RPA recording."""',
@@ -103,42 +147,9 @@ class PlaywrightGenerator:
             prev_action = action
             lines.append("")
 
-        # Main runner
-        lines.extend([
-            "",
-            "async def main():",
-            "    async with async_playwright() as p:",
-            "        browser = await p.chromium.launch(",
-            '            headless=False,',
-            '            executable_path="/usr/bin/chromium-browser",',
-            '            args=["--no-sandbox", "--disable-gpu", "--start-maximized",',
-            '                  "--window-size=1280,720", "--disable-dev-shm-usage"]',
-            "        )",
-            "        context = await browser.new_context(no_viewport=True)",
-            "        page = await context.new_page()",
-            "        # Set shorter timeout so failures are reported quickly",
-            "        page.set_default_timeout(15000)",
-            "        try:",
-            "            await execute_skill(page)",
-            "            # Keep browser open so user can see the result in VNC",
-            "            await page.wait_for_timeout(5000)",
-            "            print('SKILL_SUCCESS')",
-            "        except Exception as e:",
-            "            # Keep browser open on error too so user can see the state",
-            "            try:",
-            "                await page.wait_for_timeout(3000)",
-            "            except Exception:",
-            "                pass",
-            "            print(f'SKILL_ERROR: {e}')",
-            "        finally:",
-            "            await browser.close()",
-            "",
-            "",
-            'if __name__ == "__main__":',
-            "    asyncio.run(main())",
-        ])
-
-        return "\n".join(lines)
+        # Wrap execute_skill function with the runner boilerplate
+        execute_skill_func = "\n".join(lines)
+        return self.RUNNER_TEMPLATE.format(execute_skill_func=execute_skill_func)
 
     @staticmethod
     def _deduplicate_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

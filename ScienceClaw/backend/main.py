@@ -45,6 +45,11 @@ async def lifespan(app: FastAPI):
         await graceful_shutdown_agents()
     except Exception as e:
         logger.error(f"Failed to gracefully shutdown agents: {e}")
+    try:
+        from backend.rpa.cdp_connector import cdp_connector
+        await cdp_connector.close()
+    except Exception as e:
+        logger.error(f"Failed to close CDP connector: {e}")
     await db.close()
 
 

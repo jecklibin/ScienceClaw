@@ -10,6 +10,7 @@ from backend.rpa.generator import PlaywrightGenerator
 from backend.rpa.executor import ScriptExecutor
 from backend.rpa.skill_exporter import SkillExporter
 from backend.rpa.assistant import RPAAssistant
+from backend.rpa.cdp_connector import cdp_connector
 from backend.user.dependencies import get_current_user, User
 from backend.config import settings
 from backend.mongodb.db import db
@@ -18,9 +19,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["RPA"])
 generator = PlaywrightGenerator()
-executor = ScriptExecutor(rpa_manager.sandbox_url)
+executor = ScriptExecutor()
 exporter = SkillExporter()
-assistant = RPAAssistant(rpa_manager.sandbox_url)
+assistant = RPAAssistant()
 
 
 class StartSessionRequest(BaseModel):
@@ -137,8 +138,9 @@ async def test_script(
     script = generator.generate_script(steps, request.params)
 
     logs = []
+    browser = await cdp_connector.get_browser()
     result = await executor.execute(
-        session.sandbox_session_id,
+        browser,
         script,
         on_log=lambda msg: logs.append(msg),
     )
@@ -186,13 +188,18 @@ async def chat_with_assistant(
     # Resolve user's model config
     model_config = await _resolve_user_model_config(str(current_user.id))
 
+    # Get the page object for this session
+    page = rpa_manager.get_page(session_id)
+    if not page:
+        raise HTTPException(status_code=400, detail="No active page for this session")
+
     steps = [step.model_dump() for step in session.steps]
 
     async def event_generator():
         try:
             async for event in assistant.chat(
                 session_id=session_id,
-                sandbox_session_id=session.sandbox_session_id,
+                page=page,
                 message=request.message,
                 steps=steps,
                 model_config=model_config,

@@ -28,7 +28,6 @@ RUN --mount=type=cache,target=/root/.npm,sharing=locked \
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     pip config set global.timeout 600 \
     && python3 -m pip install -r /tmp/requirements.txt \
-    && python3 -m playwright install --with-deps chromium \
     && rm -f /tmp/requirements.txt \
     && python3 -c "import matplotlib; matplotlib.get_cachedir()" \
     && python3 -c "import matplotlib.font_manager; matplotlib.font_manager._load_fontmanager(try_read_cache=False)"

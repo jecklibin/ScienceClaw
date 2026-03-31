@@ -2,25 +2,24 @@ import json
 import logging
 import re
 import asyncio
-import base64
 from typing import Dict, List, Any, AsyncGenerator, Optional
 
-import httpx
+from playwright.async_api import Page
 from backend.deepagent.engine import get_llm_model
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """你是一个 RPA 录制助手。用户正在录制浏览器自动化技能，你需要根据用户的自然语言描述，结合当前页面状态和历史操作，生成 Playwright 同步 API 代码片段。
+SYSTEM_PROMPT = """你是一个 RPA 录制助手。用户正在录制浏览器自动化技能，你需要根据用户的自然语言描述，结合当前页面状态和历史操作，生成 Playwright 异步 API 代码片段。
 
 规则：
-1. 生成的代码必须使用 Playwright 同步 API（page.locator().click()，不是 await）
-2. 代码必须定义 def run(page): 函数
+1. 生成的代码必须使用 Playwright 异步 API（await page.locator().click()）
+2. 代码必须定义 async def run(page): 函数
 3. 使用动态适应的选择器：
-   - "点击第一个搜索结果" → page.locator("h3").first.click() 或 page.locator("[data-result]").first.click()
-   - "获取表格数据" → page.locator("table").first.inner_text()
+   - "点击第一个搜索结果" → await page.locator("h3").first.click() 或 await page.locator("[data-result]").first.click()
+   - "获取表格数据" → await page.locator("table").first.inner_text()
    - 不要硬编码具体文本内容，用位置/结构/角色选择
-4. 操作之间加 page.wait_for_timeout(500) 等待 UI 响应
-5. 如果操作可能触发页面导航，在 click 后加 page.wait_for_load_state("load")
+4. 操作之间加 await page.wait_for_timeout(500) 等待 UI 响应
+5. 如果操作可能触发页面导航，在 click 后加 await page.wait_for_load_state("load")
 6. 用 ```python 代码块包裹代码
 7. 代码之外可以附带简短说明"""
 
@@ -71,8 +70,7 @@ EXTRACT_ELEMENTS_JS = r"""() => {
 class RPAAssistant:
     """AI recording assistant: takes natural language, generates and executes Playwright code."""
 
-    def __init__(self, sandbox_url: str):
-        self.sandbox_url = sandbox_url.rstrip("/")
+    def __init__(self):
         self._histories: Dict[str, List[Dict[str, str]]] = {}
 
     def _get_history(self, session_id: str) -> List[Dict[str, str]]:
@@ -89,16 +87,23 @@ class RPAAssistant:
     async def chat(
         self,
         session_id: str,
-        sandbox_session_id: str,
+        page: Page,
         message: str,
         steps: List[Dict[str, Any]],
         model_config: Optional[Dict[str, Any]] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        """Stream AI assistant response. Yields SSE event dicts."""
+        """Stream AI assistant response. Yields SSE event dicts.
 
-        # 1. Get page elements
+        Args:
+            session_id: RPA session ID
+            page: The Playwright page object for this session
+            message: User's natural language instruction
+            steps: Current recorded steps
+            model_config: Optional LLM model config override
+        """
+        # 1. Get page elements directly via page.evaluate
         yield {"event": "message_chunk", "data": {"text": "正在分析当前页面...\n\n"}}
-        elements_json = await self._get_page_elements(sandbox_session_id)
+        elements_json = await self._get_page_elements(page)
 
         # 2. Build prompt
         history = self._get_history(session_id)
@@ -122,9 +127,9 @@ class RPAAssistant:
 
         yield {"event": "script", "data": {"code": code}}
 
-        # 5. Execute
+        # 5. Execute directly on the page object
         yield {"event": "executing", "data": {}}
-        result = await self._execute_command(sandbox_session_id, code)
+        result = await self._execute_on_page(page, code)
 
         if not result["success"]:
             # 6. Retry once with error context
@@ -142,7 +147,7 @@ class RPAAssistant:
             if retry_code:
                 yield {"event": "script", "data": {"code": retry_code}}
                 yield {"event": "executing", "data": {}}
-                result = await self._execute_command(sandbox_session_id, retry_code)
+                result = await self._execute_on_page(page, retry_code)
                 if result["success"]:
                     code = retry_code
                     full_response = retry_response
@@ -251,20 +256,27 @@ class RPAAssistant:
         match = re.search(pattern, text, re.DOTALL)
         if match:
             return match.group(1).strip()
-        pattern2 = r"(def run\(page\):.*)"
+        # Try async def run pattern
+        pattern2 = r"(async def run\(page\):.*)"
         match2 = re.search(pattern2, text, re.DOTALL)
         if match2:
             return match2.group(1).strip()
+        # Fallback: sync pattern
+        pattern3 = r"(def run\(page\):.*)"
+        match3 = re.search(pattern3, text, re.DOTALL)
+        if match3:
+            return match3.group(1).strip()
         return None
 
     @staticmethod
     def _extract_function_body(code: str) -> str:
-        """Extract the body of def run(page): for storage in step.value."""
+        """Extract the body of async def run(page): for storage in step.value."""
         lines = code.split("\n")
         body_lines = []
         in_body = False
         for line in lines:
-            if line.strip().startswith("def run("):
+            stripped = line.strip()
+            if stripped.startswith("async def run(") or stripped.startswith("def run("):
                 in_body = True
                 continue
             if in_body:
@@ -276,83 +288,44 @@ class RPAAssistant:
                     body_lines.append(line)
         return "\n".join(body_lines).strip()
 
-    async def _get_page_elements(self, sandbox_session_id: str) -> str:
-        """Extract interactive elements from the recording browser via command file."""
-        extract_code = f'''def run(page):
-    result = page.evaluate("""{EXTRACT_ELEMENTS_JS}""")
-    return result
-'''
-        result = await self._execute_command(sandbox_session_id, extract_code)
-        if result["success"]:
-            return result.get("output", "[]")
-        logger.warning(f"Failed to extract elements: {result.get('error', '')[:200]}")
-        return "[]"
+    async def _get_page_elements(self, page: Page) -> str:
+        """Extract interactive elements directly from the page."""
+        try:
+            result = await page.evaluate(EXTRACT_ELEMENTS_JS)
+            return result if isinstance(result, str) else json.dumps(result)
+        except Exception as e:
+            logger.warning(f"Failed to extract elements: {e}")
+            return "[]"
 
-    async def _execute_command(self, sandbox_session_id: str, code: str) -> Dict[str, Any]:
-        """Write command file to sandbox and poll for result."""
-        await self._exec_cmd(sandbox_session_id, "rm -f /tmp/rpa_command_result.json")
+    async def _execute_on_page(self, page: Page, code: str) -> Dict[str, Any]:
+        """Execute AI-generated code directly on the page object."""
+        # Pause event capture during AI script execution
+        try:
+            await page.evaluate("window.__rpa_paused = true")
+        except Exception:
+            pass
 
-        encoded = base64.b64encode(code.encode()).decode()
-        write_code = (
-            "import base64\n"
-            f"data = base64.b64decode('{encoded}')\n"
-            "with open('/tmp/rpa_command.py', 'wb') as f:\n"
-            "    f.write(data)\n"
-            "print('ok')"
-        )
-        await self._exec_code(sandbox_session_id, write_code)
+        try:
+            namespace: Dict[str, Any] = {"page": page}
+            exec(compile(code, "<rpa_assistant>", "exec"), namespace)
 
-        for _ in range(60):
-            await asyncio.sleep(0.5)
-            raw = await self._exec_cmd(
-                sandbox_session_id,
-                "cat /tmp/rpa_command_result.json 2>/dev/null"
-            )
-            if raw.strip():
-                try:
-                    return json.loads(raw.strip())
-                except json.JSONDecodeError:
-                    continue
+            if "run" in namespace and callable(namespace["run"]):
+                ret = await asyncio.wait_for(
+                    namespace["run"](page),
+                    timeout=30.0,
+                )
+                return {"success": True, "output": str(ret) if ret else "ok", "error": None}
+            else:
+                return {"success": False, "output": "", "error": "No run(page) function defined"}
 
-        return {"success": False, "output": "", "error": "Command execution timed out (30s)"}
-
-    async def _exec_cmd(self, session_id: str, cmd: str) -> str:
-        payload = {
-            "jsonrpc": "2.0", "id": 1,
-            "method": "tools/call",
-            "params": {"name": "sandbox_execute_bash", "arguments": {"cmd": cmd}},
-        }
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{self.sandbox_url}/mcp",
-                json=payload,
-                headers={
-                    "X-Session-ID": session_id,
-                    "Content-Type": "application/json",
-                    "Accept": "application/json, text/event-stream",
-                },
-            )
-            resp.raise_for_status()
-            result = resp.json()
-            return result.get("result", {}).get("structuredContent", {}).get("output", "")
-
-    async def _exec_code(self, session_id: str, code: str) -> str:
-        payload = {
-            "jsonrpc": "2.0", "id": 1,
-            "method": "tools/call",
-            "params": {"name": "sandbox_execute_code", "arguments": {"code": code, "language": "python"}},
-        }
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{self.sandbox_url}/mcp",
-                json=payload,
-                headers={
-                    "X-Session-ID": session_id,
-                    "Content-Type": "application/json",
-                    "Accept": "application/json, text/event-stream",
-                },
-            )
-            resp.raise_for_status()
-            result = resp.json()
-            sc = result.get("result", {}).get("structuredContent", {})
-            return sc.get("stdout") or sc.get("output") or ""
+        except asyncio.TimeoutError:
+            return {"success": False, "output": "", "error": "Command execution timed out (30s)"}
+        except Exception as e:
+            import traceback
+            return {"success": False, "output": "", "error": traceback.format_exc()}
+        finally:
+            # Resume event capture
+            try:
+                await page.evaluate("window.__rpa_paused = false")
+            except Exception:
+                pass

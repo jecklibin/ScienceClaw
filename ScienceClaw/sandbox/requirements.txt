@@ -1,13 +1,12 @@
-# ── RPA 录制与自动化 ───────────────────────────────────────────
-playwright
-playwright-stealth
-
 # ── @tool 运行依赖 + docx skill XML 处理 ───────────────────────────────
 langchain-core
 pydantic
 httpx
 pyyaml
 defusedxml
+
+# ── RPA 技能运行依赖（仅 Python 包，浏览器二进制由 sandbox 自带）──────
+playwright
 
 # ── PDF/XLSX/PPTX skill + data analysis 依赖 ───────────────────────────
 fpdf2>=2.8.5

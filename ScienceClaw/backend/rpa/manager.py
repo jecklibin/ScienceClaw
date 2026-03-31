@@ -1,15 +1,14 @@
 import json
 import logging
-import os
 import uuid
 import asyncio
-import base64
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 
-import httpx
 from pydantic import BaseModel, Field
-from .vlm_analyzer import VLMAnalyzer
+from playwright.async_api import Page, BrowserContext
+
+from .cdp_connector import cdp_connector
 
 logger = logging.getLogger(__name__)
 
@@ -38,20 +37,10 @@ class RPASession(BaseModel):
     sandbox_session_id: str
 
 
-# ── Browser script that runs INSIDE the sandbox ──────────────────────
-# Launched via nohup, writes events to /tmp/rpa_events.jsonl
-BROWSER_SCRIPT = r'''
-import os, json, sys, time
-os.environ["DISPLAY"] = ":99"
-
-from playwright.sync_api import sync_playwright
-
-EVENT_FILE = "/tmp/rpa_events.jsonl"
-# Clear previous events
-with open(EVENT_FILE, "w") as f:
-    pass
-
-CAPTURE_JS = """
+# ── CAPTURE_JS: injected into pages to capture user events ──────────
+# Calls window.__rpa_emit(JSON.stringify(evt)) which is bridged to
+# Python via page.expose_function().
+CAPTURE_JS = r"""
 (() => {
     if (window.__rpa_injected) return;
     window.__rpa_injected = true;
@@ -64,10 +53,10 @@ CAPTURE_JS = """
         S_NTH=10000, S_FALLBACK=10000000;
 
     // ── Helpers ─────────────────────────────────────────────────────
-    function norm(s) { return (s||'').replace(/\\s+/g,' ').trim(); }
+    function norm(s) { return (s||'').replace(/\s+/g,' ').trim(); }
     function cssEsc(s) {
         try { return CSS.escape(s); } catch(e) {
-            return s.replace(/([\\\\\"'\\[\\](){}|^$.*+?])/g,'\\\\$1');
+            return s.replace(/([\\"'\[\](){}|^$.*+?])/g,'\\$1');
         }
     }
     function isUnique(sel) {
@@ -113,7 +102,7 @@ CAPTURE_JS = """
         if (a) return norm(a);
         var lblBy = el.getAttribute('aria-labelledby');
         if (lblBy) {
-            var parts = lblBy.split(/\\s+/).map(function(id){
+            var parts = lblBy.split(/\s+/).map(function(id){
                 var ref = document.getElementById(id);
                 return ref ? norm(ref.textContent) : '';
             }).filter(Boolean);
@@ -122,7 +111,7 @@ CAPTURE_JS = """
         // For form elements, check associated label
         if (['INPUT','TEXTAREA','SELECT'].indexOf(el.tagName)>=0) {
             if (el.id) {
-                var lbl = document.querySelector('label[for=\"'+cssEsc(el.id)+'\"]');
+                var lbl = document.querySelector('label[for="'+cssEsc(el.id)+'"]');
                 if (lbl) return norm(lbl.textContent).substring(0,80);
             }
             if (el.closest && el.closest('label'))
@@ -169,8 +158,8 @@ CAPTURE_JS = """
         var tid = el.getAttribute('data-testid')||el.getAttribute('data-test-id')
                 ||el.getAttribute('data-test')||el.getAttribute('data-cy');
         if (tid) {
-            var tsel = '[data-testid=\"'+cssEsc(tid)+'\"]';
-            if (!isUnique(tsel)) tsel = '[data-test-id=\"'+cssEsc(tid)+'\"]';
+            var tsel = '[data-testid="'+cssEsc(tid)+'"]';
+            if (!isUnique(tsel)) tsel = '[data-test-id="'+cssEsc(tid)+'"]';
             candidates.push({s:S_TESTID, m:'testid', v:tid, sel:tsel});
         }
 
@@ -187,7 +176,7 @@ CAPTURE_JS = """
         if (['INPUT','TEXTAREA','SELECT'].indexOf(tag)>=0) {
             var labelText = '';
             if (el.id) {
-                var lbl = document.querySelector('label[for=\"'+cssEsc(el.id)+'\"]');
+                var lbl = document.querySelector('label[for="'+cssEsc(el.id)+'"]');
                 if (lbl) labelText = norm(lbl.textContent);
             }
             if (!labelText && el.closest && el.closest('label'))
@@ -223,20 +212,20 @@ CAPTURE_JS = """
         // 10. CSS [name=...] for form elements
         var nameAttr = el.getAttribute('name');
         if (nameAttr) {
-            var nsel = tag.toLowerCase()+'[name=\"'+cssEsc(nameAttr)+'\"]';
+            var nsel = tag.toLowerCase()+'[name="'+cssEsc(nameAttr)+'"]';
             candidates.push({s:S_CSS_ATTR, m:'css', v:nsel, sel:nsel});
         }
 
         // 11. CSS input[type=...]
         if (tag==='INPUT') {
             var itype = el.getAttribute('type')||'text';
-            var tsel2 = 'input[type=\"'+itype+'\"]';
+            var tsel2 = 'input[type="'+itype+'"]';
             candidates.push({s:S_CSS_ATTR, m:'css', v:tsel2, sel:tsel2});
         }
 
         // 12. CSS tag.class combos
         if (el.className && typeof el.className==='string') {
-            var classes = el.className.trim().split(/\\s+/).filter(function(c){
+            var classes = el.className.trim().split(/\s+/).filter(function(c){
                 return c && !isGuidLike(c);
             });
             for (var ci=1; ci<=Math.min(classes.length,3); ci++) {
@@ -446,127 +435,13 @@ CAPTURE_JS = """
 })();
 """
 
-p = sync_playwright().start()
-browser = p.chromium.launch(
-    headless=False,
-    executable_path="/usr/bin/chromium-browser",
-    args=["--no-sandbox", "--disable-gpu", "--start-maximized",
-          "--window-size=1280,720", "--disable-dev-shm-usage"]
-)
-# no_viewport=True lets --start-maximized control the actual window size
-context = browser.new_context(no_viewport=True)
-page = context.new_page()
-
-# Track last known URL to detect address-bar navigation
-_last_url = {"value": ""}
-
-# Bridge JS events to Python file via expose_function (thread-safe)
-def rpa_emit(event_json):
-    try:
-        with open(EVENT_FILE, "a") as f:
-            f.write(event_json + "\n")
-    except Exception as ex:
-        print(f"[RPA] emit error: {ex}", file=sys.stderr)
-
-page.expose_function("__rpa_emit", rpa_emit)
-
-# Capture address-bar navigation (typing URL + Enter, bookmarks, etc.)
-# This fires for ALL navigations including link clicks, but we only emit
-# a "navigate" event when the URL actually changes to a new origin/path.
-def on_navigated(frame):
-    if frame != page.main_frame:
-        return
-    new_url = frame.url
-    if new_url and new_url != _last_url["value"] and new_url != "about:blank":
-        _last_url["value"] = new_url
-        evt = json.dumps({
-            "action": "navigate",
-            "url": new_url,
-            "timestamp": int(time.time() * 1000),
-        })
-        try:
-            with open(EVENT_FILE, "a") as f:
-                f.write(evt + "\n")
-        except Exception:
-            pass
-
-page.on("framenavigated", on_navigated)
-
-# Re-inject JS capture on every page load
-def on_load(loaded_page):
-    try:
-        loaded_page.evaluate(CAPTURE_JS)
-    except Exception:
-        pass
-
-page.on("load", on_load)
-
-# Start on about:blank — let user decide where to go
-page.goto("about:blank")
-
-# ── Command file execution (for AI assistant) ───────────────────────
-import traceback as _tb
-
-def _execute_command(page, cmd_path, result_path):
-    """Execute a command file and write result."""
-    try:
-        code = open(cmd_path, 'r', encoding='utf-8').read()
-        os.remove(cmd_path)
-    except Exception:
-        return
-
-    # Pause event capture during AI script execution
-    try:
-        page.evaluate("window.__rpa_paused = true")
-    except Exception:
-        pass
-
-    result = {"success": False, "output": "", "error": None}
-    try:
-        ns = {"page": page, "os": os, "json": json}
-        exec(code, ns)
-        if "run" in ns and callable(ns["run"]):
-            ret = ns["run"](page)
-            result = {"success": True, "output": str(ret) if ret else "ok", "error": None}
-        else:
-            result = {"success": False, "output": "", "error": "No run(page) function defined"}
-    except Exception as e:
-        result = {"success": False, "output": "", "error": _tb.format_exc()}
-
-    # Resume event capture
-    try:
-        page.evaluate("window.__rpa_paused = false")
-    except Exception:
-        pass
-
-    with open(result_path, 'w', encoding='utf-8') as f:
-        json.dump(result, f)
-
-CMD_PATH = "/tmp/rpa_command.py"
-CMD_RESULT_PATH = "/tmp/rpa_command_result.json"
-
-print("READY", flush=True)
-
-# Main loop — process commands and keep Playwright event loop alive
-try:
-    while True:
-        if os.path.exists(CMD_PATH):
-            _execute_command(page, CMD_PATH, CMD_RESULT_PATH)
-        page.wait_for_timeout(500)
-except KeyboardInterrupt:
-    browser.close()
-    p.stop()
-'''
-
 
 class RPASessionManager:
-    def __init__(self, sandbox_url: str, vlm_api_key: str = "", vlm_base_url: str = ""):
-        self.sandbox_url = sandbox_url.rstrip("/")
+    def __init__(self):
         self.sessions: Dict[str, RPASession] = {}
-        self.vlm_analyzer = VLMAnalyzer(vlm_api_key, vlm_base_url) if vlm_api_key else None
         self.ws_connections: Dict[str, List] = {}
-
-    # ── Session lifecycle ────────────────────────────────────────────
+        self._contexts: Dict[str, BrowserContext] = {}
+        self._pages: Dict[str, Page] = {}
 
     async def create_session(self, user_id: str, sandbox_session_id: str) -> RPASession:
         session_id = str(uuid.uuid4())
@@ -577,156 +452,103 @@ class RPASessionManager:
         )
         self.sessions[session_id] = session
 
-        # Kill any leftover RPA browser processes
-        # Then stop sandbox's built-in browser via supervisorctl (pkill won't work
-        # because supervisord has autorestart=true on the browser service)
-        await self._exec_sandbox_cmd(
-            sandbox_session_id,
-            "pkill -f rpa_browser.py 2>/dev/null; "
-            "pkill -f 'playwright_chromiumdev' 2>/dev/null; "
-            "supervisorctl stop browser 2>/dev/null; "
-            "supervisorctl stop mcp-server-browser 2>/dev/null; "
-            "sleep 1; echo ok"
-        )
+        browser = await cdp_connector.get_browser()
+        context = await browser.new_context(no_viewport=True)
+        page = await context.new_page()
 
-        # Write the browser script into the sandbox
-        await self._write_browser_script(sandbox_session_id)
+        self._contexts[session_id] = context
+        self._pages[session_id] = page
 
-        # Launch browser in background
-        await self._exec_sandbox_cmd(
-            sandbox_session_id,
-            "nohup python3 /tmp/rpa_browser.py > /tmp/browser.log 2>&1 &"
-        )
+        async def rpa_emit(event_json: str):
+            try:
+                evt = json.loads(event_json)
+                await self._handle_event(session_id, evt)
+            except Exception as e:
+                logger.error(f"[RPA] emit error: {e}")
 
-        # Wait for browser to be ready
-        ready = False
-        for _ in range(10):
-            await asyncio.sleep(2)
-            log = await self._exec_sandbox_cmd(
-                sandbox_session_id, "cat /tmp/browser.log 2>/dev/null"
-            )
-            if "READY" in log:
-                ready = True
-                break
-            print(f"[RPA] Waiting for browser... log: {log[:200]}")
+        await page.expose_function("__rpa_emit", rpa_emit)
+        await page.evaluate(CAPTURE_JS)
 
-        if ready:
-            print("[RPA] Browser started successfully")
-        else:
-            log = await self._exec_sandbox_cmd(
-                sandbox_session_id, "cat /tmp/browser.log 2>/dev/null | tail -20"
-            )
-            print(f"[RPA] WARNING: Browser may not be ready. Log:\n{log[:500]}")
+        last_url = {"value": ""}
 
-        # Start polling for events
-        asyncio.create_task(self._poll_events(session_id, sandbox_session_id))
+        def on_navigated(frame):
+            if frame != page.main_frame:
+                return
+            new_url = frame.url
+            if new_url and new_url != last_url["value"] and new_url != "about:blank":
+                last_url["value"] = new_url
+                evt = {
+                    "action": "navigate",
+                    "url": new_url,
+                    "timestamp": int(datetime.now().timestamp() * 1000),
+                }
+                asyncio.create_task(self._handle_event(session_id, evt))
+
+        page.on("framenavigated", on_navigated)
+
+        async def on_load(loaded_page):
+            try:
+                await loaded_page.evaluate(CAPTURE_JS)
+            except Exception:
+                pass
+
+        page.on("load", on_load)
+
+        await page.goto("about:blank")
+        await page.bring_to_front()
+
+        logger.info(f"[RPA] Session {session_id} started via CDP")
         return session
 
     async def stop_session(self, session_id: str):
         if session_id in self.sessions:
             self.sessions[session_id].status = "stopped"
-            sandbox_sid = self.sessions[session_id].sandbox_session_id
-            # Kill Playwright browser and restart sandbox's built-in browser
-            await self._exec_sandbox_cmd(
-                sandbox_sid,
-                "pkill -f rpa_browser.py 2>/dev/null; "
-                "pkill -f 'playwright_chromiumdev' 2>/dev/null; "
-                "supervisorctl start browser 2>/dev/null; "
-                "supervisorctl start mcp-server-browser 2>/dev/null; "
-                "echo stopped"
-            )
+
+        context = self._contexts.pop(session_id, None)
+        self._pages.pop(session_id, None)
+        if context:
+            try:
+                await context.close()
+            except Exception as e:
+                logger.warning(f"[RPA] Error closing context: {e}")
+
+        logger.info(f"[RPA] Session {session_id} stopped")
 
     async def get_session(self, session_id: str) -> Optional[RPASession]:
         return self.sessions.get(session_id)
 
-    # ── Write browser script to sandbox ──────────────────────────────
+    def get_page(self, session_id: str) -> Optional[Page]:
+        return self._pages.get(session_id)
 
-    async def _write_browser_script(self, sandbox_session_id: str):
-        """Write the Playwright browser script into the sandbox via sandbox_execute_code."""
-        encoded = base64.b64encode(BROWSER_SCRIPT.encode()).decode()
-        write_code = (
-            "import base64\n"
-            f"data = base64.b64decode('{encoded}')\n"
-            "with open('/tmp/rpa_browser.py', 'wb') as f:\n"
-            "    f.write(data)\n"
-            "print('Script written OK')"
-        )
-        result = await self._exec_sandbox_code(sandbox_session_id, write_code)
-        print(f"[RPA] Write script result: {result[:200]}")
+    async def _handle_event(self, session_id: str, evt: dict):
+        if session_id not in self.sessions:
+            return
+        if self.sessions[session_id].status != "recording":
+            return
 
-    # ── Event polling ────────────────────────────────────────────────
+        if evt.get("action") == "navigate":
+            nav_ts = evt.get("timestamp", 0)
+            steps = self.sessions[session_id].steps
+            if steps:
+                last_step = steps[-1]
+                if last_step.action in ("click", "press", "fill"):
+                    last_ts = last_step.timestamp.timestamp() * 1000
+                    if nav_ts - last_ts < 5000:
+                        logger.debug(f"[RPA] Skipping nav (side-effect): {evt.get('url', '')[:60]}")
+                        return
 
-    async def _poll_events(self, session_id: str, sandbox_session_id: str):
-        """Poll /tmp/rpa_events.jsonl for new events."""
-        seen_count = 0
-        while session_id in self.sessions and self.sessions[session_id].status == "recording":
-            try:
-                raw = await self._exec_sandbox_cmd(
-                    sandbox_session_id,
-                    "cat /tmp/rpa_events.jsonl 2>/dev/null | wc -l"
-                )
-                total = int(raw.strip()) if raw.strip().isdigit() else 0
-
-                if total > seen_count:
-                    skip = seen_count + 1
-                    new_lines = await self._exec_sandbox_cmd(
-                        sandbox_session_id,
-                        f"tail -n +{skip} /tmp/rpa_events.jsonl"
-                    )
-                    # Parse all new events
-                    new_events = []
-                    for line in new_lines.strip().split("\n"):
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            new_events.append(json.loads(line))
-                        except json.JSONDecodeError:
-                            pass
-
-                    # Deduplicate: drop navigate events that follow a
-                    # click/press/fill within 5 seconds (navigation is a
-                    # side-effect of the user action, not a separate step)
-                    filtered = []
-                    for evt in new_events:
-                        if evt.get("action") == "navigate":
-                            nav_ts = evt.get("timestamp", 0)
-                            # Check preceding events in this batch + session steps
-                            is_side_effect = False
-                            for prev in reversed(filtered):
-                                if prev.get("action") in ("click", "press", "fill"):
-                                    if nav_ts - prev.get("timestamp", 0) < 5000:
-                                        is_side_effect = True
-                                    break
-                            if not is_side_effect and self.sessions[session_id].steps:
-                                last_step = self.sessions[session_id].steps[-1]
-                                if last_step.action in ("click", "press", "fill"):
-                                    last_ts = last_step.timestamp.timestamp() * 1000
-                                    if nav_ts - last_ts < 5000:
-                                        is_side_effect = True
-                            if is_side_effect:
-                                print(f"[RPA] Skipping nav (side-effect): {evt.get('url', '')[:60]}")
-                                continue
-                        filtered.append(evt)
-
-                    for evt in filtered:
-                        locator_info = evt.get("locator", {})
-                        step_data = {
-                            "action": evt.get("action", "unknown"),
-                            "target": json.dumps(locator_info) if locator_info else "",
-                            "value": evt.get("value", ""),
-                            "label": "",
-                            "tag": evt.get("tag", ""),
-                            "url": evt.get("url", ""),
-                            "description": self._make_description(evt),
-                        }
-                        await self.add_step(session_id, step_data)
-                        print(f"[RPA] Step: {step_data['description'][:60]}")
-                    seen_count = total
-            except Exception as e:
-                print(f"[RPA] Poll error: {e}")
-
-            await asyncio.sleep(2)
+        locator_info = evt.get("locator", {})
+        step_data = {
+            "action": evt.get("action", "unknown"),
+            "target": json.dumps(locator_info) if locator_info else "",
+            "value": evt.get("value", ""),
+            "label": "",
+            "tag": evt.get("tag", ""),
+            "url": evt.get("url", ""),
+            "description": self._make_description(evt),
+        }
+        await self.add_step(session_id, step_data)
+        logger.debug(f"[RPA] Step: {step_data['description'][:60]}")
 
     @staticmethod
     def _make_description(evt: dict) -> str:
@@ -734,7 +556,6 @@ class RPASessionManager:
         value = evt.get("value", "")
         locator = evt.get("locator", {})
 
-        # Build a human-readable target from the locator info
         method = locator.get("method", "") if isinstance(locator, dict) else ""
         if method == "role":
             name = locator.get("name", "")
@@ -764,8 +585,6 @@ class RPASessionManager:
             return f"导航到 {evt.get('url', '')}"
         return f"{action} on {target}"
 
-    # ── Step management ──────────────────────────────────────────────
-
     async def add_step(self, session_id: str, step_data: Dict[str, Any]) -> RPAStep:
         if session_id not in self.sessions:
             raise ValueError(f"Session {session_id} not found")
@@ -774,7 +593,6 @@ class RPASessionManager:
         step = RPAStep(id=str(uuid.uuid4()), **step_data)
         session.steps.append(step)
 
-        # Broadcast to WebSocket clients
         await self._broadcast_step(session_id, step)
         return step
 
@@ -799,59 +617,6 @@ class RPASessionManager:
             except ValueError:
                 pass
 
-    # ── Sandbox MCP helpers ──────────────────────────────────────────
-
-    async def _exec_sandbox_cmd(self, session_id: str, cmd: str) -> str:
-        payload = {
-            "jsonrpc": "2.0", "id": 1,
-            "method": "tools/call",
-            "params": {"name": "sandbox_execute_bash", "arguments": {"cmd": cmd}},
-        }
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{self.sandbox_url}/mcp",
-                json=payload,
-                headers={
-                    "X-Session-ID": session_id,
-                    "Content-Type": "application/json",
-                    "Accept": "application/json, text/event-stream",
-                },
-            )
-            resp.raise_for_status()
-            result = resp.json()
-            return result.get("result", {}).get("structuredContent", {}).get("output", "")
-
-    async def _exec_sandbox_code(self, session_id: str, code: str) -> str:
-        payload = {
-            "jsonrpc": "2.0", "id": 1,
-            "method": "tools/call",
-            "params": {"name": "sandbox_execute_code", "arguments": {"code": code, "language": "python"}},
-        }
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{self.sandbox_url}/mcp",
-                json=payload,
-                headers={
-                    "X-Session-ID": session_id,
-                    "Content-Type": "application/json",
-                    "Accept": "application/json, text/event-stream",
-                },
-            )
-            resp.raise_for_status()
-            result = resp.json()
-            sc = result.get("result", {}).get("structuredContent", {})
-            stdout = sc.get("stdout") or sc.get("output") or ""
-            stderr = sc.get("stderr") or ""
-            if stderr:
-                print(f"[RPA] Code stderr: {stderr[:200]}")
-            return stdout
-
 
 # ── Global instance ──────────────────────────────────────────────────
-from backend.config import settings
-
-rpa_manager = RPASessionManager(
-    sandbox_url=settings.sandbox_mcp_url.replace("/mcp", ""),
-    vlm_api_key=settings.model_ds_api_key,
-    vlm_base_url=settings.model_ds_base_url,
-)
+rpa_manager = RPASessionManager()
