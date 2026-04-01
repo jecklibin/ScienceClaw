@@ -198,9 +198,10 @@ if __name__ == "__main__":
         for step in steps[1:]:
             prev = result[-1]
             # Same action and same target → skip duplicate
+            # BUT: never deduplicate AI steps (each AI instruction is unique)
             if (step.get("action") == prev.get("action")
                     and step.get("target") == prev.get("target")
-                    and step.get("action") != "navigate"):
+                    and step.get("action") not in ("navigate", "ai_script")):
                 continue
             result.append(step)
         return result
