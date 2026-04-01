@@ -170,9 +170,8 @@ Always respond in {language_instruction}.
 - Prefer execution over explanation. If a task can be solved through code or tools, implement and execute the solution instead of only describing it.
 - **Write files, not chat**: When the user asks to write, create, or generate code/scripts/files, ALWAYS use `write_file` to create real files — never just paste code in chat.
 - **Write → Execute → Fix loop**: After writing ANY executable script, you MUST immediately run it via `execute` to verify correctness. If it fails, fix and re-run.
-- **Skill-first approach**: ALWAYS check available skills (`/builtin-skills/` and `/skills/`) before starting any task. If a skill matches, `read_file` its SKILL.md and follow the workflow. Do NOT reinvent what a skill already provides.
+- **Skill-first approach**: ALWAYS check available skills (`{builtin_skills_path}` and `{external_skills_path}`) before starting any task. If a skill matches, `read_file` its SKILL.md and follow the workflow. Do NOT reinvent what a skill already provides.
 - **SKILL.md files are instruction documents** — use `read_file` to read them, NEVER `execute` them as scripts.
-- **Executing skill scripts**: When a skill contains executable files (e.g., `skill.py`), they are available in your workspace at `{workspace_dir}/.skills/<skill_name>/`. Use this absolute path when running skill scripts via `execute`. Example: `execute("python3 {workspace_dir}/.skills/my-skill/skill.py")`.
 - Solve problems proactively. Only ask questions when the intent or requirements are truly unclear.
 
 ## Workspace
@@ -198,8 +197,8 @@ The sandbox is an isolated execution environment. Scripts running in the sandbox
 ### Step 2: Execute
 - If a skill matched → follow the skill's workflow completely.
 - Otherwise, use tools directly. Priority: existing skills > built-in tools.
-- **Before `propose_tool_save`**: read `/builtin-skills/tool-creator/SKILL.md` first.
-- **Before `propose_skill_save`**: read `/builtin-skills/skill-creator/SKILL.md` first.
+- **Before `propose_tool_save`**: read `{builtin_skills_path}tool-creator/SKILL.md` first.
+- **Before `propose_skill_save`**: read `{builtin_skills_path}skill-creator/SKILL.md` first.
 - Build incrementally — one component per tool call. Test via `execute` after writing.
 
 ### Step 3: Verify & Deliver
@@ -238,7 +237,8 @@ _LANGUAGE_MAP = {
 }
 
 
-def get_system_prompt(workspace_dir: str, sandbox_env: str | None = None, language: str | None = None) -> str:
+def get_system_prompt(workspace_dir: str, sandbox_env: str | None = None, language: str | None = None,
+                      builtin_skills_path: str | None = None, external_skills_path: str | None = None) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
     lang_code = (language or "").strip().lower()
     if lang_code in _LANGUAGE_MAP:
@@ -251,10 +251,16 @@ def get_system_prompt(workspace_dir: str, sandbox_env: str | None = None, langua
     else:
         language_instruction = "- Always respond in the same language the user uses."
 
+    # 默认使用虚拟路由（云端模式）
+    builtin_path = builtin_skills_path or _BUILTIN_SKILLS_ROUTE
+    external_path = external_skills_path or _EXTERNAL_SKILLS_ROUTE
+
     prompt = _SYSTEM_PROMPT_TEMPLATE.format(
         current_datetime=now,
         workspace_dir=workspace_dir,
         language_instruction=language_instruction,
+        builtin_skills_path=builtin_path,
+        external_skills_path=external_path,
     )
     if sandbox_env:
         prompt += f"\n\n## Sandbox Environment Information\n{sandbox_env}"
@@ -428,8 +434,11 @@ async def deep_agent(
         except Exception as exc:
             logger.warning(f"[Skills] 技能注入沙箱失败: {exc}")
 
-    # 2. 构建复合后端（可能包含 Skills 路由）
-    backend = _build_backend(session_id, sandbox, user_id=user_id, blocked_skills=blocked_skills)
+    # 2. 构建后端：本地模式直接用 LocalShellBackend，云端模式用 CompositeBackend
+    if is_local:
+        backend = sandbox
+    else:
+        backend = _build_backend(session_id, sandbox, user_id=user_id, blocked_skills=blocked_skills)
 
     # 工具结果自动落盘中间件：大型工具结果写入文件，Agent 按需 read_file 读取
     offload_middleware = ToolResultOffloadMiddleware(
@@ -451,20 +460,39 @@ async def deep_agent(
         "middleware": [offload_middleware, sse_middleware],
     }
 
-    # 4. 注入系统提示词
-    system_prompt = get_system_prompt(sandbox_workspace, sandbox_info, language=language)
+    # 3. Skills 配置：本地模式用实际目录，云端模式用虚拟路由
+    skills_sources: List[str] = []
+    builtin_path_for_prompt = _BUILTIN_SKILLS_ROUTE
+    external_path_for_prompt = _EXTERNAL_SKILLS_ROUTE
+
+    if is_local:
+        # 本地模式：直接传实际目录路径
+        if os.path.isdir(_BUILTIN_SKILLS_DIR):
+            skills_sources.append(_BUILTIN_SKILLS_DIR)
+            builtin_path_for_prompt = _BUILTIN_SKILLS_DIR + "/"
+        _ext_skills_dir = os.environ.get("EXTERNAL_SKILLS_DIR", "./Skills")
+        if os.path.isdir(_ext_skills_dir):
+            skills_sources.append(_ext_skills_dir)
+            external_path_for_prompt = _ext_skills_dir + "/"
+    else:
+        # 云端模式：使用虚拟路由（由 CompositeBackend 处理）
+        if os.path.isdir(_BUILTIN_SKILLS_DIR):
+            skills_sources.append(_BUILTIN_SKILLS_ROUTE)
+        if user_id:
+            skills_sources.append(_EXTERNAL_SKILLS_ROUTE)
+
+    # 4. 注入系统提示词（传入实际路径）
+    system_prompt = get_system_prompt(
+        sandbox_workspace, sandbox_info, language=language,
+        builtin_skills_path=builtin_path_for_prompt,
+        external_skills_path=external_path_for_prompt
+    )
     agent_kwargs["system_prompt"] = system_prompt
 
     if diag:
         diag.save_system_prompt(system_prompt)
 
     agent_kwargs["backend"] = backend
-
-    skills_sources: List[str] = []
-    if os.path.isdir(_BUILTIN_SKILLS_DIR):
-        skills_sources.append(_BUILTIN_SKILLS_ROUTE)
-    if user_id:
-        skills_sources.append(_EXTERNAL_SKILLS_ROUTE)
 
     if skills_sources:
         agent_kwargs["skills"] = skills_sources
@@ -532,11 +560,11 @@ When a skill contains executable files (e.g., skill.py), use the sandbox-local p
 NEVER use `npx skills`. Use `skills` directly. When installing: `HOME={sandbox_workspace} skills add <package> -g -y --agent '*'`. ALL flags are mandatory — omitting any will hang on interactive prompts.
 
 ## Task Resources
-- **Existing skill?** → `read_file` the SKILL.md and follow it. Check `/skills/` for local installs first.
-- **PDF processing?** → `read_file("/builtin-skills/pdf/SKILL.md")`. For form filling, also read FORMS.md.
-- **Create a tool** → `read_file("/builtin-skills/tool-creator/SKILL.md")`. NEVER write to /app/Tools/ directly.
-- **Create a skill** → `read_file("/builtin-skills/skill-creator/SKILL.md")`. NEVER write to `/skills/` directly.
-- **Find ecosystem skill** → `read_file("/builtin-skills/find-skills/SKILL.md")`. After 2-3 failures, create from scratch.
+- **Existing skill?** → `read_file` the SKILL.md and follow it. Check `{external_path_for_prompt}` for local installs first.
+- **PDF processing?** → `read_file("{builtin_path_for_prompt}pdf/SKILL.md")`. For form filling, also read FORMS.md.
+- **Create a tool** → `read_file("{builtin_path_for_prompt}tool-creator/SKILL.md")`. NEVER write to /app/Tools/ directly.
+- **Create a skill** → `read_file("{builtin_path_for_prompt}skill-creator/SKILL.md")`. NEVER write to `{external_path_for_prompt}` directly.
+- **Find ecosystem skill** → `read_file("{builtin_path_for_prompt}find-skills/SKILL.md")`. After 2-3 failures, create from scratch.
 Always use `write_file` to workspace then `propose_skill_save` / `propose_tool_save`.
 """
     GENERAL_PURPOSE_SUBAGENT["system_prompt"] = DEFAULT_SUBAGENT_PROMPT + _subagent_policy

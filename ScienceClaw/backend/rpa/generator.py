@@ -13,9 +13,8 @@ class PlaywrightGenerator:
     The generator simply translates the locator objects into Playwright API calls.
     """
 
-    # Boilerplate that wraps execute_skill into a directly-executable script.
-    # Connects to the sandbox's browser via CDP.
-    RUNNER_TEMPLATE = '''\
+    # Docker mode: connects to sandbox's browser via CDP
+    RUNNER_TEMPLATE_DOCKER = '''\
 import asyncio
 import sys
 import httpx
@@ -61,7 +60,45 @@ if __name__ == "__main__":
     asyncio.run(main())
 '''
 
-    def generate_script(self, steps: List[Dict[str, Any]], params: Dict[str, Any] = None) -> str:
+    # Local mode: launches local browser directly
+    RUNNER_TEMPLATE_LOCAL = '''\
+import asyncio
+import sys
+from playwright.async_api import async_playwright
+
+
+{execute_skill_func}
+
+
+async def main():
+    kwargs = {{}}
+    for arg in sys.argv[1:]:
+        if arg.startswith("--") and "=" in arg:
+            k, v = arg[2:].split("=", 1)
+            kwargs[k] = v
+
+    pw = await async_playwright().start()
+    browser = await pw.chromium.launch(headless=False)
+    context = await browser.new_context(no_viewport=True)
+    page = await context.new_page()
+    page.set_default_timeout(15000)
+    try:
+        await execute_skill(page, **kwargs)
+        print("SKILL_SUCCESS")
+    except Exception as e:
+        print(f"SKILL_ERROR: {{e}}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        await context.close()
+        await browser.close()
+        await pw.stop()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+'''
+
+    def generate_script(self, steps: List[Dict[str, Any]], params: Dict[str, Any] = None, is_local: bool = False) -> str:
         params = params or {}
 
         lines = [
@@ -149,7 +186,8 @@ if __name__ == "__main__":
 
         # Wrap execute_skill function with the runner boilerplate
         execute_skill_func = "\n".join(lines)
-        return self.RUNNER_TEMPLATE.format(execute_skill_func=execute_skill_func)
+        template = self.RUNNER_TEMPLATE_LOCAL if is_local else self.RUNNER_TEMPLATE_DOCKER
+        return template.format(execute_skill_func=execute_skill_func)
 
     @staticmethod
     def _deduplicate_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

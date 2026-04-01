@@ -123,7 +123,7 @@ async def generate_script(
         raise HTTPException(status_code=404, detail="Session not found")
 
     steps = [step.model_dump() for step in session.steps]
-    script = generator.generate_script(steps, request.params)
+    script = generator.generate_script(steps, request.params, is_local=(settings.storage_backend == "local"))
     return {"status": "success", "script": script}
 
 
@@ -138,7 +138,7 @@ async def test_script(
         raise HTTPException(status_code=404, detail="Session not found")
 
     steps = [step.model_dump() for step in session.steps]
-    script = generator.generate_script(steps, request.params)
+    script = generator.generate_script(steps, request.params, is_local=(settings.storage_backend == "local"))
 
     logs = []
     browser = await get_cdp_connector().get_browser()
@@ -164,7 +164,7 @@ async def save_skill(
         raise HTTPException(status_code=404, detail="Session not found")
 
     steps = [step.model_dump() for step in session.steps]
-    script = generator.generate_script(steps, request.params)
+    script = generator.generate_script(steps, request.params, is_local=(settings.storage_backend == "local"))
 
     skill_name = await exporter.export_skill(
         user_id=str(current_user.id),
