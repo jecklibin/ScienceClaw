@@ -150,10 +150,10 @@ const fullGreeting = computed(() => {
 
 // 打字机效果循环显示的副标题
 const subtitleTemplates = computed(() => [
-  t('What are you researching today?'),
-  t('Any questions about proteins or genes?'),
-  t('Need help analyzing drug data?'),
-  t('Ready to explore scientific insights?'),
+  t('What would you like to automate today?'),
+  t('Need to record browser operations?'),
+  t('Want to batch process documents or forms?'),
+  t('Ready to boost your productivity?'),
 ]);
 
 const currentSubtitle = computed(() => subtitleTemplates.value[currentSubtitleIdx.value]);
@@ -199,37 +199,37 @@ function startErasing() {
 
 const quickPrompts = computed(() => [
   {
-    icon: '🧬',
-    title: t('Protein & Disease'),
-    desc: t('Multi-step target analysis pipeline'),
-    query: t('I am studying Alzheimer\'s disease (EFO_0000249). Please: 1) Find the top 5 drug targets associated with this disease 2) Query the protein function of the top-ranked target 3) Compile the findings into a comprehensive PDF research report'),
+    icon: '🌐',
+    title: t('Web Data Scraping'),
+    desc: t('Automated browser operations and data extraction'),
+    query: t('Help me scrape product information from an e-commerce website: 1) Open the target website and search for specified keywords 2) Extract titles, prices, and ratings of the top 20 products 3) Organize the data into an Excel spreadsheet'),
     glow: 'bg-gradient-to-r from-blue-400/20 via-indigo-400/20 to-purple-400/20',
     textGradient: 'group-hover:from-blue-600 group-hover:to-indigo-600',
     gradient: 'from-blue-500 to-indigo-600',
   },
   {
-    icon: '💊',
-    title: t('Drug Safety Profile'),
-    desc: t('FDA adverse event analysis with data visualization'),
-    query: t('Analyze the drug safety profile of aspirin: 1) Query the top 10 most common adverse reactions from the FDA FAERS database 2) Analyze the results and generate a detailed Excel spreadsheet of adverse reactions sorted by report count'),
+    icon: '📝',
+    title: t('Batch Form Filling'),
+    desc: t('Automated form submission and data entry'),
+    query: t('Batch fill online forms: 1) Read data to be submitted from Excel 2) Automatically open form pages and fill them one by one 3) Record success status to result spreadsheet after submission'),
     glow: 'bg-gradient-to-r from-emerald-400/20 via-teal-400/20 to-cyan-400/20',
     textGradient: 'group-hover:from-emerald-600 group-hover:to-teal-600',
     gradient: 'from-emerald-500 to-teal-600',
   },
   {
-    icon: '🧪',
-    title: t('Compound ADMET'),
-    desc: t('Multi-dimensional drug property prediction'),
-    query: t('Evaluate the drug-likeness of compound CC(=O)Oc1ccccc1C(=O)O (aspirin SMILES): predict its BBB penetrance, toxicity, and bioavailability using ADMET tools, then produce a detailed Word document with the comprehensive assessment'),
+    icon: '⏰',
+    title: t('Scheduled Task Monitoring'),
+    desc: t('Periodic webpage checking and notifications'),
+    query: t('Set up scheduled monitoring task: Check specified webpage content changes every day at 9 AM, send notification email if updated, and save changes to log file'),
     glow: 'bg-gradient-to-r from-violet-400/20 via-fuchsia-400/20 to-pink-400/20',
     textGradient: 'group-hover:from-violet-600 group-hover:to-fuchsia-600',
     gradient: 'from-violet-500 to-fuchsia-600',
   },
   {
-    icon: '📊',
-    title: t('Literature & Data'),
-    desc: t('Cross-database research synthesis'),
-    query: t('Conduct a research overview on BRCA1 gene and breast cancer: 1) Search for relevant publications about BRCA1 mutations 2) Query BRCA1 protein (P38398) function from UniProt 3) Find top drug targets for breast cancer (EFO_0000305) 4) Synthesize all findings into a comprehensive PDF research report'),
+    icon: '📄',
+    title: t('Batch Document Processing'),
+    desc: t('Multi-format document conversion and integration'),
+    query: t('Batch process documents: 1) Read all Word documents in the folder 2) Extract key information and summarize 3) Generate unified format PDF report and archive by date'),
     glow: 'bg-gradient-to-r from-amber-400/20 via-orange-400/20 to-red-400/20',
     textGradient: 'group-hover:from-amber-600 group-hover:to-orange-600',
     gradient: 'from-amber-500 to-orange-600',
