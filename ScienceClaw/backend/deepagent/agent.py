@@ -470,7 +470,7 @@ async def deep_agent(
         if os.path.isdir(_BUILTIN_SKILLS_DIR):
             skills_sources.append(_BUILTIN_SKILLS_DIR)
             builtin_path_for_prompt = _BUILTIN_SKILLS_DIR + "/"
-        _ext_skills_dir = os.environ.get("EXTERNAL_SKILLS_DIR", "./Skills")
+        _ext_skills_dir = os.path.abspath(settings.external_skills_dir)
         if os.path.isdir(_ext_skills_dir):
             skills_sources.append(_ext_skills_dir)
             external_path_for_prompt = _ext_skills_dir + "/"
