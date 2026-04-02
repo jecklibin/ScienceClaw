@@ -829,7 +829,7 @@ async def save_skill_from_session(
     body: SaveSkillRequest,
     current_user: User = Depends(require_user),
 ) -> ApiResponse:
-    """Save a skill from session workspace to MongoDB."""
+    """Save a skill from session workspace to the active skill store."""
     try:
         session = await async_get_science_session(session_id)
         if session.user_id != current_user.id:
@@ -850,9 +850,8 @@ async def save_skill_from_session(
             None,
         )
 
-        col = _get_repo("skills")
-
         if src is None:
+            col = _get_repo("skills")
             # Agent 可能通过 MongoSkillBackend 直接写入了 MongoDB（in-place 编辑），
             # 此时 workspace 里没有副本，但 MongoDB 已经是最新版本
             existing = await col.find_one(
@@ -877,6 +876,26 @@ async def save_skill_from_session(
                 except Exception:
                     pass
 
+        if settings.storage_backend == "local":
+            # Local mode uses the external skills directory as the single source of truth.
+            dst = _Path(settings.external_skills_dir) / skill_name
+            dst.mkdir(parents=True, exist_ok=True)
+
+            for fp in list(dst.rglob("*")):
+                if fp.is_file():
+                    fp.unlink()
+
+            for rel, content in files.items():
+                out = dst / rel
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(content, encoding="utf-8")
+
+            logger.info(
+                f"[Skills] Saved skill '{skill_name}' from session {session_id} "
+                f"to filesystem {dst}"
+            )
+            return ApiResponse(data={"skill_name": skill_name, "saved": True})
+
         # Parse description from SKILL.md frontmatter
         description = ""
         skill_md = files.get("SKILL.md", "")
@@ -889,6 +908,7 @@ async def save_skill_from_session(
             except Exception:
                 pass
 
+        col = _get_repo("skills")
         # Upsert to MongoDB
         now = datetime.now(timezone.utc)
         await col.update_one(
