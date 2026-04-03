@@ -85,6 +85,26 @@ export function getBackendWsUrl(path: string): string {
   return url.toString();
 }
 
+export function getBackendVncPageUrl(sessionId: string, viewOnly = true): string {
+  const token = getStoredToken();
+  const proxyPathBase = `api/v1/rpa/vnc/page/${encodeURIComponent(sessionId)}/websockify`;
+  const proxyPath = token
+    ? `${proxyPathBase}?token=${encodeURIComponent(token)}`
+    : proxyPathBase;
+  const url = new URL(
+    `${window.location.protocol}//${window.location.host}/api/v1/rpa/vnc/page/${encodeURIComponent(sessionId)}/index.html`,
+  );
+  url.searchParams.set('autoconnect', 'true');
+  url.searchParams.set('resize', 'scale');
+  url.searchParams.set('view_only', viewOnly ? 'true' : 'false');
+  url.searchParams.set('path', proxyPath);
+
+  if (token) {
+    url.searchParams.set('token', token);
+  }
+  return url.toString();
+}
+
 export function getSandboxScreenshotUrl(): string {
   return `${getSandboxBaseUrl()}/vnc/screenshot`;
 }

@@ -62,12 +62,11 @@
       />
 
       <!-- Browser VNC view -->
-      <VNCViewer
-        v-else-if="activeTab === 'browser' && !localMode"
-        :session-id="props.sessionId || 'sandbox'"
-        :direct-ws-url="vncWsUrl"
-        :enabled="visible && expanded && activeTab === 'browser'"
-        :view-only="true"
+      <iframe
+        v-else-if="activeTab === 'browser' && !localMode && props.sessionId"
+        :src="vncPageUrl"
+        class="w-full h-full border-0 bg-black"
+        allow="clipboard-read; clipboard-write"
       />
       <canvas
         v-else-if="activeTab === 'browser' && localMode"
@@ -83,8 +82,7 @@ import { ref, computed, watch, onBeforeUnmount } from 'vue';
 import { X as XIcon, ChevronRight as ChevronRightIcon, Monitor as MonitorIcon } from 'lucide-vue-next';
 import { useI18n } from 'vue-i18n';
 import SandboxTerminal from './SandboxTerminal.vue';
-import VNCViewer from './VNCViewer.vue';
-import { getBackendWsUrl, isLocalMode, type SandboxPreviewMode } from '@/utils/sandbox';
+import { getBackendVncPageUrl, getBackendWsUrl, isLocalMode, type SandboxPreviewMode } from '@/utils/sandbox';
 
 const { t } = useI18n();
 
@@ -114,7 +112,7 @@ const localMode = ref(isLocalMode());
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 let screencastWs: WebSocket | null = null;
 
-const vncWsUrl = computed(() => getBackendWsUrl(`/rpa/vnc/${encodeURIComponent(props.sessionId || 'sandbox')}`));
+const vncPageUrl = computed(() => getBackendVncPageUrl(props.sessionId || 'sandbox', true));
 
 const availableTabs = computed(() => {
   const tabs: { id: 'terminal' | 'browser'; label: string }[] = [];
@@ -216,7 +214,7 @@ const handleClose = () => {
   emit('close');
 };
 
-const show = (mode?: SandboxPreviewMode, sessionId?: string) => {
+const show = (mode?: SandboxPreviewMode) => {
   visible.value = true;
   expanded.value = true;
   if (mode === 'terminal' || mode === 'browser') {

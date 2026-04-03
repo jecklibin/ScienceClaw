@@ -3,8 +3,7 @@ import { ref, onMounted, onBeforeUnmount, computed } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { Camera, Terminal, CheckCircle, Radio, Send, Wand2, Bot, Code, X } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
-import { getBackendWsUrl, isLocalMode } from '@/utils/sandbox';
-import VNCViewer from '@/components/VNCViewer.vue';
+import { getBackendVncPageUrl, getBackendWsUrl, isLocalMode } from '@/utils/sandbox';
 
 const router = useRouter();
 const route = useRoute();
@@ -22,10 +21,7 @@ let screencastWs: WebSocket | null = null;
 let lastMoveTime = 0;
 const MOVE_THROTTLE = 50; // 50ms 节流
 
-const vncWsUrl = computed(() => {
-  const sid = sessionId.value || 'sandbox';
-  return getBackendWsUrl(`/rpa/vnc/${encodeURIComponent(sid)}`);
-});
+const vncPageUrl = computed(() => getBackendVncPageUrl(sessionId.value || 'sandbox', false));
 
 const steps = ref<any[]>([
   { id: '0', title: '初始化环境', description: '正在配置沙箱录制环境...', status: 'active' }
@@ -447,12 +443,11 @@ const sendMessage = async () => {
           </div>
 
           <div class="flex-1 relative bg-black overflow-hidden">
-            <VNCViewer
+            <iframe
               v-if="sessionId && !localMode"
-              :session-id="sessionId"
-              :direct-ws-url="vncWsUrl"
-              :enabled="true"
-              :view-only="false"
+              :src="vncPageUrl"
+              class="w-full h-full border-0 bg-black"
+              allow="clipboard-read; clipboard-write"
             />
             <canvas
               v-else-if="sessionId && localMode"

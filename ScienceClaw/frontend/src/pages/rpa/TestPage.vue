@@ -3,8 +3,7 @@ import { ref, onMounted, onBeforeUnmount, computed } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { Play, Save, CheckCircle, XCircle, Loader2, Terminal, Code, ArrowLeft, RotateCcw } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
-import { getBackendWsUrl, isLocalMode } from '@/utils/sandbox';
-import VNCViewer from '@/components/VNCViewer.vue';
+import { getBackendVncPageUrl, getBackendWsUrl, isLocalMode } from '@/utils/sandbox';
 
 const router = useRouter();
 const route = useRoute();
@@ -20,7 +19,7 @@ const params = computed(() => {
   }
 });
 
-const vncWsUrl = computed(() => getBackendWsUrl(`/rpa/vnc/${encodeURIComponent(sessionId.value || 'sandbox')}`));
+const vncPageUrl = computed(() => getBackendVncPageUrl(sessionId.value || 'sandbox', false));
 const localMode = ref(isLocalMode());
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 let screencastWs: WebSocket | null = null;
@@ -207,12 +206,11 @@ onBeforeUnmount(() => {
             </div>
           </div>
           <div class="flex-1 relative bg-black overflow-hidden">
-            <VNCViewer
+            <iframe
               v-if="!localMode"
-              :session-id="sessionId || 'sandbox'"
-              :direct-ws-url="vncWsUrl"
-              :enabled="true"
-              :view-only="false"
+              :src="vncPageUrl"
+              class="w-full h-full border-0 bg-black"
+              allow="clipboard-read; clipboard-write"
             />
             <canvas
               v-else

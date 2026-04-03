@@ -18,10 +18,9 @@
           />
           <iframe
             v-else-if="props.live && !localMode"
-            :src="sandboxVncUrl"
-            class="w-full h-full border-0"
-            sandbox="allow-same-origin allow-scripts allow-popups"
-            referrerpolicy="no-referrer"
+            :src="vncPageUrl"
+            class="w-full h-full border-0 bg-black"
+            allow="clipboard-read; clipboard-write"
           />
           <img
             v-else-if="imageUrl"
@@ -52,7 +51,7 @@ import { ToolContent } from '@/types/message';
 import { ref, computed, watch, onBeforeUnmount } from 'vue';
 import { useI18n } from 'vue-i18n';
 import TakeOverIcon from '@/components/icons/TakeOverIcon.vue';
-import { getSandboxVncUrl, isLocalMode } from '@/utils/sandbox';
+import { getBackendVncPageUrl, getBackendWsUrl, isLocalMode } from '@/utils/sandbox';
 
 const props = defineProps<{
   sessionId: string;
@@ -64,10 +63,9 @@ const props = defineProps<{
 const { t } = useI18n();
 const imageUrl = ref('');
 const localMode = computed(() => isLocalMode());
+const vncPageUrl = computed(() => getBackendVncPageUrl(props.sessionId || 'sandbox', true));
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 let screencastWs: WebSocket | null = null;
-
-const sandboxVncUrl = computed(() => getSandboxVncUrl());
 
 const drawFrame = (base64Data: string) => {
   const canvas = canvasRef.value;
@@ -86,8 +84,7 @@ const drawFrame = (base64Data: string) => {
 
 const connectScreencast = () => {
   if (!props.live || !props.sessionId || !localMode.value || screencastWs) return;
-  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = `${proto}//${window.location.host}/api/v1/sessions/${props.sessionId}/browser/screencast`;
+  const wsUrl = getBackendWsUrl(`/sessions/${props.sessionId}/browser/screencast`);
   screencastWs = new WebSocket(wsUrl);
 
   screencastWs.onmessage = (ev) => {

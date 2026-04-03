@@ -1,13 +1,10 @@
 <template>
     <div v-if="shouldShow" class="fixed bg-[var(--background-gray-main)] z-50 transition-all w-full h-full inset-0">
         <div class="w-full h-full">
-            <VNCViewer 
-                :session-id="sessionId"
-                :enabled="shouldShow"
-                :view-only="false"
-                @connected="onVNCConnected"
-                @disconnected="onVNCDisconnected"
-                @credentials-required="onVNCCredentialsRequired"
+            <iframe
+                :src="vncPageUrl"
+                class="w-full h-full border-0 bg-black"
+                allow="clipboard-read; clipboard-write"
             />
         </div>
         <div class="absolute bottom-4 left-1/2 -translate-x-1/2">
@@ -23,8 +20,7 @@
 import { computed, ref, onMounted, onBeforeUnmount } from 'vue';
 import { useRoute } from 'vue-router';
 import { useI18n } from 'vue-i18n';
-import VNCViewer from './VNCViewer.vue';
-import { isLocalMode } from '@/utils/sandbox';
+import { getBackendVncPageUrl, isLocalMode } from '@/utils/sandbox';
 
 const route = useRoute();
 const { t } = useI18n();
@@ -41,19 +37,6 @@ const handleTakeOverEvent = (event: Event) => {
     const customEvent = event as CustomEvent;
     takeOverActive.value = customEvent.detail.active;
     currentSessionId.value = customEvent.detail.sessionId;
-};
-
-// VNC event handlers
-const onVNCConnected = () => {
-    console.log('TakeOver VNC connection successful');
-};
-
-const onVNCDisconnected = (reason?: any) => {
-    console.log('TakeOver VNC connection disconnected', reason);
-};
-
-const onVNCCredentialsRequired = () => {
-    console.log('TakeOver VNC credentials required');
 };
 
 // Calculate whether to show takeover view
@@ -89,6 +72,7 @@ onBeforeUnmount(() => {
 const sessionId = computed(() => {
     return currentSessionId.value || route.params.sessionId as string || '';
 });
+const vncPageUrl = computed(() => getBackendVncPageUrl(sessionId.value || 'sandbox', false));
 
 // Exit takeover functionality
 const exitTakeOver = () => {
