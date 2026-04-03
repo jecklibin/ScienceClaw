@@ -25,6 +25,8 @@ const localMode = ref(isLocalMode());
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 let screencastWs: WebSocket | null = null;
 
+const TEST_REQUEST_TIMEOUT_MS = 210000;
+
 const testing = ref(false);
 const testDone = ref(false);
 const testSuccess = ref(false);
@@ -96,7 +98,7 @@ const runTest = async () => {
     const testPromise = apiClient.post(`/rpa/session/${sessionId.value}/test`, {
       params: params.value,
     }, {
-      timeout: 120000,
+      timeout: TEST_REQUEST_TIMEOUT_MS,
     });
 
     // Connect screencast after a short delay to let backend create page

@@ -12,6 +12,8 @@ from .cdp_connector import get_cdp_connector
 
 logger = logging.getLogger(__name__)
 
+RPA_PAGE_TIMEOUT_MS = 60000
+
 
 class RPAStep(BaseModel):
     id: str
@@ -315,6 +317,47 @@ CAPTURE_JS = r"""
         return {method:'css', value:'body'};
     }
 
+    function matchesCandidate(el, c) {
+        if (!el || !c) return false;
+        if (c.m === 'role' || c.m === 'role_only') {
+            if (getRole(el) !== c.role) return false;
+            return c.m === 'role_only' || accessibleName(el) === c.name;
+        }
+        if (c.m === 'testid') {
+            var tid = el.getAttribute('data-testid') || el.getAttribute('data-test-id')
+                || el.getAttribute('data-test') || el.getAttribute('data-cy') || '';
+            return norm(tid) === c.v;
+        }
+        if (c.m === 'placeholder') return norm(el.getAttribute('placeholder')) === c.v;
+        if (c.m === 'label') return accessibleName(el) === c.v;
+        if (c.m === 'alt') return norm(el.getAttribute('alt')) === c.v;
+        if (c.m === 'title') return norm(el.getAttribute('title')) === c.v;
+        if (c.m === 'text') return norm(el.textContent) === c.v && el.children.length === 0;
+        if (c.m === 'css' && c.sel) {
+            try { return el.matches(c.sel); } catch(e) { return false; }
+        }
+        return false;
+    }
+
+    function countNestedMatches(parentMatcher, childCandidate, targetEl) {
+        var all = document.querySelectorAll('*');
+        var count = 0;
+        var targetMatched = false;
+        for (var i = 0; i < all.length; i++) {
+            var parentEl = all[i];
+            if (!parentMatcher(parentEl)) continue;
+            var descendants = parentEl.querySelectorAll('*');
+            for (var j = 0; j < descendants.length; j++) {
+                var childEl = descendants[j];
+                if (!matchesCandidate(childEl, childCandidate)) continue;
+                count++;
+                if (childEl === targetEl) targetMatched = true;
+                if (count > 1 && targetMatched) return {count: count, targetMatched: true};
+            }
+        }
+        return {count: count, targetMatched: targetMatched};
+    }
+
     // Try parent >> child nesting for non-unique candidates
     function tryNested(el, c) {
         var parent = el.parentElement;
@@ -322,19 +365,28 @@ CAPTURE_JS = r"""
             // Try parent with id
             if (parent.id && !isGuidLike(parent.id)) {
                 var psel = '#'+cssEsc(parent.id);
-                var childSel = c.sel || c.v || '';
-                if (childSel && c.m==='css') {
-                    var combo = psel+' '+childSel;
+                if (c.m === 'css' && c.sel) {
+                    var combo = psel+' '+c.sel;
                     if (isUnique(combo)) return {method:'css', value:combo};
+                }
+                var byIdNested = countNestedMatches(function(parentEl) {
+                    return parentEl.id === parent.id;
+                }, c, el);
+                if (byIdNested.count === 1 && byIdNested.targetMatched) {
+                    return {method:'nested', parent:{method:'css', value:psel}, child:formatCandidate(c)};
                 }
             }
             // Try parent role
             var pRole = getRole(parent);
             var pName = accessibleName(parent);
             if (pRole && pName) {
-                // Return as nested locator
-                return {method:'nested', parent:{method:'role',role:pRole,name:pName},
-                        child:formatCandidate(c)};
+                var byRoleNested = countNestedMatches(function(parentEl) {
+                    return getRole(parentEl) === pRole && accessibleName(parentEl) === pName;
+                }, c, el);
+                if (byRoleNested.count === 1 && byRoleNested.targetMatched) {
+                    return {method:'nested', parent:{method:'role',role:pRole,name:pName},
+                            child:formatCandidate(c)};
+                }
             }
             parent = parent.parentElement;
         }
@@ -456,6 +508,8 @@ class RPASessionManager:
         browser = await get_cdp_connector().get_browser()
         context = await browser.new_context(no_viewport=True)
         page = await context.new_page()
+        page.set_default_timeout(RPA_PAGE_TIMEOUT_MS)
+        page.set_default_navigation_timeout(RPA_PAGE_TIMEOUT_MS)
 
         self._contexts[session_id] = context
         self._pages[session_id] = page

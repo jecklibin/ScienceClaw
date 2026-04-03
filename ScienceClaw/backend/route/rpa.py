@@ -22,6 +22,9 @@ from backend.storage import get_repository
 
 logger = logging.getLogger(__name__)
 
+RPA_TEST_TIMEOUT_S = 180.0
+RPA_PAGE_TIMEOUT_MS = 60000
+
 router = APIRouter(tags=["RPA"])
 generator = PlaywrightGenerator()
 executor = ScriptExecutor()
@@ -241,7 +244,8 @@ async def test_script(
     if settings.storage_backend == "local":
         context = await browser.new_context(no_viewport=True)
         page = await context.new_page()
-        page.set_default_timeout(15000)
+        page.set_default_timeout(RPA_PAGE_TIMEOUT_MS)
+        page.set_default_navigation_timeout(RPA_PAGE_TIMEOUT_MS)
         rpa_manager._pages[session_id] = page
 
         # 等待前端连接 screencast
@@ -255,7 +259,7 @@ async def test_script(
             if "execute_skill" not in namespace:
                 result = {"success": False, "output": "", "error": "No execute_skill() function in script"}
             else:
-                await asyncio.wait_for(namespace["execute_skill"](page), timeout=90.0)
+                await asyncio.wait_for(namespace["execute_skill"](page), timeout=RPA_TEST_TIMEOUT_S)
                 await page.wait_for_timeout(3000)
                 result = {"success": True, "output": "SKILL_SUCCESS"}
         except Exception as e:

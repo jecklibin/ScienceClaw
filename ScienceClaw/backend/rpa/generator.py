@@ -4,6 +4,9 @@ from typing import List, Dict, Any
 
 logger = logging.getLogger(__name__)
 
+RPA_PLAYWRIGHT_TIMEOUT_MS = 60000
+RPA_NAVIGATION_TIMEOUT_MS = 60000
+
 
 class PlaywrightGenerator:
     """Generate Playwright Python scripts from recorded RPA steps.
@@ -44,7 +47,8 @@ async def main():
     browser = await pw.chromium.connect_over_cdp(cdp_url)
     context = await browser.new_context(no_viewport=True)
     page = await context.new_page()
-    page.set_default_timeout(15000)
+    page.set_default_timeout({default_timeout_ms})
+    page.set_default_navigation_timeout({navigation_timeout_ms})
     try:
         await execute_skill(page, **kwargs)
         print("SKILL_SUCCESS")
@@ -81,7 +85,8 @@ async def main():
     browser = await pw.chromium.launch(headless=False)
     context = await browser.new_context(no_viewport=True)
     page = await context.new_page()
-    page.set_default_timeout(15000)
+    page.set_default_timeout({default_timeout_ms})
+    page.set_default_navigation_timeout({navigation_timeout_ms})
     try:
         await execute_skill(page, **kwargs)
         print("SKILL_SUCCESS")
@@ -117,7 +122,7 @@ if __name__ == "__main__":
             first_url = deduped[0].get("url", "")
             if first_url:
                 lines.append(f'    await page.goto("{first_url}")')
-                lines.append('    await page.wait_for_load_state("load")')
+                lines.append('    await page.wait_for_load_state("domcontentloaded")')
                 lines.append("")
                 prev_url = first_url
 
@@ -144,7 +149,7 @@ if __name__ == "__main__":
             # Navigation
             if action == "navigate" or (action == "goto" and url):
                 lines.append(f'    await page.goto("{url}")')
-                lines.append('    await page.wait_for_load_state("load")')
+                lines.append('    await page.wait_for_load_state("domcontentloaded")')
                 prev_url = url
                 prev_action = "navigate"
                 lines.append("")
@@ -167,7 +172,7 @@ if __name__ == "__main__":
 
                 if is_link:
                     # Use expect_navigation pattern for link clicks
-                    lines.append(f"    async with page.expect_navigation(wait_until='domcontentloaded', timeout=15000):")
+                    lines.append(f"    async with page.expect_navigation(wait_until='domcontentloaded', timeout={RPA_NAVIGATION_TIMEOUT_MS}):")
                     lines.append(f"        await {locator}.click()")
                 else:
                     lines.append(f"    await {locator}.click()")
@@ -187,7 +192,11 @@ if __name__ == "__main__":
         # Wrap execute_skill function with the runner boilerplate
         execute_skill_func = "\n".join(lines)
         template = self.RUNNER_TEMPLATE_LOCAL if is_local else self.RUNNER_TEMPLATE_DOCKER
-        return template.format(execute_skill_func=execute_skill_func)
+        return template.format(
+            execute_skill_func=execute_skill_func,
+            default_timeout_ms=RPA_PLAYWRIGHT_TIMEOUT_MS,
+            navigation_timeout_ms=RPA_NAVIGATION_TIMEOUT_MS,
+        )
 
     @staticmethod
     def _deduplicate_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -268,9 +277,14 @@ if __name__ == "__main__":
             child = loc.get("child", {})
             parent_loc = self._build_locator(json.dumps(parent) if isinstance(parent, dict) else str(parent))
             child_loc = self._build_locator(json.dumps(child) if isinstance(child, dict) else str(child))
-            # Convert page.xxx to .xxx for chaining: parent.locator(child_selector)
-            child_sel = child_loc.replace("page.", "", 1)
-            return f'{parent_loc}.locator({child_sel})'
+            # Chain the child query directly on the parent locator.
+            # Examples:
+            #   page.locator("button")        -> parent.locator("button")
+            #   page.get_by_role("link")      -> parent.get_by_role("link")
+            # Wrapping everything in .locator(...) breaks non-CSS child locators.
+            if child_loc.startswith("page."):
+                return f'{parent_loc}{child_loc[len("page"):]}'
+            return f'{parent_loc}.locator("{self._escape(str(child))}")'
 
         # css (default)
         val = self._escape(loc.get("value", "body"))

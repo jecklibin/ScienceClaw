@@ -11,21 +11,32 @@
     <div class="px-0 py-0 flex flex-col relative h-full">
       <div class="w-full h-full object-cover flex items-center justify-center bg-[var(--fill-white)] relative">
         <div class="w-full h-full">
+          <canvas
+            v-if="props.live && localMode"
+            ref="canvasRef"
+            class="w-full h-full object-contain bg-black"
+          />
           <iframe
-            v-if="props.live"
+            v-else-if="props.live && !localMode"
             :src="sandboxVncUrl"
             class="w-full h-full border-0"
             sandbox="allow-same-origin allow-scripts allow-popups"
             referrerpolicy="no-referrer"
           />
-          <img v-else-if="imageUrl" alt="Image Preview" class="cursor-pointer w-full" referrerpolicy="no-referrer" :src="imageUrl">
+          <img
+            v-else-if="imageUrl"
+            alt="Image Preview"
+            class="w-full h-full object-contain bg-black"
+            referrerpolicy="no-referrer"
+            :src="imageUrl"
+          >
           <div v-else class="p-6 text-center text-sm text-[var(--text-tertiary)]">
             <div class="font-medium text-[var(--text-secondary)] mb-2">无截图可展示</div>
             <div class="break-all">{{ toolContent?.args?.url || '' }}</div>
           </div>
         </div>
         <button
-          v-if="!isShare"
+          v-if="!isShare && !localMode"
           @click="takeOver"
           class="absolute right-[10px] bottom-[10px] z-10 min-w-10 h-10 flex items-center justify-center rounded-full bg-[var(--background-white-main)] text-[var(--text-primary)] border border-[var(--border-main)] shadow-[0px_5px_16px_0px_var(--shadow-S),0px_0px_1.25px_0px_var(--shadow-S)] backdrop-blur-3xl cursor-pointer hover:bg-[var(--text-brand)] hover:px-4 hover:text-[var(--text-white)] group transition-width duration-300">
           <TakeOverIcon />
@@ -38,10 +49,10 @@
 
 <script setup lang="ts">
 import { ToolContent } from '@/types/message';
-import { ref, computed, watch } from 'vue';
+import { ref, computed, watch, onBeforeUnmount } from 'vue';
 import { useI18n } from 'vue-i18n';
 import TakeOverIcon from '@/components/icons/TakeOverIcon.vue';
-import { getSandboxVncUrl } from '@/utils/sandbox';
+import { getSandboxVncUrl, isLocalMode } from '@/utils/sandbox';
 
 const props = defineProps<{
   sessionId: string;
@@ -52,8 +63,62 @@ const props = defineProps<{
 
 const { t } = useI18n();
 const imageUrl = ref('');
+const localMode = computed(() => isLocalMode());
+const canvasRef = ref<HTMLCanvasElement | null>(null);
+let screencastWs: WebSocket | null = null;
 
 const sandboxVncUrl = computed(() => getSandboxVncUrl());
+
+const drawFrame = (base64Data: string) => {
+  const canvas = canvasRef.value;
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  const img = new Image();
+  img.onload = () => {
+    if (canvas.width !== img.naturalWidth) canvas.width = img.naturalWidth;
+    if (canvas.height !== img.naturalHeight) canvas.height = img.naturalHeight;
+    ctx.drawImage(img, 0, 0);
+  };
+  img.src = `data:image/jpeg;base64,${base64Data}`;
+};
+
+const connectScreencast = () => {
+  if (!props.live || !props.sessionId || !localMode.value || screencastWs) return;
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const wsUrl = `${proto}//${window.location.host}/api/v1/sessions/${props.sessionId}/browser/screencast`;
+  screencastWs = new WebSocket(wsUrl);
+
+  screencastWs.onmessage = (ev) => {
+    try {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === 'frame') {
+        drawFrame(msg.data);
+      }
+    } catch {
+      // ignore malformed frames
+    }
+  };
+
+  screencastWs.onclose = () => {
+    screencastWs = null;
+  };
+};
+
+const disconnectScreencast = () => {
+  if (!screencastWs) return;
+  screencastWs.close();
+  screencastWs = null;
+};
+
+watch(() => [props.live, props.sessionId, localMode.value], () => {
+  if (props.live && props.sessionId && localMode.value) {
+    connectScreencast();
+    return;
+  }
+  disconnectScreencast();
+}, { immediate: true });
 
 
 
@@ -63,6 +128,10 @@ watch(() => props.toolContent?.content?.screenshot, async () => {
   }
   imageUrl.value = props.toolContent?.content?.screenshot;
 }, { immediate: true });
+
+onBeforeUnmount(() => {
+  disconnectScreencast();
+});
 
 const takeOver = () => {
   window.dispatchEvent(new CustomEvent('takeover', {

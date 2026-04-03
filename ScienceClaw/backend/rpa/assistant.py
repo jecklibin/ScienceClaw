@@ -9,6 +9,9 @@ from backend.deepagent.engine import get_llm_model
 
 logger = logging.getLogger(__name__)
 
+ELEMENT_EXTRACTION_TIMEOUT_S = 5.0
+EXECUTION_TIMEOUT_S = 60.0
+
 SYSTEM_PROMPT = """你是一个 RPA 录制助手。用户正在录制浏览器自动化技能，你需要根据用户的自然语言描述，结合当前页面状态和历史操作，生成 Playwright 异步 API 代码片段。
 
 规则：
@@ -291,10 +294,19 @@ class RPAAssistant:
     async def _get_page_elements(self, page: Page) -> str:
         """Extract interactive elements directly from the page."""
         try:
-            result = await page.evaluate(EXTRACT_ELEMENTS_JS)
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=2000)
+            except Exception:
+                # Best-effort only. We still try to inspect the current execution context.
+                pass
+
+            result = await asyncio.wait_for(
+                page.evaluate(EXTRACT_ELEMENTS_JS),
+                timeout=ELEMENT_EXTRACTION_TIMEOUT_S,
+            )
             return result if isinstance(result, str) else json.dumps(result)
         except Exception as e:
-            logger.warning(f"Failed to extract elements: {e}")
+            logger.warning(f"Failed to extract elements from {page.url!r}: {e}")
             return "[]"
 
     async def _execute_on_page(self, page: Page, code: str) -> Dict[str, Any]:
@@ -312,14 +324,14 @@ class RPAAssistant:
             if "run" in namespace and callable(namespace["run"]):
                 ret = await asyncio.wait_for(
                     namespace["run"](page),
-                    timeout=30.0,
+                    timeout=EXECUTION_TIMEOUT_S,
                 )
                 return {"success": True, "output": str(ret) if ret else "ok", "error": None}
             else:
                 return {"success": False, "output": "", "error": "No run(page) function defined"}
 
         except asyncio.TimeoutError:
-            return {"success": False, "output": "", "error": "Command execution timed out (30s)"}
+            return {"success": False, "output": "", "error": f"Command execution timed out ({EXECUTION_TIMEOUT_S:.0f}s)"}
         except Exception as e:
             import traceback
             return {"success": False, "output": "", "error": traceback.format_exc()}

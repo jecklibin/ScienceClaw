@@ -123,7 +123,7 @@ const availableTabs = computed(() => {
   return tabs;
 });
 
-const drawFrame = (base64Data: string, _metadata: { width: number; height: number }) => {
+const drawFrame = (base64Data: string) => {
   const canvas = canvasRef.value;
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
@@ -140,16 +140,23 @@ const drawFrame = (base64Data: string, _metadata: { width: number; height: numbe
 
 const connectScreencast = (sessionId: string) => {
   if (screencastWs) return;
-  const wsUrl = getBackendWsUrl(`/rpa/screencast/${sessionId}`);
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const token = new URL(getBackendWsUrl('/noop')).searchParams.get('token');
+  const wsUrl = new URL(`${proto}//${window.location.host}/api/v1/sessions/${sessionId}/browser/screencast`);
+  if (token) {
+    wsUrl.searchParams.set('token', token);
+  }
   screencastWs = new WebSocket(wsUrl);
 
   screencastWs.onmessage = (ev) => {
     try {
       const msg = JSON.parse(ev.data);
       if (msg.type === 'frame') {
-        drawFrame(msg.data, msg.metadata);
+        drawFrame(msg.data);
       }
-    } catch { /* ignore */ }
+    } catch {
+      // ignore malformed frames
+    }
   };
 
   screencastWs.onclose = () => {
@@ -158,10 +165,9 @@ const connectScreencast = (sessionId: string) => {
 };
 
 const disconnectScreencast = () => {
-  if (screencastWs) {
-    screencastWs.close();
-    screencastWs = null;
-  }
+  if (!screencastWs) return;
+  screencastWs.close();
+  screencastWs = null;
 };
 
 // Auto-show if history exists on mount (panel reopen case)
@@ -170,23 +176,39 @@ if (props.history && props.history.length > 0) {
   expanded.value = true;
 }
 
-// Auto-switch tab based on the incoming tool mode
+// Auto-show based on the incoming mode, but leave connection management
+// to a single watcher below so we don't flap websocket state.
 watch(() => props.mode, (mode) => {
+  const wasVisible = visible.value;
   if (mode === 'terminal') {
-    activeTab.value = 'terminal';
     visible.value = true;
     expanded.value = true;
+    if (!wasVisible) {
+      activeTab.value = 'terminal';
+    }
   } else if (mode === 'browser') {
-    activeTab.value = 'browser';
     visible.value = true;
     expanded.value = true;
-    if (localMode.value && props.sessionId) {
-      connectScreencast(props.sessionId);
+    if (!wasVisible) {
+      activeTab.value = 'browser';
     }
   } else if (mode === 'none') {
-    disconnectScreencast();
+    visible.value = false;
+    expanded.value = false;
   }
 });
+
+watch(
+  () => [activeTab.value, visible.value, expanded.value, props.sessionId, localMode.value] as const,
+  ([tab, isVisible, isExpanded, sessionId, isLocal]) => {
+    if (tab === 'browser' && isVisible && isExpanded && isLocal && sessionId) {
+      connectScreencast(sessionId);
+      return;
+    }
+    disconnectScreencast();
+  },
+  { immediate: true }
+);
 
 const handleClose = () => {
   visible.value = false;
@@ -199,9 +221,6 @@ const show = (mode?: SandboxPreviewMode, sessionId?: string) => {
   expanded.value = true;
   if (mode === 'terminal' || mode === 'browser') {
     activeTab.value = mode;
-  }
-  if (localMode.value && mode === 'browser' && sessionId) {
-    connectScreencast(sessionId);
   }
 };
 

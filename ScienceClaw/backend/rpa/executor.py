@@ -6,6 +6,8 @@ from playwright.async_api import Browser
 
 logger = logging.getLogger(__name__)
 
+RPA_PAGE_TIMEOUT_MS = 60000
+
 
 class ScriptExecutor:
     """Execute generated Playwright scripts via CDP browser connection."""
@@ -34,7 +36,8 @@ class ScriptExecutor:
 
             context = await browser.new_context(no_viewport=True)
             page = await context.new_page()
-            page.set_default_timeout(15000)
+            page.set_default_timeout(RPA_PAGE_TIMEOUT_MS)
+            page.set_default_navigation_timeout(RPA_PAGE_TIMEOUT_MS)
 
             # Register page for screencast in local mode
             if session_id and page_registry:

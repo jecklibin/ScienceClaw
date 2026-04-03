@@ -46,6 +46,16 @@ const newMessage = ref('');
 const sending = ref(false);
 let pollInterval: any = null;
 
+const cleanupAssistantText = (text: string, script = '') => {
+  let next = text;
+  next = next.replace(/^正在分析当前页面\.\.\.\s*/u, '');
+  next = next.replace(/```python[\s\S]*?```/gu, '');
+  if (script) {
+    next = next.replace(script, '');
+  }
+  return next.trim();
+};
+
 const initSession = async () => {
   try {
     loading.value = true;
@@ -315,8 +325,15 @@ const sendMessage = async () => {
               chatMessages.value[msgIdx].text += data.text || '';
             } else if (eventType === 'script') {
               chatMessages.value[msgIdx].script = data.code || '';
+              chatMessages.value[msgIdx].text = cleanupAssistantText(
+                chatMessages.value[msgIdx].text,
+                data.code || '',
+              );
             } else if (eventType === 'executing') {
               chatMessages.value[msgIdx].status = 'executing';
+              if (!chatMessages.value[msgIdx].text.trim()) {
+                chatMessages.value[msgIdx].text = '代码已生成，正在执行浏览器操作。';
+              }
             } else if (eventType === 'result') {
               chatMessages.value[msgIdx].status = data.success ? 'done' : 'error';
               if (data.error) chatMessages.value[msgIdx].error = data.error;

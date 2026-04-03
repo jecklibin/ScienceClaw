@@ -30,9 +30,9 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from loguru import logger
 from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend, FilesystemBackend
-from deepagents.backends.local_shell import LocalShellBackend
 from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT, DEFAULT_SUBAGENT_PROMPT
 from backend.deepagent.engine import get_llm_model
+from backend.deepagent.local_preview_backend import LocalPreviewShellBackend
 from backend.deepagent.tools import propose_skill_save, propose_tool_save, eval_skill, grade_eval
 from backend.deepagent.full_sandbox_backend import FullSandboxBackend
 from backend.deepagent.mongo_skill_backend import MongoSkillBackend
@@ -401,7 +401,8 @@ async def deep_agent(
     if is_local:
         local_workspace = os.path.join(_WORKSPACE_DIR, session_id)
         os.makedirs(local_workspace, exist_ok=True)
-        sandbox = LocalShellBackend(
+        sandbox = LocalPreviewShellBackend(
+            session_id=session_id,
             root_dir=local_workspace,
             virtual_mode=False,
             timeout=ts.sandbox_exec_timeout,
@@ -470,7 +471,7 @@ async def deep_agent(
         if os.path.isdir(_BUILTIN_SKILLS_DIR):
             skills_sources.append(_BUILTIN_SKILLS_DIR)
             builtin_path_for_prompt = _BUILTIN_SKILLS_DIR + "/"
-        _ext_skills_dir = os.environ.get("EXTERNAL_SKILLS_DIR", "./Skills")
+        _ext_skills_dir = os.path.abspath(settings.external_skills_dir)
         if os.path.isdir(_ext_skills_dir):
             skills_sources.append(_ext_skills_dir)
             external_path_for_prompt = _ext_skills_dir + "/"
@@ -617,7 +618,8 @@ async def deep_agent_eval(
     if is_local:
         local_workspace = os.path.join(_WORKSPACE_DIR, session_id)
         os.makedirs(local_workspace, exist_ok=True)
-        sandbox = LocalShellBackend(
+        sandbox = LocalPreviewShellBackend(
+            session_id=session_id,
             root_dir=local_workspace,
             virtual_mode=False,
             timeout=ts.sandbox_exec_timeout,

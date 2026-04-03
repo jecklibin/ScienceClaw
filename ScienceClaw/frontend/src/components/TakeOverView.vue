@@ -24,9 +24,11 @@ import { computed, ref, onMounted, onBeforeUnmount } from 'vue';
 import { useRoute } from 'vue-router';
 import { useI18n } from 'vue-i18n';
 import VNCViewer from './VNCViewer.vue';
+import { isLocalMode } from '@/utils/sandbox';
 
 const route = useRoute();
 const { t } = useI18n();
+const localMode = computed(() => isLocalMode());
 
 // Takeover state
 const takeOverActive = ref(false);
@@ -56,6 +58,10 @@ const onVNCCredentialsRequired = () => {
 
 // Calculate whether to show takeover view
 const shouldShow = computed(() => {
+    if (localMode.value) {
+        return false;
+    }
+
     // Check component state first (from takeover event)
     if (takeOverActive.value && currentSessionId.value) {
         return true;

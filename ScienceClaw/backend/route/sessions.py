@@ -29,7 +29,7 @@ import httpx
 import yaml as _yaml
 
 import shortuuid
-from fastapi import APIRouter, HTTPException, Query, Request, Depends, UploadFile, File as FastAPIFile
+from fastapi import APIRouter, HTTPException, Query, Request, Depends, UploadFile, File as FastAPIFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -49,6 +49,8 @@ from backend.deepagent.sessions import (
 from backend.user.dependencies import get_current_user, require_user, User
 from backend.models import get_model_config
 from backend.config import settings
+from backend.browser_preview import browser_preview_registry
+from backend.rpa.screencast import ScreencastService
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -829,7 +831,7 @@ async def save_skill_from_session(
     body: SaveSkillRequest,
     current_user: User = Depends(require_user),
 ) -> ApiResponse:
-    """Save a skill from session workspace to MongoDB."""
+    """Save a skill from session workspace to the active skill store."""
     try:
         session = await async_get_science_session(session_id)
         if session.user_id != current_user.id:
@@ -850,9 +852,8 @@ async def save_skill_from_session(
             None,
         )
 
-        col = _get_repo("skills")
-
         if src is None:
+            col = _get_repo("skills")
             # Agent 可能通过 MongoSkillBackend 直接写入了 MongoDB（in-place 编辑），
             # 此时 workspace 里没有副本，但 MongoDB 已经是最新版本
             existing = await col.find_one(
@@ -877,6 +878,26 @@ async def save_skill_from_session(
                 except Exception:
                     pass
 
+        if settings.storage_backend == "local":
+            # Local mode uses the external skills directory as the single source of truth.
+            dst = _Path(settings.external_skills_dir) / skill_name
+            dst.mkdir(parents=True, exist_ok=True)
+
+            for fp in list(dst.rglob("*")):
+                if fp.is_file():
+                    fp.unlink()
+
+            for rel, content in files.items():
+                out = dst / rel
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(content, encoding="utf-8")
+
+            logger.info(
+                f"[Skills] Saved skill '{skill_name}' from session {session_id} "
+                f"to filesystem {dst}"
+            )
+            return ApiResponse(data={"skill_name": skill_name, "saved": True})
+
         # Parse description from SKILL.md frontmatter
         description = ""
         skill_md = files.get("SKILL.md", "")
@@ -889,6 +910,7 @@ async def save_skill_from_session(
             except Exception:
                 pass
 
+        col = _get_repo("skills")
         # Upsert to MongoDB
         now = datetime.now(timezone.utc)
         await col.update_one(
@@ -1983,3 +2005,45 @@ async def download_sandbox_file(
     except Exception as exc:
         logger.exception("download_sandbox_file failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.websocket("/{session_id}/browser/screencast")
+async def session_browser_screencast(websocket: WebSocket, session_id: str):
+    """Stream a local-mode chat browser page via CDP screencast."""
+    await websocket.accept()
+
+    if settings.storage_backend != "local":
+        await websocket.close(code=1008, reason="Local mode only")
+        return
+
+    try:
+        await async_get_science_session(session_id)
+    except ScienceSessionNotFoundError:
+        await websocket.close(code=1008, reason="Session not found")
+        return
+
+    page = await browser_preview_registry.wait_for_page(session_id, timeout=8.0)
+    if page is None:
+        await websocket.close(code=1008, reason="No active browser page")
+        return
+
+    try:
+        cdp_session = await page.context.new_cdp_session(page)
+    except Exception as exc:
+        logger.error(f"Failed to create chat preview CDP session: {exc}")
+        await websocket.close(code=1011, reason="CDP session failed")
+        return
+
+    screencast = ScreencastService(cdp_session)
+    try:
+        await screencast.start(websocket)
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.error(f"Chat browser screencast error: {exc}")
+    finally:
+        await screencast.stop()
+        try:
+            await cdp_session.detach()
+        except Exception:
+            pass
