@@ -21,6 +21,17 @@ const showScript = ref(false);
 // Auto-extracted parameters (from fill/select steps)
 const params = ref<any[]>([]);
 
+const credentials = ref<any[]>([]);
+
+const loadCredentials = async () => {
+  try {
+    const resp = await apiClient.get('/credentials');
+    credentials.value = resp.data.credentials || [];
+  } catch {
+    // Silently fail — credentials feature is optional
+  }
+};
+
 const loadSession = async () => {
   if (!sessionId.value) {
     error.value = '缺少 sessionId 参数';
@@ -50,6 +61,8 @@ const loadSession = async () => {
           current_value: s.value || '',
           enabled: true,
           step_id: s.id,
+          sensitive: s.sensitive || false,
+          credential_id: '',
         };
       });
 
@@ -77,7 +90,11 @@ const generateScript = async () => {
   try {
     const paramMap: Record<string, any> = {};
     params.value.filter(p => p.enabled).forEach(p => {
-      paramMap[p.name] = { original_value: p.original_value };
+      paramMap[p.name] = {
+        original_value: p.original_value,
+        sensitive: p.sensitive || false,
+        credential_id: p.credential_id || '',
+      };
     });
 
     const resp = await apiClient.post(`/rpa/session/${sessionId.value}/generate`, {
@@ -93,7 +110,11 @@ const generateScript = async () => {
 const goToTest = () => {
   const paramMap: Record<string, any> = {};
   params.value.filter(p => p.enabled).forEach(p => {
-    paramMap[p.name] = { original_value: p.original_value };
+    paramMap[p.name] = {
+      original_value: p.original_value,
+      sensitive: p.sensitive || false,
+      credential_id: p.credential_id || '',
+    };
   });
   router.push({
     path: '/rpa/test',
@@ -130,6 +151,7 @@ const getActionColor = (action: string) => {
 
 onMounted(() => {
   loadSession();
+  loadCredentials();
 });
 </script>
 
@@ -207,7 +229,7 @@ onMounted(() => {
               {{ step.description || `${step.action} → ${step.target || step.label || ''}` }}
             </span>
             <span v-if="step.value" class="text-xs text-gray-400 font-mono truncate max-w-[200px]">
-              "{{ step.value }}"
+              "{{ step.sensitive ? '*****' : step.value }}"
             </span>
           </div>
           <div v-if="steps.length === 0" class="text-center text-gray-400 py-8">
@@ -242,11 +264,28 @@ onMounted(() => {
               />
               <p class="text-[10px] text-gray-400 mt-1">{{ param.label }}</p>
             </div>
-            <input
-              v-model="param.current_value"
-              class="text-sm text-gray-600 border border-gray-200 rounded px-2 py-1 w-48"
-              placeholder="默认值"
-            />
+            <template v-if="param.sensitive">
+              <select
+                v-model="param.credential_id"
+                class="text-sm text-gray-600 border border-gray-200 rounded px-2 py-1 w-48"
+              >
+                <option value="">选择凭据...</option>
+                <option
+                  v-for="cred in credentials"
+                  :key="cred.id"
+                  :value="cred.id"
+                >
+                  {{ cred.name }} ({{ cred.username }})
+                </option>
+              </select>
+            </template>
+            <template v-else>
+              <input
+                v-model="param.current_value"
+                class="text-sm text-gray-600 border border-gray-200 rounded px-2 py-1 w-48"
+                placeholder="默认值"
+              />
+            </template>
           </div>
         </div>
       </div>
