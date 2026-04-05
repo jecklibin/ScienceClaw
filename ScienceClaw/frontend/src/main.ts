@@ -20,6 +20,7 @@ import ToolDetailPage from './pages/ToolDetailPage.vue'
 import TasksPage from './pages/TasksPage.vue'
 import LoginPage from './pages/LoginPage.vue'
 import MainLayout from './pages/MainLayout.vue'
+import CredentialsPage from './pages/CredentialsPage.vue'
 import RecorderPage from './pages/rpa/RecorderPage.vue'
 import ConfigurePage from './pages/rpa/ConfigurePage.vue'
 import TestPage from './pages/rpa/TestPage.vue'
@@ -94,6 +95,11 @@ export const router = createRouter({
           component: TestPage,
         }
       ]
+    },
+    {
+      path: '/credentials',
+      component: CredentialsPage,
+      meta: { requiresAuth: true },
     },
     {
       path: '/login',
