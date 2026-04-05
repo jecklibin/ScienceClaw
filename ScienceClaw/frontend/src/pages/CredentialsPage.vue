@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
+import { useI18n } from 'vue-i18n';
 import { Shield, Plus, Trash2, Edit3, X } from 'lucide-vue-next';
 import {
   listCredentials,
@@ -9,6 +10,8 @@ import {
   type Credential,
   type CredentialCreate,
 } from '@/api/credential';
+
+const { t } = useI18n();
 
 const credentials = ref<Credential[]>([]);
 const loading = ref(true);
@@ -66,7 +69,7 @@ const startEdit = (cred: Credential) => {
 };
 
 const remove = async (id: string) => {
-  if (!confirm('确定删除此凭据？')) return;
+  if (!confirm(t('Delete credential confirm'))) return;
   await deleteCredential(id);
   await load();
 };
@@ -78,14 +81,14 @@ onMounted(load);
   <div class="min-h-screen bg-[#f5f6f7]">
     <header class="h-16 bg-white border-b border-gray-200 flex items-center px-8 gap-4">
       <Shield class="text-[#831bd7]" :size="24" />
-      <h1 class="text-gray-900 font-extrabold text-xl">凭据管理</h1>
+      <h1 class="text-gray-900 font-extrabold text-xl">{{ t('Credential Management') }}</h1>
       <div class="flex-1"></div>
       <button
         @click="showForm = true; editingId = null; form = { name: '', username: '', password: '', domain: '' }"
         class="flex items-center gap-2 bg-[#831bd7] text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-[#7018b8]"
       >
         <Plus :size="16" />
-        新增凭据
+        {{ t('New Credential') }}
       </button>
     </header>
 
@@ -93,39 +96,39 @@ onMounted(load);
       <!-- Form -->
       <div v-if="showForm" class="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
         <div class="flex justify-between items-center mb-4">
-          <h2 class="font-bold text-lg">{{ editingId ? '编辑凭据' : '新增凭据' }}</h2>
+          <h2 class="font-bold text-lg">{{ editingId ? t('Edit Credential') : t('New Credential') }}</h2>
           <button @click="resetForm" class="p-1 hover:bg-gray-100 rounded"><X :size="18" /></button>
         </div>
         <div class="grid grid-cols-2 gap-4">
           <div>
-            <label class="text-xs text-gray-500 font-medium mb-1 block">名称</label>
-            <input v-model="form.name" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-[#831bd7] outline-none" placeholder="如：GitHub 登录" />
+            <label class="text-xs text-gray-500 font-medium mb-1 block">{{ t('Credential Name') }}</label>
+            <input v-model="form.name" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-[#831bd7] outline-none" :placeholder="t('Credential Name')" />
           </div>
           <div>
-            <label class="text-xs text-gray-500 font-medium mb-1 block">用户名</label>
-            <input v-model="form.username" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-[#831bd7] outline-none" placeholder="用户名或邮箱" />
+            <label class="text-xs text-gray-500 font-medium mb-1 block">{{ t('Username') }}</label>
+            <input v-model="form.username" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-[#831bd7] outline-none" :placeholder="t('Username')" />
           </div>
           <div>
-            <label class="text-xs text-gray-500 font-medium mb-1 block">密码</label>
-            <input v-model="form.password" type="password" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-[#831bd7] outline-none" :placeholder="editingId ? '留空则不修改' : '密码'" />
+            <label class="text-xs text-gray-500 font-medium mb-1 block">{{ t('Password') }}</label>
+            <input v-model="form.password" type="password" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-[#831bd7] outline-none" :placeholder="editingId ? t('Leave empty to keep') : t('Password')" />
           </div>
           <div>
-            <label class="text-xs text-gray-500 font-medium mb-1 block">域名（可选）</label>
-            <input v-model="form.domain" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-[#831bd7] outline-none" placeholder="如：github.com" />
+            <label class="text-xs text-gray-500 font-medium mb-1 block">{{ t('Domain') }}</label>
+            <input v-model="form.domain" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-[#831bd7] outline-none" placeholder="github.com" />
           </div>
         </div>
         <div class="flex justify-end mt-4">
           <button @click="save" class="bg-[#831bd7] text-white px-6 py-2 rounded-lg text-sm font-bold hover:bg-[#7018b8]">
-            {{ editingId ? '保存' : '创建' }}
+            {{ editingId ? t('Save') : t('Create') }}
           </button>
         </div>
       </div>
 
       <!-- List -->
       <div class="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
-        <div v-if="loading" class="text-center text-gray-400 py-8">加载中...</div>
+        <div v-if="loading" class="text-center text-gray-400 py-8">{{ t('Loading...') }}</div>
         <div v-else-if="credentials.length === 0" class="text-center text-gray-400 py-8">
-          暂无凭据，点击上方按钮新增
+          {{ t('No credentials yet') }}
         </div>
         <div v-else class="space-y-3">
           <div
