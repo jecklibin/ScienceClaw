@@ -148,6 +148,36 @@ def _session_to_list_item(session) -> ListSessionItem:
     )
 
 
+def should_skip_file(path: _Path) -> bool:
+    """判断是否应该跳过该文件/目录（不在技能文件列表中展示）。
+
+    Args:
+        path: 文件或目录的 Path 对象
+
+    Returns:
+        True 表示应该跳过，False 表示应该展示
+    """
+    name = path.name
+
+    # 跳过 __pycache__ 目录
+    if name == '__pycache__':
+        return True
+
+    # 跳过 Python 字节码文件
+    if name.endswith(('.pyc', '.pyo', '.pyd')):
+        return True
+
+    # 跳过系统临时文件
+    if name in {'.DS_Store', 'Thumbs.db', 'desktop.ini', '.gitignore'}:
+        return True
+
+    # 跳过版本控制和 IDE 目录
+    if name in {'.git', '.svn', '.vscode', '.idea', '.vs'}:
+        return True
+
+    return False
+
+
 def _append_session_event(session: Any, event: Dict[str, Any]) -> None:
     events = getattr(session, "events", None)
     if not isinstance(events, list):
