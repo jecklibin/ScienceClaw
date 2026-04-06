@@ -465,7 +465,7 @@ CAPTURE_JS = r"""
                   value: isPassword ? '{{credential}}' : (el.value||''),
                   tag:el.tagName,
                   sensitive: isPassword});
-        }, 800);
+        }, 1500);
     }, true);
 
     document.addEventListener('change', function(e) {

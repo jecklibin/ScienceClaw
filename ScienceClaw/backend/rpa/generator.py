@@ -211,17 +211,22 @@ if __name__ == "__main__":
 
     @staticmethod
     def _deduplicate_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Remove consecutive duplicate actions (same action + same target)."""
+        """Remove consecutive duplicate actions (same action + same target).
+
+        For fill actions on the same target, keep the LAST one (final typed value).
+        """
         if not steps:
             return steps
         result = [steps[0]]
         for step in steps[1:]:
             prev = result[-1]
-            # Same action and same target → skip duplicate
+            # Same action and same target → replace with the later one
+            # (keeps the final/complete value for fill actions)
             # BUT: never deduplicate AI steps (each AI instruction is unique)
             if (step.get("action") == prev.get("action")
                     and step.get("target") == prev.get("target")
                     and step.get("action") not in ("navigate", "ai_script")):
+                result[-1] = step  # Replace previous with current (keep last)
                 continue
             result.append(step)
         return result

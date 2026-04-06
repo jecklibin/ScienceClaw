@@ -32,6 +32,50 @@ const loadCredentials = async () => {
   }
 };
 
+// Common keyword → param name mappings (Chinese & English)
+const KEYWORD_MAP: Record<string, string> = {
+  '邮箱': 'email', '邮件': 'email', 'email': 'email', 'e-mail': 'email',
+  '密码': 'password', 'password': 'password', 'pwd': 'password',
+  '用户名': 'username', '用户': 'username', 'username': 'username', 'user': 'username',
+  '账号': 'account', 'account': 'account',
+  '手机': 'phone', '电话': 'phone', 'phone': 'phone', 'tel': 'phone', 'mobile': 'phone',
+  '验证码': 'captcha', 'captcha': 'captcha', 'code': 'code',
+  '搜索': 'search', 'search': 'search',
+  '地址': 'address', 'address': 'address', 'url': 'url',
+  '姓名': 'name', 'name': 'name',
+};
+
+/**
+ * Derive a semantic parameter name from the locator and sensitivity.
+ * Returns snake_case identifier or empty string on failure.
+ */
+function deriveParamName(loc: any, sensitive: boolean): string {
+  if (!loc) return sensitive ? 'password' : '';
+
+  // For password fields, always use 'password'
+  if (sensitive) return 'password';
+
+  // Collect candidate texts from locator (in priority order)
+  const candidates: string[] = [];
+  if (loc.name) candidates.push(loc.name);           // accessible name (e.g. "邮箱")
+  if (loc.value && loc.method !== 'css') candidates.push(loc.value); // placeholder/label text
+  if (loc.role) candidates.push(loc.role);            // fallback to role (e.g. "textbox")
+
+  for (const text of candidates) {
+    const lower = text.toLowerCase().trim();
+    // Try direct keyword match
+    for (const [keyword, paramName] of Object.entries(KEYWORD_MAP)) {
+      if (lower.includes(keyword)) return paramName;
+    }
+    // If text is a short ASCII identifier already, use it directly
+    const ascii = lower.replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+    if (ascii && ascii.length >= 2 && ascii.length <= 30 && /^[a-z]/.test(ascii)) {
+      return ascii;
+    }
+  }
+  return '';
+}
+
 const loadSession = async () => {
   if (!sessionId.value) {
     error.value = '缺少 sessionId 参数';
@@ -44,18 +88,31 @@ const loadSession = async () => {
     steps.value = session.steps || [];
 
     // Auto-extract parameters from fill/select steps
+    const usedNames = new Set<string>();
     params.value = steps.value
       .filter((s: any) => s.action === 'fill' || s.action === 'select')
       .map((s: any, i: number) => {
         let label = `参数${i + 1}`;
+        let semanticName = '';
         try {
           const loc = typeof s.target === 'string' ? JSON.parse(s.target) : s.target;
+          // Extract display label from locator
           if (loc?.name) label = loc.name;
           else if (loc?.value) label = loc.value;
+          // Derive semantic param name from locator context
+          semanticName = deriveParamName(loc, s.sensitive);
         } catch { /* use default */ }
+        // Ensure unique name
+        let name = semanticName || `param_${i}`;
+        if (usedNames.has(name)) {
+          let suffix = 2;
+          while (usedNames.has(`${name}_${suffix}`)) suffix++;
+          name = `${name}_${suffix}`;
+        }
+        usedNames.add(name);
         return {
           id: `param_${i}`,
-          name: `param_${i}`,
+          name,
           label,
           original_value: s.value || '',
           current_value: s.value || '',
