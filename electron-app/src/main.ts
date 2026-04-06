@@ -242,31 +242,9 @@ ipcMain.handle('initialize-home-dir', async (event, dirPath: string) => {
   }
 });
 
-ipcMain.on('wizard-complete', async () => {
-  // Close wizard
+ipcMain.on('wizard-complete', () => {
+  // Close wizard and relaunch app so it goes through normal initialize() path
   wizardWindow?.close();
-
-  // Load config
-  const config = configManager.load();
-  if (!config) {
-    console.error('Failed to load config after wizard');
-    app.quit();
-    return;
-  }
-
-  // Start backend services
-  processManager = new ProcessManager(config.homeDir);
-  try {
-    await processManager.startBackend();
-    await processManager.startTaskService();
-  } catch (error) {
-    console.error('Failed to start services:', error);
-    dialog.showErrorBox('Startup Error', `Failed to start services: ${error}`);
-    app.quit();
-    return;
-  }
-
-  // Create main window and tray
-  createMainWindow();
-  createTray();
+  app.relaunch();
+  app.quit();
 });

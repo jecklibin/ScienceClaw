@@ -94,7 +94,10 @@ if (-not $SkipPython) {
     # Install Playwright browsers
     Write-Host "  Installing Playwright Chromium browser..." -ForegroundColor Yellow
     Write-Host "  (This may take several minutes...)" -ForegroundColor Yellow
+    $PlaywrightBrowsersPath = Join-Path $PythonDir "Lib\site-packages\playwright\driver\package\.local-browsers"
+    $env:PLAYWRIGHT_BROWSERS_PATH = $PlaywrightBrowsersPath
     & $PythonExe -m playwright install chromium
+    Remove-Item Env:\PLAYWRIGHT_BROWSERS_PATH
 
     Write-Host "  Python environment ready!" -ForegroundColor Green
     Write-Host ""
