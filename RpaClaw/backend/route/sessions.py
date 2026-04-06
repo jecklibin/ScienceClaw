@@ -157,11 +157,18 @@ def should_skip_file(path: _Path) -> bool:
     Returns:
         True 表示应该跳过，False 表示应该展示
     """
-    name = path.name
+    # 检查路径中的所有部分（包括父目录）
+    for part in path.parts:
+        # 跳过 __pycache__ 目录
+        if part == '__pycache__':
+            return True
 
-    # 跳过 __pycache__ 目录
-    if name == '__pycache__':
-        return True
+        # 跳过版本控制和 IDE 目录
+        if part in {'.git', '.svn', '.vscode', '.idea', '.vs'}:
+            return True
+
+    # 检查文件名本身
+    name = path.name
 
     # 跳过 Python 字节码文件
     if name.endswith(('.pyc', '.pyo', '.pyd')):
@@ -169,10 +176,6 @@ def should_skip_file(path: _Path) -> bool:
 
     # 跳过系统临时文件
     if name in {'.DS_Store', 'Thumbs.db', 'desktop.ini', '.gitignore'}:
-        return True
-
-    # 跳过版本控制和 IDE 目录
-    if name in {'.git', '.svn', '.vscode', '.idea', '.vs'}:
         return True
 
     return False
@@ -990,6 +993,9 @@ async def list_skill_files(
                 raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
             items = []
             for file_path in sorted(skill_dir.rglob("*")):
+                # 跳过不需要展示的文件
+                if should_skip_file(file_path):
+                    continue
                 if file_path.is_file():
                     rel_path = str(file_path.relative_to(skill_dir))
                     items.append({
