@@ -5,46 +5,6 @@
     </div>
 
     <div v-else class="flex flex-col gap-8">
-      <!-- Free Token Banner -->
-      <div class="relative overflow-hidden rounded-2xl border border-indigo-200 dark:border-indigo-800/50 bg-gradient-to-br from-indigo-50 via-blue-50 to-purple-50 dark:from-indigo-950/40 dark:via-blue-950/30 dark:to-purple-950/30 p-6">
-        <div class="absolute top-0 right-0 w-32 h-32 bg-gradient-to-bl from-indigo-200/40 to-transparent rounded-bl-full"></div>
-        <div class="relative flex flex-col gap-4">
-          <div class="flex items-start gap-4">
-            <div class="size-12 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white shadow-lg shadow-indigo-500/30 flex-shrink-0">
-              <Gift class="size-6" />
-            </div>
-            <div class="flex flex-col gap-1">
-              <h3 class="text-lg font-bold text-gray-800 dark:text-gray-100">{{ t('Get Started for Free') }}</h3>
-              <p class="text-sm text-gray-500 dark:text-gray-400 leading-relaxed">
-                {{ t('No API key yet? Get 10 million free tokens to start exploring — no credit card required.') }}
-              </p>
-            </div>
-          </div>
-          <div class="flex flex-wrap items-center gap-3 ml-16">
-            <a
-              href="https://www.scnet.cn/ui/mall/en"
-              target="_blank"
-              rel="noopener noreferrer"
-              class="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold text-white bg-gradient-to-r from-blue-500 to-cyan-600 rounded-xl shadow-md shadow-blue-500/25 hover:shadow-lg hover:shadow-blue-500/40 active:scale-[0.97] transition-all duration-200"
-            >
-              <Sparkles class="size-4" />
-              {{ t('SCNet · 10M Tokens') }}
-              <ExternalLink class="size-3.5 opacity-70" />
-            </a>
-            <a
-              href="https://gateway.taichuai.cn/modelhub/apply"
-              target="_blank"
-              rel="noopener noreferrer"
-              class="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-purple-600 rounded-xl shadow-md shadow-indigo-500/25 hover:shadow-lg hover:shadow-indigo-500/40 active:scale-[0.97] transition-all duration-200"
-            >
-              <Sparkles class="size-4" />
-              {{ t('Taichu Cloud · 10M Tokens') }}
-              <ExternalLink class="size-3.5 opacity-70" />
-            </a>
-          </div>
-        </div>
-      </div>
-
       <!-- System Models Section -->
       <div v-if="systemModels.length > 0" class="flex flex-col gap-4">
         <h3 class="text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider px-1 flex items-center gap-2">
@@ -219,7 +179,7 @@
                 <label class="text-sm font-medium text-[var(--text-secondary)]">{{ t('Provider') }} <span class="text-red-500">*</span></label>
                 <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
                     <button 
-                        v-for="p in ['openai', 'anthropic', 'deepseek', 'gemini', 'glm', 'qwen', 'kimi', 'minimax', 'taichu', 'other']" 
+                        v-for="p in ['openai', 'anthropic', 'deepseek', 'gemini', 'glm', 'qwen', 'kimi', 'minimax', 'other']" 
                         :key="p"
                         type="button"
                         class="px-3 py-2 rounded-lg text-xs font-medium border transition-all capitalize flex items-center justify-center gap-1.5"
@@ -431,10 +391,6 @@ const PROVIDER_CONFIG: Record<string, { base_url: string; models: string[] }> = 
     models: [
       'MiniMax-M1', 'MiniMax-T1', 'abab6.5s', 'abab6.5', 'abab5.5',
     ],
-  },
-  taichu: {
-    base_url: '',
-    models: ['taichu_llm'],
   },
 };
 

@@ -9,19 +9,6 @@
 
       <!-- Controls -->
       <div class="flex items-center gap-2">
-        <!-- Currency Selector -->
-        <div class="flex rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
-          <button @click="selectedCurrency = 'CNY'"
-            class="px-2 py-1 text-xs font-medium transition-colors"
-            :class="selectedCurrency === 'CNY' ? 'bg-blue-500 text-white' : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700'">
-            CNY
-          </button>
-          <button @click="selectedCurrency = 'USD'"
-            class="px-2 py-1 text-xs font-medium transition-colors"
-            :class="selectedCurrency === 'USD' ? 'bg-blue-500 text-white' : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700'">
-            USD
-          </button>
-        </div>
         <!-- Estimated Badge -->
         <span class="text-xs text-gray-400 dark:text-gray-500">{{ t('Estimated') }}</span>
         <!-- Time Range Selector -->
@@ -62,7 +49,7 @@
       <!-- Overview Tab -->
       <template v-if="activeSubTab === 'overview'">
         <!-- Core Stats Cards -->
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
           <div v-for="card in statsCards" :key="card.id"
             class="p-4 bg-white dark:bg-gray-800/50 border border-gray-100 dark:border-gray-700/50 rounded-xl shadow-sm hover:shadow-md transition-shadow">
             <div class="flex items-center gap-2 mb-2">
@@ -106,17 +93,16 @@
       <template v-else-if="activeSubTab === 'models'">
         <div v-if="topModels.length > 0" class="space-y-3">
           <!-- Model Stats Header -->
-          <div class="grid grid-cols-5 gap-2 px-4 py-2 text-xs font-medium text-gray-400 dark:text-gray-500 bg-gray-50 dark:bg-gray-800/30 rounded-lg">
+          <div class="grid grid-cols-4 gap-2 px-4 py-2 text-xs font-medium text-gray-400 dark:text-gray-500 bg-gray-50 dark:bg-gray-800/30 rounded-lg">
             <div class="col-span-2">{{ t('Model') }}</div>
             <div class="text-right">{{ t('Sessions') }}</div>
             <div class="text-right">{{ t('Tokens') }}</div>
-            <div class="text-right">{{ t('Cost') }}</div>
           </div>
 
           <!-- Model List -->
           <div class="space-y-2">
             <div v-for="(model, index) in topModels" :key="model.name"
-              class="grid grid-cols-5 gap-2 p-4 bg-white dark:bg-gray-800/50 border border-gray-100 dark:border-gray-700/50 rounded-xl items-center hover:shadow-sm transition-shadow">
+              class="grid grid-cols-4 gap-2 p-4 bg-white dark:bg-gray-800/50 border border-gray-100 dark:border-gray-700/50 rounded-xl items-center hover:shadow-sm transition-shadow">
               <!-- Model Name & Rank -->
               <div class="col-span-2 flex items-center gap-3">
                 <div class="size-8 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0"
@@ -138,11 +124,6 @@
               <div class="text-right">
                 <div class="text-sm font-medium text-gray-700 dark:text-gray-200 tabular-nums">{{ formatTokenCount(model.tokens) }}</div>
               </div>
-
-              <!-- Cost -->
-              <div class="text-right">
-                <div class="text-sm font-semibold text-gray-800 dark:text-gray-100 tabular-nums">{{ formatCost(model.costUsd, model.costCny) }}</div>
-              </div>
             </div>
           </div>
         </div>
@@ -158,18 +139,17 @@
       <template v-else-if="activeSubTab === 'sessions'">
         <div v-if="sessionsData.length > 0" class="space-y-3">
           <!-- Session Stats Header -->
-          <div class="grid grid-cols-12 gap-2 px-4 py-2 text-xs font-medium text-gray-400 dark:text-gray-500 bg-gray-50 dark:bg-gray-800/30 rounded-lg">
+          <div class="grid grid-cols-11 gap-2 px-4 py-2 text-xs font-medium text-gray-400 dark:text-gray-500 bg-gray-50 dark:bg-gray-800/30 rounded-lg">
             <div class="col-span-5">{{ t('Session') }}</div>
             <div class="col-span-2">{{ t('Model') }}</div>
             <div class="col-span-2 text-right">{{ t('Tokens') }}</div>
-            <div class="col-span-1 text-right">{{ t('Cost') }}</div>
             <div class="col-span-2 text-right">{{ t('Date') }}</div>
           </div>
 
           <!-- Session List -->
           <div class="space-y-2 max-h-[400px] overflow-y-auto pr-1">
             <div v-for="session in sessionsData" :key="session.session_id"
-              class="grid grid-cols-12 gap-2 p-3 bg-white dark:bg-gray-800/50 border border-gray-100 dark:border-gray-700/50 rounded-xl items-center hover:shadow-sm transition-shadow">
+              class="grid grid-cols-11 gap-2 p-3 bg-white dark:bg-gray-800/50 border border-gray-100 dark:border-gray-700/50 rounded-xl items-center hover:shadow-sm transition-shadow">
               <!-- Session Title -->
               <div class="col-span-5 min-w-0">
                 <div class="text-sm font-medium text-gray-800 dark:text-gray-100 truncate">{{ session.title || t('Untitled Session') }}</div>
@@ -190,11 +170,6 @@
               <!-- Tokens -->
               <div class="col-span-2 text-right">
                 <div class="text-sm font-medium text-gray-700 dark:text-gray-200 tabular-nums">{{ formatNumber(session.total_tokens) }}</div>
-              </div>
-
-              <!-- Cost -->
-              <div class="col-span-1 text-right">
-                <div class="text-sm font-medium text-gray-800 dark:text-gray-100 tabular-nums">{{ formatCost(session.cost_usd, session.cost_cny) }}</div>
               </div>
 
               <!-- Date -->
@@ -298,7 +273,6 @@
                 <div class="flex items-center gap-4">
                   <span class="text-gray-400 text-xs">{{ point.sessions }} {{ t('sessions') }}</span>
                   <span class="font-medium text-gray-800 dark:text-gray-100 tabular-nums">{{ formatNumber(point.tokens) }}</span>
-                  <span class="text-xs text-gray-400 tabular-nums">{{ formatCost(point.cost_usd, point.cost_cny) }}</span>
                 </div>
               </div>
             </div>
@@ -426,20 +400,7 @@ const subTabs = [
 const statsCards = computed(() => {
   if (!summaryData.value) return []
 
-  const costValue = selectedCurrency.value === 'CNY'
-    ? `¥${summaryData.value.total_cost_cny.toFixed(2)}`
-    : `$${summaryData.value.total_cost_usd.toFixed(2)}`
-
   return [
-    {
-      id: 'cost',
-      label: 'Total Cost',
-      value: costValue,
-      icon: DollarSign,
-      iconBg: 'bg-green-50 dark:bg-green-900/30',
-      iconColor: 'text-green-500',
-      trend: summaryData.value.cost_trend
-    },
     {
       id: 'sessions',
       label: 'Total Sessions',

@@ -27,7 +27,6 @@ const iconSrc = computed(() => {
   if (p === 'qwen' || p === 'alibaba') return '/qwen-color.svg';
   if (p === 'kimi' || p === 'moonshot') return '/kimi-color.svg';
   if (p === 'minimax') return '/minimax-color.svg';
-  if (p === 'taichu' || p === 'aimass') return '/taichu-color.svg';
   if (p === 'glm' || p === 'zhipu') return '/glm-color.svg';
   return null;
 });
