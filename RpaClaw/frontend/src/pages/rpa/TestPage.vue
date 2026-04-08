@@ -44,10 +44,51 @@ const testSuccess = ref(false);
 const testOutput = ref('');
 const testLogs = ref<string[]>([]);
 const generatedScript = ref('');
+const recordedSteps = ref<any[]>([]);
 const saving = ref(false);
 const saved = ref(false);
 const showScript = ref(false);
 const error = ref<string | null>(null);
+
+const parseLocator = (raw: unknown) => {
+  if (!raw) return null;
+  if (typeof raw === 'string') {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return { method: 'css', value: raw };
+    }
+  }
+  return raw as any;
+};
+
+const formatLocator = (raw: unknown): string => {
+  const locator = parseLocator(raw);
+  if (!locator) return 'No locator';
+  if (locator.method === 'role') {
+    return locator.name ? `role=${locator.role}[name="${locator.name}"]` : `role=${locator.role}`;
+  }
+  if (locator.method === 'nested') {
+    return `${formatLocator(locator.parent)} >> ${formatLocator(locator.child)}`;
+  }
+  if (locator.method === 'css') return locator.value || 'css';
+  return `${locator.method || 'locator'}:${locator.value || locator.name || ''}`;
+};
+
+const formatFramePath = (framePath?: string[]) => {
+  if (!framePath?.length) return 'Main frame';
+  return framePath.join(' -> ');
+};
+
+const loadSessionDiagnostics = async () => {
+  if (!sessionId.value) return;
+  try {
+    const resp = await apiClient.get(`/rpa/session/${sessionId.value}`);
+    recordedSteps.value = resp.data.session?.steps || [];
+  } catch (err) {
+    console.error('[TestPage] Failed to load session diagnostics:', err);
+  }
+};
 
 const drawFrame = (base64Data: string, _metadata: { width: number; height: number }) => {
   const canvas = canvasRef.value;
@@ -194,6 +235,7 @@ const saveSkill = async () => {
 };
 
 onMounted(() => {
+  loadSessionDiagnostics();
   runTest();
 });
 
@@ -367,6 +409,39 @@ onBeforeUnmount(() => {
               </div>
               <div v-if="!testLogs.length && !testOutput" class="text-[11px] font-mono text-gray-600">
                 等待执行...
+              </div>
+            </div>
+          </div>
+
+          <div v-if="recordedSteps.length">
+            <h3 class="text-gray-900 font-bold text-sm mb-2">录制诊断</h3>
+            <div class="space-y-2 max-h-64 overflow-y-auto pr-1">
+              <div
+                v-for="(step, index) in recordedSteps"
+                :key="step.id || index"
+                class="rounded-xl border border-gray-200 bg-gray-50 p-3"
+              >
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Step {{ index + 1 }}</span>
+                  <span class="text-[10px] font-semibold px-2 py-0.5 rounded-full"
+                    :class="step.validation?.status === 'ok' ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'"
+                  >
+                    {{ step.validation?.status || 'unknown' }}
+                  </span>
+                </div>
+                <p class="mt-2 text-xs text-gray-700">{{ step.description || step.action }}</p>
+                <p class="mt-2 text-[11px] text-gray-500 break-all">
+                  <span class="font-semibold text-gray-600">Locator:</span>
+                  <span class="font-mono ml-1">{{ formatLocator(step.target) }}</span>
+                </p>
+                <p class="mt-1 text-[11px] text-gray-500 break-all">
+                  <span class="font-semibold text-gray-600">Frame:</span>
+                  <span class="font-mono ml-1">{{ formatFramePath(step.frame_path) }}</span>
+                </p>
+                <p v-if="step.validation?.details" class="mt-1 text-[11px] text-gray-500 break-all">
+                  <span class="font-semibold text-gray-600">Details:</span>
+                  <span class="ml-1">{{ step.validation.details }}</span>
+                </p>
               </div>
             </div>
           </div>

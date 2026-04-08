@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
-import { Settings, Code, Play, Save, ChevronRight, CheckCircle, Edit3, Tag } from 'lucide-vue-next';
+import { Settings, Code, Play, ChevronRight, Tag } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
 
 const router = useRouter();
@@ -22,6 +22,72 @@ const showScript = ref(false);
 const params = ref<any[]>([]);
 
 const credentials = ref<any[]>([]);
+const promotingStepIndex = ref<number | null>(null);
+
+interface ParsedLocator {
+  method?: string;
+  role?: string;
+  name?: string;
+  value?: string;
+  parent?: ParsedLocator;
+  child?: ParsedLocator;
+}
+
+interface LocatorCandidate {
+  kind?: string;
+  score?: number;
+  selected?: boolean;
+  reason?: string;
+  strict_match_count?: number;
+  visible_match_count?: number;
+  locator?: ParsedLocator;
+}
+
+const parseLocator = (raw: unknown): ParsedLocator | null => {
+  if (!raw) return null;
+  if (typeof raw === 'string') {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return { method: 'css', value: raw };
+    }
+  }
+  return raw as ParsedLocator;
+};
+
+const formatLocator = (raw: unknown): string => {
+  const locator = parseLocator(raw);
+  if (!locator) return 'No locator';
+  if (locator.method === 'role') {
+    return locator.name ? `role=${locator.role}[name="${locator.name}"]` : `role=${locator.role}`;
+  }
+  if (locator.method === 'nested') {
+    return `${formatLocator(locator.parent)} >> ${formatLocator(locator.child)}`;
+  }
+  if (locator.method === 'css') return locator.value || 'css';
+  return `${locator.method || 'locator'}:${locator.value || locator.name || ''}`;
+};
+
+const formatFramePath = (framePath?: string[]) => {
+  if (!framePath?.length) return 'Main frame';
+  return framePath.join(' -> ');
+};
+
+const promoteLocator = async (stepIndex: number, candidateIndex: number) => {
+  if (!sessionId.value || promotingStepIndex.value !== null) return;
+  promotingStepIndex.value = stepIndex;
+  error.value = null;
+  try {
+    await apiClient.post(`/rpa/session/${sessionId.value}/step/${stepIndex}/locator`, {
+      candidate_index: candidateIndex,
+    });
+    await loadSession();
+  } catch (err: any) {
+    error.value = '切换定位器失败: ' + (err.response?.data?.detail || err.message);
+  } finally {
+    promotingStepIndex.value = null;
+  }
+};
 
 const loadCredentials = async () => {
   try {
@@ -273,21 +339,84 @@ onMounted(() => {
           <div
             v-for="(step, idx) in steps"
             :key="step.id"
-            class="flex items-center gap-4 p-3 bg-gray-50 rounded-lg"
+            class="p-4 bg-gray-50 rounded-xl border border-gray-200"
           >
-            <span class="text-xs text-gray-400 font-mono w-6">{{ idx + 1 }}</span>
-            <span
-              class="text-[10px] font-bold px-2 py-0.5 rounded"
-              :class="getActionColor(step.action)"
-            >
-              {{ getActionLabel(step.action) }}
-            </span>
-            <span class="text-sm text-gray-700 flex-1 truncate">
-              {{ step.description || `${step.action} → ${step.target || step.label || ''}` }}
-            </span>
-            <span v-if="step.value" class="text-xs text-gray-400 font-mono truncate max-w-[200px]">
-              "{{ step.sensitive ? '*****' : step.value }}"
-            </span>
+            <div class="flex items-start gap-4">
+              <span class="text-xs text-gray-400 font-mono w-6 pt-1">{{ idx + 1 }}</span>
+              <div class="flex-1 min-w-0 space-y-3">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span
+                    class="text-[10px] font-bold px-2 py-0.5 rounded"
+                    :class="getActionColor(step.action)"
+                  >
+                    {{ getActionLabel(step.action) }}
+                  </span>
+                  <span class="text-sm text-gray-800 font-medium">
+                    {{ step.description || `${step.action} -> ${formatLocator(step.target || step.label || '')}` }}
+                  </span>
+                  <span
+                    v-if="step.validation?.status"
+                    class="text-[10px] font-semibold px-2 py-0.5 rounded-full"
+                    :class="step.validation.status === 'ok' ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'"
+                  >
+                    {{ step.validation.status }}
+                  </span>
+                  <span v-if="step.value" class="text-xs text-gray-400 font-mono truncate max-w-[200px]">
+                    "{{ step.sensitive ? '*****' : step.value }}"
+                  </span>
+                </div>
+
+                <div class="grid gap-2 text-xs text-gray-600">
+                  <div>
+                    <span class="font-semibold text-gray-700">Primary Locator:</span>
+                    <span class="font-mono ml-2 break-all">{{ formatLocator(step.target) }}</span>
+                  </div>
+                  <div>
+                    <span class="font-semibold text-gray-700">Frame:</span>
+                    <span class="font-mono ml-2 break-all">{{ formatFramePath(step.frame_path) }}</span>
+                  </div>
+                  <div v-if="step.validation?.details">
+                    <span class="font-semibold text-gray-700">Validation:</span>
+                    <span class="ml-2">{{ step.validation.details }}</span>
+                  </div>
+                </div>
+
+                <div v-if="step.locator_candidates?.length" class="space-y-2">
+                  <p class="text-xs font-semibold text-gray-700">Locator Candidates</p>
+                  <div
+                    v-for="(candidate, candidateIndex) in (step.locator_candidates as LocatorCandidate[])"
+                    :key="`${step.id}-${candidateIndex}`"
+                    class="flex items-start justify-between gap-3 rounded-lg border px-3 py-2"
+                    :class="candidate.selected ? 'border-[#831bd7] bg-[#831bd7]/5' : 'border-gray-200 bg-white'"
+                  >
+                    <div class="min-w-0 flex-1">
+                      <div class="flex items-center gap-2 flex-wrap">
+                        <span class="text-[10px] font-semibold uppercase tracking-wide text-gray-500">{{ candidate.kind || 'locator' }}</span>
+                        <span class="text-[10px] text-gray-400">score {{ candidate.score ?? '-' }}</span>
+                        <span class="text-[10px] text-gray-400">strict {{ candidate.strict_match_count ?? '-' }}</span>
+                        <span
+                          v-if="candidate.selected"
+                          class="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-[#831bd7] text-white"
+                        >
+                          Active
+                        </span>
+                      </div>
+                      <p class="mt-1 text-xs font-mono text-gray-700 break-all">{{ formatLocator(candidate.locator) }}</p>
+                      <p v-if="candidate.reason" class="mt-1 text-[11px] text-gray-500">{{ candidate.reason }}</p>
+                    </div>
+                    <button
+                      type="button"
+                      class="shrink-0 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors"
+                      :class="candidate.selected ? 'border-gray-200 text-gray-400 cursor-default' : 'border-[#831bd7] text-[#831bd7] hover:bg-[#831bd7]/5'"
+                      :disabled="candidate.selected || promotingStepIndex === idx"
+                      @click="promoteLocator(idx, candidateIndex)"
+                    >
+                      {{ promotingStepIndex === idx ? 'Switching...' : (candidate.selected ? 'Selected' : 'Use This') }}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
           <div v-if="steps.length === 0" class="text-center text-gray-400 py-8">
             没有录制到步骤

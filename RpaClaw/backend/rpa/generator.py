@@ -144,6 +144,7 @@ if __name__ == "__main__":
             value = step.get("value", "")
             url = step.get("url", "")
             desc = step.get("description", "")
+            frame_path = step.get("frame_path") or []
 
             if desc:
                 lines.append(f"    # {desc}")
@@ -204,8 +205,18 @@ if __name__ == "__main__":
                 lines.append("")
                 continue
 
+            scope_var = "current_page"
+            if frame_path:
+                scope_var = "frame_scope"
+                frame_parent = "current_page"
+                for frame_selector in frame_path:
+                    lines.append(
+                        f'    frame_scope = {frame_parent}.frame_locator("{self._escape(frame_selector)}")'
+                    )
+                    frame_parent = "frame_scope"
+
             # Parse the locator object from target (stored as JSON string)
-            locator = self._build_locator_for_page(target, "current_page")
+            locator = self._build_locator_for_page(target, scope_var)
 
             if action == "open_tab_click":
                 target_tab_id = step.get("target_tab_id") or step.get("tab_id") or "tab-new"

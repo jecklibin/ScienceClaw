@@ -20,6 +20,11 @@ class RPAStep(BaseModel):
     id: str
     action: str
     target: Optional[str] = None
+    frame_path: List[str] = Field(default_factory=list)
+    locator_candidates: List[Dict[str, Any]] = Field(default_factory=list)
+    validation: Dict[str, Any] = Field(default_factory=dict)
+    signals: Dict[str, Any] = Field(default_factory=dict)
+    element_snapshot: Dict[str, Any] = Field(default_factory=dict)
     value: Optional[str] = None
     screenshot_url: Optional[str] = None
     timestamp: datetime = Field(default_factory=datetime.now)
@@ -273,6 +278,151 @@ CAPTURE_JS = r"""
         return {method:'css', value:cssFallback(el)};
     }
 
+    function collectLocatorCandidates(el) {
+        el = retarget(el);
+        var candidates = [];
+        var tag = el.tagName;
+        var role = getRole(el);
+        var name = accessibleName(el);
+
+        var tid = el.getAttribute('data-testid')||el.getAttribute('data-test-id')
+                ||el.getAttribute('data-test')||el.getAttribute('data-cy');
+        if (tid) {
+            var tsel = '[data-testid="'+cssEsc(tid)+'"]';
+            if (!isUnique(tsel)) tsel = '[data-test-id="'+cssEsc(tid)+'"]';
+            candidates.push({s:S_TESTID, m:'testid', v:tid, sel:tsel});
+        }
+        if (role && name) candidates.push({s:S_ROLE_NAME, m:'role', role:role, name:name});
+
+        var ph = el.getAttribute('placeholder');
+        if (ph) candidates.push({s:S_PLACEHOLDER, m:'placeholder', v:norm(ph).substring(0,80)});
+
+        if (['INPUT','TEXTAREA','SELECT'].indexOf(tag)>=0) {
+            var labelText = '';
+            if (el.id) {
+                var lbl = document.querySelector('label[for="'+cssEsc(el.id)+'"]');
+                if (lbl) labelText = norm(lbl.textContent);
+            }
+            if (!labelText && el.closest && el.closest('label'))
+                labelText = norm(el.closest('label').textContent);
+            if (labelText) candidates.push({s:S_LABEL, m:'label', v:labelText.substring(0,80)});
+        }
+
+        var alt = el.getAttribute('alt');
+        if (alt) candidates.push({s:S_ALT, m:'alt', v:norm(alt).substring(0,80)});
+
+        if (name && name.length<=50 && ['BUTTON','A','LABEL','OPTION'].indexOf(tag)>=0) {
+            candidates.push({s:S_TEXT, m:'text', v:name});
+        }
+
+        var title = el.getAttribute('title');
+        if (title) candidates.push({s:S_TITLE, m:'title', v:norm(title).substring(0,80)});
+
+        if (el.id && !isGuidLike(el.id)) {
+            candidates.push({s:S_CSS_ID, m:'css', v:'#'+cssEsc(el.id), sel:'#'+cssEsc(el.id)});
+        }
+        if (role && !name) candidates.push({s:S_ROLE_ONLY, m:'role_only', role:role});
+
+        var nameAttr = el.getAttribute('name');
+        if (nameAttr) {
+            var nsel = tag.toLowerCase()+'[name="'+cssEsc(nameAttr)+'"]';
+            candidates.push({s:S_CSS_ATTR, m:'css', v:nsel, sel:nsel});
+        }
+        if (tag==='INPUT') {
+            var itype = el.getAttribute('type')||'text';
+            var tsel2 = 'input[type="'+itype+'"]';
+            candidates.push({s:S_CSS_ATTR, m:'css', v:tsel2, sel:tsel2});
+        }
+        if (el.className && typeof el.className==='string') {
+            var classes = el.className.trim().split(/\s+/).filter(function(c){
+                return c && !isGuidLike(c);
+            });
+            for (var ci=1; ci<=Math.min(classes.length,3); ci++) {
+                var csel = tag.toLowerCase()+'.'+classes.slice(0,ci).map(cssEsc).join('.');
+                candidates.push({s:S_CSS_TAG, m:'css', v:csel, sel:csel});
+            }
+        }
+
+        candidates.sort(function(a,b){ return a.s - b.s; });
+        return candidates.map(function(c) { return buildCandidateMeta(c); });
+    }
+
+    function buildCandidateMeta(c) {
+        var matchCount = countCandidateMatches(c);
+        return {
+            kind: c.m,
+            score: c.s,
+            strict_match_count: matchCount,
+            visible_match_count: matchCount,
+            selected: false,
+            locator: formatCandidate(c),
+            reason: matchCount === 1 ? 'strict unique match' : ('strict matches = ' + matchCount)
+        };
+    }
+
+    function countCandidateMatches(c) {
+        var all = document.querySelectorAll('*');
+        var count = 0;
+        for (var i = 0; i < all.length; i++) {
+            if (matchesCandidate(all[i], c)) count++;
+        }
+        return count;
+    }
+
+    function buildLocatorBundle(el) {
+        var primary = generateLocator(el);
+        var candidatePayloads = collectLocatorCandidates(el);
+        var primaryJson = JSON.stringify(primary);
+        var selectedPayload = null;
+
+        for (var i = 0; i < candidatePayloads.length; i++) {
+            if (JSON.stringify(candidatePayloads[i].locator) === primaryJson) {
+                candidatePayloads[i].selected = true;
+                selectedPayload = candidatePayloads[i];
+                break;
+            }
+        }
+
+        if (!selectedPayload) {
+            selectedPayload = {
+                kind: primary.method || 'css',
+                score: S_FALLBACK,
+                strict_match_count: 1,
+                visible_match_count: 1,
+                selected: true,
+                locator: primary,
+                reason: primary.method === 'nested' ? 'scoped parent-child fallback' : 'selected generated locator'
+            };
+            candidatePayloads.push(selectedPayload);
+        }
+
+        return {
+            primary: primary,
+            candidates: candidatePayloads,
+            validation: {
+                status: selectedPayload.strict_match_count === 1 ? 'ok' : 'fallback',
+                details: selectedPayload.reason
+            }
+        };
+    }
+
+    function buildElementSnapshot(el) {
+        el = retarget(el);
+        var text = norm(el.textContent || '');
+        return {
+            tag: el.tagName.toLowerCase(),
+            role: getRole(el) || '',
+            name: accessibleName(el) || '',
+            text: text.substring(0, 120),
+            id: el.id || '',
+            classes: (typeof el.className === 'string' ? el.className.trim().split(/\s+/).filter(Boolean) : []).slice(0, 6),
+            type: el.getAttribute('type') || '',
+            placeholder: norm(el.getAttribute('placeholder') || ''),
+            title: norm(el.getAttribute('title') || ''),
+            name_attr: el.getAttribute('name') || ''
+        };
+    }
+
     function testUnique(el, c) {
         if (c.m==='role' || c.m==='role_only') {
             // Count elements with same role+name
@@ -440,6 +590,35 @@ CAPTURE_JS = r"""
         return parts.join(' > ');
     }
 
+    function describeFrameElement(frameEl) {
+        if (!frameEl) return 'iframe';
+        var tag = (frameEl.tagName || 'iframe').toLowerCase();
+        var name = frameEl.getAttribute('name');
+        if (name) return tag + '[name="' + cssEsc(name) + '"]';
+        var title = frameEl.getAttribute('title');
+        if (title) return tag + '[title="' + cssEsc(title) + '"]';
+        if (frameEl.id && !isGuidLike(frameEl.id)) return tag + '#' + cssEsc(frameEl.id);
+        var src = frameEl.getAttribute('src');
+        if (src) return tag + '[src="' + cssEsc(src) + '"]';
+        return cssFallback(frameEl);
+    }
+
+    function getFramePath() {
+        var path = [];
+        var currentWindow = window;
+        try {
+            while (currentWindow && currentWindow !== currentWindow.parent) {
+                var frameEl = currentWindow === window ? window.frameElement : currentWindow.frameElement;
+                if (!frameEl) break;
+                path.unshift(describeFrameElement(frameEl));
+                currentWindow = currentWindow.parent;
+            }
+        } catch (e) {
+            // Cross-origin access can break parent traversal; keep collected path.
+        }
+        return path;
+    }
+
     // ── Navigation deduplication ────────────────────────────────────
     var _lastAction = null;  // {action, time}
     var _lastClick = null;   // {locatorJson, time} for click dedup
@@ -447,6 +626,7 @@ CAPTURE_JS = r"""
     function emit(evt) {
         evt.timestamp = Date.now();
         evt.url = location.href;
+        evt.frame_path = getFramePath();
         _lastAction = {action:evt.action, time:evt.timestamp};
         window.__rpa_emit(JSON.stringify(evt));
     }
@@ -458,15 +638,22 @@ CAPTURE_JS = r"""
         var el = e.target;
         // Skip clicks on SELECT/OPTION (handled by change event)
         if (el.tagName==='SELECT'||el.tagName==='OPTION') return;
-        var loc = generateLocator(el);
-        var locJson = JSON.stringify(loc);
+        var locatorBundle = buildLocatorBundle(el);
+        var locJson = JSON.stringify(locatorBundle.primary);
         var now = Date.now();
         // Deduplicate rapid clicks on the same element (within 1s)
         if (_lastClick && _lastClick.locatorJson===locJson && now-_lastClick.time<1000) {
             return;
         }
         _lastClick = {locatorJson:locJson, time:now};
-        emit({action:'click', locator:loc, tag:retarget(el).tagName});
+        emit({
+            action:'click',
+            locator:locatorBundle.primary,
+            locator_candidates:locatorBundle.candidates,
+            validation:locatorBundle.validation,
+            element_snapshot:buildElementSnapshot(el),
+            tag:retarget(el).tagName
+        });
     }, true);
 
     document.addEventListener('input', function(e) {
@@ -476,7 +663,11 @@ CAPTURE_JS = r"""
         clearTimeout(el.__rpa_timer);
         el.__rpa_timer = setTimeout(function() {
             var isPassword = (el.type === 'password');
-            emit({action:'fill', locator:generateLocator(el),
+            var locatorBundle = buildLocatorBundle(el);
+            emit({action:'fill', locator:locatorBundle.primary,
+                  locator_candidates:locatorBundle.candidates,
+                  validation:locatorBundle.validation,
+                  element_snapshot:buildElementSnapshot(el),
                   value: isPassword ? '{{credential}}' : (el.value||''),
                   tag:el.tagName,
                   sensitive: isPassword});
@@ -488,7 +679,11 @@ CAPTURE_JS = r"""
         if (window.__rpa_paused) return;
         var el = e.target;
         if (el.tagName === 'SELECT') {
-            emit({action:'select', locator:generateLocator(el),
+            var locatorBundle = buildLocatorBundle(el);
+            emit({action:'select', locator:locatorBundle.primary,
+                  locator_candidates:locatorBundle.candidates,
+                  validation:locatorBundle.validation,
+                  element_snapshot:buildElementSnapshot(el),
                   value:el.value||'', tag:el.tagName});
         }
     }, true);
@@ -498,7 +693,11 @@ CAPTURE_JS = r"""
         if (window.__rpa_paused) return;
         if (e.key === 'Enter') {
             var el = e.target;
-            emit({action:'press', locator:generateLocator(el),
+            var locatorBundle = buildLocatorBundle(el);
+            emit({action:'press', locator:locatorBundle.primary,
+                  locator_candidates:locatorBundle.candidates,
+                  validation:locatorBundle.validation,
+                  element_snapshot:buildElementSnapshot(el),
                   value:'Enter', tag:el.tagName});
         }
     }, true);
@@ -517,6 +716,7 @@ class RPASessionManager:
         self._tabs: Dict[str, Dict[str, Page]] = {}
         self._tab_meta: Dict[str, Dict[str, RPATab]] = {}
         self._page_tab_ids: Dict[str, Dict[int, str]] = {}
+        self._bridged_context_ids: Dict[str, set[int]] = {}
 
     def attach_context(self, session_id: str, context: BrowserContext):
         self._contexts[session_id] = context
@@ -524,6 +724,7 @@ class RPASessionManager:
         self._tabs[session_id] = {}
         self._tab_meta[session_id] = {}
         self._page_tab_ids[session_id] = {}
+        self._bridged_context_ids[session_id] = set()
 
         session = self.sessions.get(session_id)
         if session:
@@ -539,6 +740,7 @@ class RPASessionManager:
         self._tabs.pop(session_id, None)
         self._tab_meta.pop(session_id, None)
         self._page_tab_ids.pop(session_id, None)
+        self._bridged_context_ids.pop(session_id, None)
 
         session = self.sessions.get(session_id)
         if session:
@@ -594,6 +796,7 @@ class RPASessionManager:
             opener_tab_id=opener_tab_id,
         )
 
+        await self._ensure_context_recorder(session_id, page.context)
         await self._bind_page(session_id, tab_id, page)
 
         if make_active or not self.sessions[session_id].active_tab_id:
@@ -811,18 +1014,105 @@ class RPASessionManager:
             return None
         return self._tabs.get(session_id, {}).get(active_tab_id)
 
-    async def _bind_page(self, session_id: str, tab_id: str, page: Page):
-        async def rpa_emit(event_json: str):
+    async def _ensure_context_recorder(self, session_id: str, context: BrowserContext):
+        bridged_context_ids = self._bridged_context_ids.setdefault(session_id, set())
+        context_key = id(context)
+        if context_key in bridged_context_ids:
+            return
+
+        async def rpa_emit(source, event_json: str):
             try:
                 evt = json.loads(event_json)
-                evt.setdefault("tab_id", tab_id)
+                source_page = getattr(source, "page", None)
+                source_frame = getattr(source, "frame", None)
+                resolved_tab_id = self._page_tab_ids.get(session_id, {}).get(id(source_page))
+                if not resolved_tab_id:
+                    session = self.sessions.get(session_id)
+                    resolved_tab_id = session.active_tab_id if session else None
+                if resolved_tab_id:
+                    evt.setdefault("tab_id", resolved_tab_id)
+                if source_frame and not evt.get("frame_path"):
+                    evt["frame_path"] = await self._build_frame_path(source_frame)
                 await self._handle_event(session_id, evt)
             except Exception as e:
-                logger.error(f"[RPA] emit error: {e}")
+                logger.error(f"[RPA] binding emit error: {e}")
 
-        await page.expose_function("__rpa_emit", rpa_emit)
-        await page.evaluate(CAPTURE_JS)
+        await context.expose_binding("__rpa_emit", rpa_emit, handle=False)
+        await context.add_init_script(script=CAPTURE_JS)
+        bridged_context_ids.add(context_key)
 
+    async def _build_frame_path(self, frame) -> List[str]:
+        path: List[str] = []
+        current_frame = frame
+        while current_frame:
+            try:
+                frame_selector = await self._describe_frame_selector(current_frame)
+            except Exception:
+                break
+            path.append(frame_selector)
+            current_frame = getattr(current_frame, "parent_frame", None)
+        path.reverse()
+        return path
+
+    async def _describe_frame_selector(self, frame) -> str:
+        frame_element = await frame.frame_element()
+        tag_name = str(await frame_element.evaluate("el => el.tagName.toLowerCase()")).lower()
+        name_attr = await frame_element.get_attribute("name")
+        if name_attr:
+            return f"{tag_name}[name='{self._escape_css_attr_value(name_attr)}']"
+        title_attr = await frame_element.get_attribute("title")
+        if title_attr:
+            return f"{tag_name}[title='{self._escape_css_attr_value(title_attr)}']"
+        element_id = await frame_element.get_attribute("id")
+        if element_id and not self._is_guid_like(element_id):
+            return f"{tag_name}#{self._escape_css_identifier(element_id)}"
+        return await frame_element.evaluate(
+            """
+            el => {
+                const tag = el.tagName.toLowerCase();
+                if (!el.parentElement) return tag;
+                const siblings = Array.from(el.parentElement.children)
+                    .filter(child => child.tagName === el.tagName);
+                if (siblings.length <= 1) return tag;
+                const index = siblings.indexOf(el) + 1;
+                return `${tag}:nth-of-type(${index})`;
+            }
+            """
+        )
+
+    @staticmethod
+    def _escape_css_attr_value(value: str) -> str:
+        return value.replace("\\", "\\\\").replace("'", "\\'")
+
+    @staticmethod
+    def _escape_css_identifier(value: str) -> str:
+        escaped = []
+        for char in value:
+            if char.isalnum() or char in {"-", "_"}:
+                escaped.append(char)
+            else:
+                escaped.append(f"\\{char}")
+        return "".join(escaped)
+
+    @staticmethod
+    def _is_guid_like(value: str) -> bool:
+        transitions = 0
+        previous_type: Optional[str] = None
+        for char in value:
+            if char.islower():
+                current_type = "lower"
+            elif char.isupper():
+                current_type = "upper"
+            elif char.isdigit():
+                current_type = "digit"
+            else:
+                current_type = "other"
+            if previous_type and current_type != previous_type:
+                transitions += 1
+            previous_type = current_type
+        return bool(value) and transitions >= len(value) / 4
+
+    async def _bind_page(self, session_id: str, tab_id: str, page: Page):
         last_url = {"value": ""}
 
         def on_navigated(frame):
@@ -846,10 +1136,6 @@ class RPASessionManager:
         page.on("framenavigated", on_navigated)
 
         async def on_load(loaded_page):
-            try:
-                await loaded_page.evaluate(CAPTURE_JS)
-            except Exception:
-                pass
             tab = self._tab_meta.get(session_id, {}).get(tab_id)
             if tab:
                 tab.url = getattr(page, "url", tab.url) or tab.url
@@ -921,6 +1207,30 @@ class RPASessionManager:
         session.steps.pop(step_index)
         return True
 
+    async def select_step_locator_candidate(self, session_id: str, step_index: int, candidate_index: int) -> RPAStep:
+        session = self.sessions.get(session_id)
+        if not session or step_index < 0 or step_index >= len(session.steps):
+            raise ValueError("Invalid step index")
+
+        step = session.steps[step_index]
+        if candidate_index < 0 or candidate_index >= len(step.locator_candidates):
+            raise ValueError("Invalid locator candidate index")
+
+        for index, candidate in enumerate(step.locator_candidates):
+            candidate["selected"] = index == candidate_index
+
+        selected_candidate = step.locator_candidates[candidate_index]
+        locator = selected_candidate.get("locator")
+        if not locator:
+            raise ValueError("Locator candidate is missing locator payload")
+
+        step.target = json.dumps(locator)
+        if step.validation:
+            step.validation["selected_candidate_index"] = candidate_index
+            step.validation["selected_candidate_kind"] = selected_candidate.get("kind", "")
+        await self._broadcast_step(session_id, step)
+        return step
+
     def pause_recording(self, session_id: str):
         """Pause event recording (used during AI execution)."""
         if session_id in self.sessions:
@@ -984,6 +1294,11 @@ class RPASessionManager:
         step_data = {
             "action": evt.get("action", "unknown"),
             "target": json.dumps(locator_info) if locator_info else "",
+            "frame_path": evt.get("frame_path", []) or [],
+            "locator_candidates": evt.get("locator_candidates", []) or [],
+            "validation": evt.get("validation", {}) or {},
+            "signals": evt.get("signals", {}) or {},
+            "element_snapshot": evt.get("element_snapshot", {}) or {},
             "value": "{{credential}}" if is_sensitive else evt.get("value", ""),
             "label": "",
             "tag": evt.get("tag", ""),

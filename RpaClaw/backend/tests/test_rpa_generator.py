@@ -285,6 +285,26 @@ class PlaywrightGeneratorTests(unittest.TestCase):
         self.assertEqual(script.count('current_page = tabs["tab-1"]'), 1)
         self.assertEqual(script.count("await current_page.bring_to_front()"), 1)
 
+    def test_generate_script_uses_frame_locator_chain_for_frame_path(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "click",
+                "target": json.dumps({"method": "role", "role": "button", "name": "Save"}),
+                "description": "Click Save inside nested iframe",
+                "tag": "BUTTON",
+                "url": "https://example.com",
+                "tab_id": "tab-1",
+                "frame_path": ["iframe[name='workspace']", "iframe[title='editor']"],
+            },
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn('frame_scope = current_page.frame_locator("iframe[name=\'workspace\']")', script)
+        self.assertIn('frame_scope = frame_scope.frame_locator("iframe[title=\'editor\']")', script)
+        self.assertIn('await frame_scope.get_by_role("button", name="Save", exact=True).click()', script)
+
 
 if __name__ == "__main__":
     unittest.main()

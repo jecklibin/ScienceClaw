@@ -2,6 +2,7 @@ import importlib.util
 import importlib
 import sys
 import unittest
+import json
 from types import SimpleNamespace
 from pathlib import Path
 from datetime import datetime
@@ -17,9 +18,17 @@ MANAGER_MODULE = importlib.import_module("backend.rpa.manager")
 class _FakeContext:
     def __init__(self):
         self.handlers = {}
+        self.exposed_bindings = []
+        self.init_scripts = []
 
     def on(self, event_name, handler):
         self.handlers[event_name] = handler
+
+    async def expose_binding(self, name, callback, handle=None):
+        self.exposed_bindings.append((name, callback, handle))
+
+    async def add_init_script(self, script=None, path=None):
+        self.init_scripts.append({"script": script, "path": path})
 
 
 class _FakePage:
@@ -33,14 +42,18 @@ class _FakePage:
         self.goto_calls = []
         self.wait_for_load_state_calls = []
         self.closed = False
+        self.expose_function_calls = []
+        self.evaluate_calls = []
 
     async def title(self):
         return self._title
 
     async def expose_function(self, _name, _fn):
+        self.expose_function_calls.append((_name, _fn))
         return None
 
     async def evaluate(self, _script):
+        self.evaluate_calls.append(_script)
         return None
 
     async def goto(self, url):
@@ -65,6 +78,33 @@ class _FakePage:
 
     def set_default_navigation_timeout(self, _timeout):
         return None
+
+
+class _FakeFrameElement:
+    def __init__(self, attrs=None, tag_name="iframe", nth_of_type=1):
+        self.attrs = attrs or {}
+        self.tag_name = tag_name
+        self.nth_of_type = nth_of_type
+
+    async def get_attribute(self, name):
+        return self.attrs.get(name)
+
+    async def evaluate(self, expression):
+        if "tagName" in expression:
+            return self.tag_name.upper()
+        if "nth-of-type" in expression:
+            return f"{self.tag_name}:nth-of-type({self.nth_of_type})"
+        raise AssertionError(f"Unexpected evaluate expression: {expression}")
+
+
+class _FakeFrame:
+    def __init__(self, page, parent_frame=None, attrs=None, tag_name="iframe", nth_of_type=1):
+        self.page = page
+        self.parent_frame = parent_frame
+        self._element = _FakeFrameElement(attrs=attrs, tag_name=tag_name, nth_of_type=nth_of_type)
+
+    async def frame_element(self):
+        return self._element
 
 
 class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
@@ -157,6 +197,170 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.manager.get_active_page(self.session.id), second_page)
         self.assertEqual(self.session.active_tab_id, second_tab_id)
         self.assertEqual(self.session.steps[-1].tab_id, second_tab_id)
+
+    async def test_handle_event_persists_frame_path(self):
+        page = _FakePage("https://example.com", "Example")
+        tab_id = await self.manager.register_page(self.session.id, page, make_active=True)
+
+        await self.manager._handle_event(
+            self.session.id,
+            {
+                "action": "click",
+                "tab_id": tab_id,
+                "tag": "BUTTON",
+                "timestamp": 1234567890,
+                "frame_path": ["iframe[name='workspace']", "iframe[title='editor']"],
+                "locator": {"method": "role", "role": "button", "name": "Save"},
+            },
+        )
+
+        self.assertEqual(
+            self.session.steps[-1].frame_path,
+            ["iframe[name='workspace']", "iframe[title='editor']"],
+        )
+
+    async def test_handle_event_persists_locator_candidates_and_validation(self):
+        page = _FakePage("https://example.com", "Example")
+        tab_id = await self.manager.register_page(self.session.id, page, make_active=True)
+
+        await self.manager._handle_event(
+            self.session.id,
+            {
+                "action": "click",
+                "tab_id": tab_id,
+                "tag": "BUTTON",
+                "timestamp": 1234567890,
+                "locator": {"method": "role", "role": "button", "name": "Save"},
+                "locator_candidates": [
+                    {
+                        "kind": "role",
+                        "score": 100,
+                        "selected": True,
+                        "locator": {"method": "role", "role": "button", "name": "Save"},
+                        "reason": "strict unique role match",
+                    },
+                    {
+                        "kind": "css",
+                        "score": 520,
+                        "selected": False,
+                        "locator": {"method": "css", "value": "button.save"},
+                        "reason": "class fallback",
+                    },
+                ],
+                "validation": {"status": "ok", "details": "strict match count = 1"},
+            },
+        )
+
+        self.assertEqual(self.session.steps[-1].locator_candidates[0]["kind"], "role")
+        self.assertTrue(self.session.steps[-1].locator_candidates[0]["selected"])
+        self.assertEqual(self.session.steps[-1].validation["status"], "ok")
+
+    async def test_select_step_locator_candidate_promotes_target_and_selection(self):
+        await self.manager.add_step(
+            self.session.id,
+            {
+                "action": "click",
+                "target": json.dumps({"method": "role", "role": "button", "name": "Save"}),
+                "frame_path": [],
+                "locator_candidates": [
+                    {
+                        "kind": "role",
+                        "selected": True,
+                        "locator": {"method": "role", "role": "button", "name": "Save"},
+                    },
+                    {
+                        "kind": "css",
+                        "selected": False,
+                        "locator": {"method": "css", "value": "button.save"},
+                    },
+                ],
+                "validation": {"status": "ok"},
+                "value": "",
+                "label": "",
+                "tag": "BUTTON",
+                "url": "https://example.com",
+                "description": "Click Save",
+                "sensitive": False,
+                "tab_id": "tab-1",
+            },
+        )
+
+        updated = await self.manager.select_step_locator_candidate(self.session.id, 0, 1)
+
+        self.assertEqual(json.loads(updated.target), {"method": "css", "value": "button.save"})
+        self.assertFalse(updated.locator_candidates[0]["selected"])
+        self.assertTrue(updated.locator_candidates[1]["selected"])
+
+    def test_capture_js_includes_frame_path_collection(self):
+        self.assertIn("frame_path", MANAGER_MODULE.CAPTURE_JS)
+        self.assertIn("window.frameElement", MANAGER_MODULE.CAPTURE_JS)
+
+    async def test_register_page_bootstraps_context_recorder_once(self):
+        context = _FakeContext()
+        first_page = _FakePage("https://example.com", "Example", context=context)
+        second_page = _FakePage("https://example.org", "Example Org", context=context)
+
+        await self.manager.register_page(self.session.id, first_page, make_active=True)
+        await self.manager.register_page(self.session.id, second_page, make_active=False)
+
+        self.assertEqual(len(context.exposed_bindings), 1)
+        self.assertEqual(context.exposed_bindings[0][0], "__rpa_emit")
+        self.assertEqual(len(context.init_scripts), 1)
+        self.assertEqual(first_page.expose_function_calls, [])
+        self.assertEqual(first_page.evaluate_calls, [])
+        self.assertEqual(second_page.expose_function_calls, [])
+        self.assertEqual(second_page.evaluate_calls, [])
+
+    async def test_context_binding_callback_derives_frame_path_from_source_frame(self):
+        context = _FakeContext()
+        page = _FakePage("https://example.com", "Example", context=context)
+        tab_id = await self.manager.register_page(self.session.id, page, make_active=True)
+
+        _, binding_callback, _ = context.exposed_bindings[0]
+        outer_frame = _FakeFrame(page, attrs={"name": "workspace"})
+        inner_frame = _FakeFrame(page, parent_frame=outer_frame, attrs={"title": "editor"})
+
+        await binding_callback(
+            SimpleNamespace(page=page, frame=inner_frame),
+            json.dumps(
+                {
+                    "action": "click",
+                    "tag": "BUTTON",
+                    "timestamp": 1234567890,
+                    "locator": {"method": "role", "role": "button", "name": "Save"},
+                }
+            ),
+        )
+
+        self.assertEqual(self.session.steps[-1].tab_id, tab_id)
+        self.assertEqual(
+            self.session.steps[-1].frame_path,
+            ["iframe[name='workspace']", "iframe[title='editor']"],
+        )
+
+    async def test_context_binding_callback_falls_back_to_active_tab_when_source_page_missing(self):
+        context = _FakeContext()
+        source_page = _FakePage("https://example.com", "Example", context=context)
+        source_tab_id = await self.manager.register_page(self.session.id, source_page, make_active=True)
+        popup_page = _FakePage("https://example.com/new", "Popup", context=context)
+        popup_tab_id = await self.manager.register_context_page(self.session.id, popup_page, make_active=True)
+
+        _, binding_callback, _ = context.exposed_bindings[0]
+        await binding_callback(
+            SimpleNamespace(page=None, frame=None),
+            json.dumps(
+                {
+                    "action": "click",
+                    "tag": "INPUT",
+                    "timestamp": 1234567891,
+                    "locator": {"method": "css", "value": "#s"},
+                }
+            ),
+        )
+
+        self.assertNotEqual(source_tab_id, popup_tab_id)
+        self.assertEqual(self.session.active_tab_id, popup_tab_id)
+        self.assertEqual(self.session.steps[-1].tab_id, popup_tab_id)
 
     async def test_navigation_after_click_upgrades_step_to_navigate_click(self):
         page = _FakePage("https://example.com", "Example")

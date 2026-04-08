@@ -63,6 +63,10 @@ class NavigateRequest(BaseModel):
     url: str
 
 
+class PromoteLocatorRequest(BaseModel):
+    candidate_index: int
+
+
 async def _get_ws_user(websocket: WebSocket) -> User | None:
     """Resolve the current user for a WebSocket request.
 
@@ -374,6 +378,31 @@ async def delete_step(
     if not success:
         raise HTTPException(status_code=400, detail="Invalid step index")
     return {"status": "success"}
+
+
+@router.post("/session/{session_id}/step/{step_index}/locator")
+async def promote_step_locator(
+    session_id: str,
+    step_index: int,
+    request: PromoteLocatorRequest,
+    current_user: User = Depends(get_current_user),
+):
+    session = await rpa_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.user_id != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    try:
+        step = await rpa_manager.select_step_locator_candidate(
+            session_id,
+            step_index,
+            request.candidate_index,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {"status": "success", "step": step}
 
 
 @router.post("/session/{session_id}/generate")

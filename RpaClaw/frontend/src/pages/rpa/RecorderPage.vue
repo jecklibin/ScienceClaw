@@ -39,6 +39,52 @@ const steps = ref<any[]>([
   { id: '0', title: '初始化环境', description: '正在配置沙箱录制环境...', status: 'active' }
 ]);
 
+const parseLocator = (raw: unknown) => {
+  if (!raw) return null;
+  if (typeof raw === 'string') {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return { method: 'css', value: raw };
+    }
+  }
+  return raw as any;
+};
+
+const formatLocator = (raw: unknown): string => {
+  const locator = parseLocator(raw);
+  if (!locator) return 'No locator';
+  if (locator.method === 'role') {
+    return locator.name ? `role=${locator.role}[name="${locator.name}"]` : `role=${locator.role}`;
+  }
+  if (locator.method === 'nested') {
+    return `${formatLocator(locator.parent)} >> ${formatLocator(locator.child)}`;
+  }
+  if (locator.method === 'css') return locator.value || 'css';
+  return `${locator.method || 'locator'}:${locator.value || locator.name || ''}`;
+};
+
+const formatFramePath = (framePath?: string[]) => {
+  if (!framePath?.length) return 'Main frame';
+  return framePath.join(' -> ');
+};
+
+const mapServerSteps = (serverSteps: any[]) => ([
+  { id: '0', title: '环境就绪', description: '已成功启动 Playwright 浏览器', status: 'completed' },
+  ...serverSteps.map((s: any, i: number) => ({
+    id: String(i + 1),
+    title: s.description || s.action,
+    description: s.source === 'ai' ? (s.prompt || s.description || 'AI 操作') : `${s.action} -> ${formatLocator(s.target || s.label || '')}`,
+    status: 'completed',
+    source: s.source || 'record',
+    sensitive: s.sensitive || false,
+    locatorSummary: formatLocator(s.target),
+    frameSummary: formatFramePath(s.frame_path),
+    validationStatus: s.validation?.status || '',
+    validationDetails: s.validation?.details || '',
+  }))
+]);
+
 interface ChatMessage {
   role: 'user' | 'assistant';
   text: string;
@@ -128,17 +174,7 @@ const startPollingSteps = () => {
       const resp = await apiClient.get(`/rpa/session/${sessionId.value}`);
       const serverSteps = resp.data.session?.steps || [];
       if (serverSteps.length > 0) {
-        steps.value = [
-          { id: '0', title: '环境就绪', description: '已成功启动 Playwright 浏览器', status: 'completed' },
-          ...serverSteps.map((s: any, i: number) => ({
-            id: String(i + 1),
-            title: s.description || s.action,
-            description: s.source === 'ai' ? (s.prompt || s.description || 'AI 操作') : `${s.action} → ${s.target || s.label || ''}`,
-            status: 'completed',
-            source: s.source || 'record',
-            sensitive: s.sensitive || false,
-          }))
-        ];
+        steps.value = mapServerSteps(serverSteps);
       }
     } catch (err) {
       // Ignore polling errors
@@ -356,17 +392,7 @@ const deleteStep = async (stepIndex: number) => {
     await apiClient.delete(`/rpa/session/${sessionId.value}/step/${stepIndex}`);
     const resp = await apiClient.get(`/rpa/session/${sessionId.value}`);
     const serverSteps = resp.data.session?.steps || [];
-    steps.value = [
-      { id: '0', title: '环境就绪', description: '已成功启动 Playwright 浏览器', status: 'completed' },
-      ...serverSteps.map((s: any, i: number) => ({
-        id: String(i + 1),
-        title: s.description || s.action,
-        description: s.source === 'ai' ? (s.prompt || s.description || 'AI 操作') : `${s.action} → ${s.target || s.label || ''}`,
-        status: 'completed',
-        source: s.source || 'record',
-        sensitive: s.sensitive || false,
-      }))
-    ];
+    steps.value = mapServerSteps(serverSteps);
   } catch (err) {
     console.error('Failed to delete step:', err);
   }
@@ -586,6 +612,26 @@ const sendMessage = async () => {
             </div>
             <h3 class="text-gray-900 font-semibold text-sm">{{ step.title }}</h3>
             <p class="text-gray-500 text-[11px] mt-2 leading-relaxed">{{ step.description }}</p>
+            <div v-if="step.locatorSummary || step.frameSummary || step.validationStatus" class="mt-3 space-y-1.5 text-[10px] text-gray-500">
+              <p v-if="step.locatorSummary" class="break-all">
+                <span class="font-semibold text-gray-600">Locator:</span>
+                <span class="font-mono ml-1">{{ step.locatorSummary }}</span>
+              </p>
+              <p v-if="step.frameSummary" class="break-all">
+                <span class="font-semibold text-gray-600">Frame:</span>
+                <span class="font-mono ml-1">{{ step.frameSummary }}</span>
+              </p>
+              <p v-if="step.validationStatus" class="break-all">
+                <span class="font-semibold text-gray-600">Validation:</span>
+                <span
+                  class="ml-1 px-1.5 py-0.5 rounded-full"
+                  :class="step.validationStatus === 'ok' ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'"
+                >
+                  {{ step.validationStatus }}
+                </span>
+                <span v-if="step.validationDetails" class="ml-1">{{ step.validationDetails }}</span>
+              </p>
+            </div>
           </div>
 
           <div v-if="isRecording" class="flex flex-col items-center justify-center py-8 gap-3 border-2 border-dashed border-gray-300 rounded-xl opacity-60">
