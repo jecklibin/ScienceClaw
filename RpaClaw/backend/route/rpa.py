@@ -59,6 +59,10 @@ class ConfirmRequest(BaseModel):
     approved: bool
 
 
+class NavigateRequest(BaseModel):
+    url: str
+
+
 async def _get_ws_user(websocket: WebSocket) -> User | None:
     """Resolve the current user for a WebSocket request.
 
@@ -310,6 +314,29 @@ async def activate_rpa_tab(
         result = await rpa_manager.activate_tab(session_id, tab_id, source="user")
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "status": "success",
+        "result": result,
+        "tabs": rpa_manager.list_tabs(session_id),
+        "active_tab_id": session.active_tab_id,
+    }
+
+
+@router.post("/session/{session_id}/navigate")
+async def navigate_rpa_session(
+    session_id: str,
+    request: NavigateRequest,
+    current_user: User = Depends(get_current_user),
+):
+    session = await rpa_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.user_id != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    try:
+        result = await rpa_manager.navigate_active_tab(session_id, request.url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
         "status": "success",
         "result": result,

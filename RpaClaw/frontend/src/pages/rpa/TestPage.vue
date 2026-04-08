@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, computed } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
-import { Play, Save, CheckCircle, XCircle, Loader2, Terminal, Code, ArrowLeft, RotateCcw, House, FolderOpen } from 'lucide-vue-next';
+import { Play, Save, CheckCircle, XCircle, Loader2, Terminal, Code, ArrowLeft, RotateCcw, House, FolderOpen, Globe } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
 import { getBackendWsUrl } from '@/utils/sandbox';
 
@@ -31,9 +31,9 @@ interface BrowserTab {
 }
 const tabs = ref<BrowserTab[]>([]);
 const activeTabId = ref<string | null>(null);
-const previewTitle = computed(() => {
+const previewUrl = computed(() => {
   const active = tabs.value.find((tab) => tab.tab_id === activeTabId.value);
-  return active?.title || active?.url || 'Test execution preview';
+  return active?.url || 'about:blank';
 });
 
 const TEST_REQUEST_TIMEOUT_MS = 210000;
@@ -264,9 +264,15 @@ onBeforeUnmount(() => {
               <div class="w-2.5 h-2.5 rounded-full bg-yellow-400"></div>
               <div class="w-2.5 h-2.5 rounded-full bg-green-400"></div>
             </div>
-            <div class="flex-1 bg-white rounded-md h-6 mx-4 flex items-center px-3 shadow-inner">
-              <Terminal class="text-gray-400" :size="12" />
-              <span class="text-[10px] text-gray-600 ml-2 truncate">{{ previewTitle }}</span>
+            <div class="flex-1 bg-white rounded-md h-6 mx-4 flex items-center px-2 shadow-inner border border-transparent">
+              <Globe class="text-gray-400 flex-shrink-0" :size="12" />
+              <input
+                :value="previewUrl"
+                class="flex-1 bg-transparent text-[10px] text-gray-700 ml-2 outline-none"
+                readonly
+                type="text"
+                spellcheck="false"
+              />
             </div>
           </div>
           <div class="flex-1 relative bg-black overflow-hidden">

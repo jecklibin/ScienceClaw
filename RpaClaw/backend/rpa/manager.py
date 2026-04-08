@@ -4,6 +4,7 @@ import uuid
 import asyncio
 from typing import Dict, List, Optional, Any
 from datetime import datetime
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 from playwright.async_api import Page, BrowserContext
@@ -645,6 +646,45 @@ class RPASessionManager:
         label = title or "当前标签页"
         suffix = " 并切换到其他标签页" if has_fallback else ""
         return f"关闭标签页 {label}{suffix}"
+
+    @staticmethod
+    def _normalize_url(url: str) -> str:
+        normalized = (url or "").strip()
+        if not normalized:
+            raise ValueError("URL is required")
+        parsed = urlparse(normalized)
+        if not parsed.scheme:
+            normalized = f"https://{normalized}"
+            parsed = urlparse(normalized)
+        if parsed.scheme in {"http", "https"} and not parsed.netloc:
+            raise ValueError("Invalid URL")
+        return normalized
+
+    async def navigate_active_tab(self, session_id: str, url: str) -> Dict[str, str]:
+        session = self.sessions.get(session_id)
+        if not session or not session.active_tab_id:
+            raise ValueError(f"No active tab for session {session_id}")
+
+        page = self.get_active_page(session_id)
+        if page is None:
+            raise ValueError(f"No active page for session {session_id}")
+
+        normalized_url = self._normalize_url(url)
+        await page.goto(normalized_url)
+        await page.wait_for_load_state("domcontentloaded")
+
+        tab = self._tab_meta.get(session_id, {}).get(session.active_tab_id)
+        if tab:
+            tab.url = getattr(page, "url", normalized_url) or normalized_url
+            tab.last_seen_at = datetime.now()
+            title = await self._safe_page_title(page)
+            if title:
+                tab.title = title
+
+        return {
+            "tab_id": session.active_tab_id,
+            "url": getattr(page, "url", normalized_url) or normalized_url,
+        }
 
     async def activate_tab(self, session_id: str, tab_id: str, source: str = "auto"):
         page = self._tabs.get(session_id, {}).get(tab_id)

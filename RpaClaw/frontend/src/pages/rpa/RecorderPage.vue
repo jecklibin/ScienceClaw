@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
-import { Camera, Terminal, CheckCircle, Radio, Send, Wand2, Bot, Code, X, House, FolderOpen } from 'lucide-vue-next';
+import { Camera, Terminal, CheckCircle, Radio, Send, Wand2, Bot, Code, X, House, FolderOpen, Globe } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
 import { getBackendWsUrl } from '@/utils/sandbox';
 
@@ -30,6 +30,9 @@ interface BrowserTab {
 
 const tabs = ref<BrowserTab[]>([]);
 const activeTabId = ref<string | null>(null);
+const addressInput = ref('about:blank');
+const isAddressEditing = ref(false);
+const isNavigating = ref(false);
 const MOVE_THROTTLE = 50; // 50ms 节流
 
 const steps = ref<any[]>([
@@ -61,15 +64,17 @@ interface PendingConfirm {
 const pendingConfirm = ref<PendingConfirm | null>(null);
 let pollInterval: any = null;
 
+const syncAddressBar = (force = false) => {
+  if (isAddressEditing.value && !force) return;
+  const active = tabs.value.find((tab) => tab.tab_id === activeTabId.value);
+  addressInput.value = active?.url || 'about:blank';
+};
+
 const syncTabs = (nextTabs: BrowserTab[]) => {
   tabs.value = nextTabs;
   const active = nextTabs.find((tab) => tab.active);
   activeTabId.value = active?.tab_id || null;
-};
-
-const browserLabel = () => {
-  const active = tabs.value.find((tab) => tab.tab_id === activeTabId.value);
-  return active?.title || active?.url || 'Playwright Chromium CDP';
+  syncAddressBar();
 };
 
 const codeActionIndex = (part: string) => Number(part.match(/\[\[CODE_(\d+)\]\]/)?.[1] ?? -1);
@@ -228,6 +233,35 @@ const activateTab = async (tabId: string) => {
   } catch (err) {
     console.error('Failed to activate RPA tab:', err);
   }
+};
+
+const submitAddressBar = async () => {
+  if (!sessionId.value || isNavigating.value) return;
+  const rawUrl = addressInput.value.trim();
+  if (!rawUrl) {
+    syncAddressBar(true);
+    return;
+  }
+
+  isNavigating.value = true;
+  error.value = null;
+  try {
+    const resp = await apiClient.post(`/rpa/session/${sessionId.value}/navigate`, { url: rawUrl });
+    syncTabs(resp.data.tabs || []);
+    addressInput.value = resp.data.result?.url || addressInput.value;
+    focusCanvas();
+  } catch (err: any) {
+    console.error('Failed to navigate active RPA tab:', err);
+    error.value = err.response?.data?.detail || '地址栏导航失败';
+  } finally {
+    isNavigating.value = false;
+    isAddressEditing.value = false;
+  }
+};
+
+const handleAddressBlur = () => {
+  isAddressEditing.value = false;
+  syncAddressBar();
 };
 
 const focusCanvas = () => {
@@ -584,10 +618,20 @@ const sendMessage = async () => {
               <div class="w-2.5 h-2.5 rounded-full bg-yellow-400"></div>
               <div class="w-2.5 h-2.5 rounded-full bg-green-400"></div>
             </div>
-            <div class="flex-1 bg-white rounded-md h-6 mx-4 flex items-center px-3 shadow-inner">
-              <Terminal class="text-gray-400" :size="12" />
-              <span class="text-[10px] text-gray-600 ml-2 truncate">{{ browserLabel() }}</span>
-            </div>
+            <form class="flex-1 bg-white rounded-md h-6 mx-4 flex items-center px-2 shadow-inner border border-transparent focus-within:border-[#831bd7]/30" @submit.prevent="submitAddressBar">
+              <Globe class="text-gray-400 flex-shrink-0" :size="12" />
+              <input
+                v-model="addressInput"
+                class="flex-1 bg-transparent text-[10px] text-gray-700 ml-2 outline-none placeholder:text-gray-400"
+                :disabled="!sessionId || isNavigating"
+                placeholder="输入网址并按回车跳转"
+                type="text"
+                spellcheck="false"
+                @focus="isAddressEditing = true"
+                @blur="handleAddressBlur"
+              />
+              <span v-if="isNavigating" class="text-[9px] text-[#831bd7] font-medium flex-shrink-0">打开中...</span>
+            </form>
           </div>
 
           <div class="flex-1 relative bg-black overflow-hidden">

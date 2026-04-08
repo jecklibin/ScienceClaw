@@ -30,6 +30,8 @@ class _FakePage:
         self.main_frame = SimpleNamespace(url=url)
         self.handlers = {}
         self.bring_to_front_calls = 0
+        self.goto_calls = []
+        self.wait_for_load_state_calls = []
         self.closed = False
 
     async def title(self):
@@ -42,8 +44,12 @@ class _FakePage:
         return None
 
     async def goto(self, url):
+        self.goto_calls.append(url)
         self.url = url
         self.main_frame.url = url
+
+    async def wait_for_load_state(self, state):
+        self.wait_for_load_state_calls.append(state)
 
     async def bring_to_front(self):
         self.bring_to_front_calls += 1
@@ -243,6 +249,19 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(self.session.steps), 1)
         self.assertEqual(self.session.steps[-1].action, "open_tab_click")
+
+    async def test_navigate_active_tab_normalizes_url_and_updates_metadata(self):
+        page = _FakePage("about:blank", "Blank")
+        tab_id = await self.manager.register_page(self.session.id, page, make_active=True)
+
+        result = await self.manager.navigate_active_tab(self.session.id, "example.com")
+        tabs = self.manager.list_tabs(self.session.id)
+
+        self.assertEqual(result["tab_id"], tab_id)
+        self.assertEqual(result["url"], "https://example.com")
+        self.assertEqual(page.goto_calls, ["https://example.com"])
+        self.assertEqual(page.wait_for_load_state_calls, ["domcontentloaded"])
+        self.assertEqual(next(tab for tab in tabs if tab["tab_id"] == tab_id)["url"], "https://example.com")
 
 
 if __name__ == "__main__":
