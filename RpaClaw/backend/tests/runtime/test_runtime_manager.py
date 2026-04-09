@@ -59,13 +59,13 @@ async def test_shared_runtime_provider_derives_rest_base_from_sandbox_mcp_url_wh
     monkeypatch.delenv("SHARED_SANDBOX_REST_URL", raising=False)
 
     settings = _Settings("shared")
-    settings.sandbox_mcp_url = "http://7.199.171.198:8080/mcp"
+    settings.sandbox_mcp_url = "http://sandbox:8080/mcp"
     settings.shared_sandbox_rest_url = "http://sandbox:8080"
     settings.k8s_namespace = "default"
 
     runtime = await SharedRuntimeProvider(settings).create_runtime("sess-1", "user-1")
 
-    assert runtime.rest_base_url == "http://7.199.171.198:8080"
+    assert runtime.rest_base_url == "http://sandbox:8080"
 
 
 class _FakeProvider:
