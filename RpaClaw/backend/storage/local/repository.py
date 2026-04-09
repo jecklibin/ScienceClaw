@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -73,6 +74,29 @@ class FileRepository(Repository):
         )
         tmp.replace(target)
 
+    @staticmethod
+    def _normalize_sort_value(value):
+        if value is None:
+            return (1, "", "")
+
+        if isinstance(value, bool):
+            return (0, "bool", int(value))
+
+        if isinstance(value, (int, float)):
+            return (0, "number", value)
+
+        if isinstance(value, datetime):
+            return (0, "datetime", value.isoformat())
+
+        if isinstance(value, str):
+            try:
+                parsed = datetime.fromisoformat(value)
+            except ValueError:
+                return (0, "string", value)
+            return (0, "datetime", parsed.isoformat())
+
+        return (0, value.__class__.__name__, str(value))
+
     def _delete_doc(self, _id: str) -> None:
         fname = self._safe_filename(_id)
         target = self._dir / f"{fname}.json"
@@ -100,7 +124,7 @@ class FileRepository(Repository):
         if sort:
             for key, direction in reversed(sort):
                 results.sort(
-                    key=lambda d, k=key: (d.get(k) is None, d.get(k)),
+                    key=lambda d, k=key: self._normalize_sort_value(d.get(k)),
                     reverse=(direction == -1),
                 )
         if skip:
