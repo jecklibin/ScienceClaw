@@ -1,5 +1,6 @@
 import importlib
 import unittest
+from unittest.mock import patch
 
 
 SCREencAST_MODULE = importlib.import_module("backend.rpa.screencast")
@@ -80,6 +81,14 @@ class SessionScreencastControllerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(context.calls, 2)
         self.assertEqual(ws.messages[-1]["type"], "preview_error")
+
+
+class RouteScreencastSelectionTests(unittest.TestCase):
+    def test_node_mode_prefers_proxy_selection(self):
+        import backend.route.rpa as route_rpa
+
+        with patch.object(route_rpa.settings, "rpa_engine_mode", "node"):
+            self.assertTrue(route_rpa._should_proxy_session_screencast())
 
 
 if __name__ == "__main__":

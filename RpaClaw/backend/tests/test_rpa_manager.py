@@ -6,6 +6,7 @@ import json
 from types import SimpleNamespace
 from pathlib import Path
 from datetime import datetime
+from unittest.mock import patch
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -466,6 +467,165 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page.goto_calls, ["https://example.com"])
         self.assertEqual(page.wait_for_load_state_calls, ["domcontentloaded"])
         self.assertEqual(next(tab for tab in tabs if tab["tab_id"] == tab_id)["url"], "https://example.com")
+
+
+class RPASessionManagerEngineCompatibilityTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.manager = MANAGER_MODULE.RPASessionManager()
+        self.engine_session = {
+            "id": "session-1",
+            "userId": "user-1",
+            "sandboxSessionId": "sandbox-1",
+            "status": "recording",
+            "activePageAlias": "page-2",
+            "pages": [
+                {
+                    "alias": "page-1",
+                    "title": "Search",
+                    "url": "https://example.com",
+                },
+                {
+                    "alias": "page-2",
+                    "title": "Popup",
+                    "url": "https://example.com/popup",
+                    "openerPageAlias": "page-1",
+                },
+            ],
+            "actions": [
+                {
+                    "id": "action-1",
+                    "kind": "click",
+                    "pageAlias": "page-1",
+                    "framePath": ["iframe[name='editor']"],
+                    "locator": {
+                        "selector": 'internal:role=button[name="Save"]',
+                        "locatorAst": {"kind": "role", "role": "button", "name": "Save"},
+                    },
+                    "locatorAlternatives": [
+                        {
+                            "selector": 'internal:role=button[name="Save"]',
+                            "locatorAst": {"kind": "role", "role": "button", "name": "Save"},
+                            "score": 100,
+                            "matchCount": 1,
+                            "visibleMatchCount": 1,
+                            "isSelected": True,
+                            "engine": "playwright",
+                            "reason": "strict unique role match",
+                        },
+                        {
+                            "selector": 'internal:testid=[data-testid="save-button"]',
+                            "locatorAst": {"kind": "testId", "value": "save-button"},
+                            "score": 1,
+                            "matchCount": 1,
+                            "visibleMatchCount": 1,
+                            "isSelected": False,
+                            "engine": "playwright",
+                            "reason": "stable test id",
+                        },
+                    ],
+                    "validation": {"status": "ok"},
+                    "signals": {"popup": {"targetPageAlias": "page-2"}},
+                }
+            ],
+        }
+
+    async def test_start_session_uses_gateway_in_node_mode(self):
+        gateway_calls = []
+
+        async def fake_gateway_start_session(user_id: str, sandbox_session_id: str):
+            gateway_calls.append((user_id, sandbox_session_id))
+            return {"id": "session-1", "status": "recording", "steps": []}
+
+        self.manager._gateway = SimpleNamespace(start_session=fake_gateway_start_session)
+
+        with patch.object(
+            MANAGER_MODULE,
+            "settings",
+            SimpleNamespace(rpa_engine_mode="node"),
+            create=True,
+        ):
+            session = await self.manager.start_session("user-1", "sandbox-1")
+
+        self.assertEqual(session["id"], "session-1")
+        self.assertEqual(gateway_calls, [("user-1", "sandbox-1")])
+
+    async def test_get_session_maps_engine_payload_into_legacy_session(self):
+        async def fake_fetch_engine_session(session_id: str):
+            self.assertEqual(session_id, "session-1")
+            return self.engine_session
+
+        self.manager._fetch_engine_session = fake_fetch_engine_session
+
+        with patch.object(
+            MANAGER_MODULE,
+            "settings",
+            SimpleNamespace(rpa_engine_mode="node"),
+            create=True,
+        ):
+            session = await self.manager.get_session("session-1")
+
+        self.assertEqual(session.id, "session-1")
+        self.assertEqual(session.user_id, "user-1")
+        self.assertEqual(session.active_tab_id, "page-2")
+        self.assertEqual(session.steps[0].action, "click")
+        self.assertEqual(session.steps[0].target, 'internal:role=button[name="Save"]')
+        self.assertEqual(session.steps[0].target_tab_id, "page-2")
+
+    async def test_list_tabs_uses_engine_compat_pages(self):
+        async def fake_fetch_engine_session(_session_id: str):
+            return self.engine_session
+
+        self.manager._fetch_engine_session = fake_fetch_engine_session
+
+        with patch.object(
+            MANAGER_MODULE,
+            "settings",
+            SimpleNamespace(rpa_engine_mode="node"),
+            create=True,
+        ):
+            await self.manager.get_session("session-1")
+            tabs = self.manager.list_tabs("session-1")
+
+        self.assertEqual(
+            tabs,
+            [
+                {
+                    "tab_id": "page-1",
+                    "title": "Search",
+                    "url": "https://example.com",
+                    "opener_tab_id": None,
+                    "status": "open",
+                    "active": False,
+                },
+                {
+                    "tab_id": "page-2",
+                    "title": "Popup",
+                    "url": "https://example.com/popup",
+                    "opener_tab_id": "page-1",
+                    "status": "open",
+                    "active": True,
+                },
+            ],
+        )
+
+    async def test_select_step_locator_candidate_promotes_engine_selector(self):
+        async def fake_fetch_engine_session(_session_id: str):
+            return self.engine_session
+
+        self.manager._fetch_engine_session = fake_fetch_engine_session
+
+        with patch.object(
+            MANAGER_MODULE,
+            "settings",
+            SimpleNamespace(rpa_engine_mode="node"),
+            create=True,
+        ):
+            await self.manager.get_session("session-1")
+            updated = await self.manager.select_step_locator_candidate("session-1", 0, 1)
+
+        self.assertEqual(updated.target, 'internal:testid=[data-testid="save-button"]')
+        self.assertFalse(updated.locator_candidates[0]["selected"])
+        self.assertTrue(updated.locator_candidates[1]["selected"])
 
 
 if __name__ == "__main__":

@@ -178,6 +178,28 @@ def _get_sandbox_novnc_ws_url() -> str:
     return parsed._replace(scheme=ws_scheme, path="/websockify", query="", fragment="").geturl()
 
 
+def _should_proxy_session_screencast() -> bool:
+    return getattr(settings, "rpa_engine_mode", "legacy") == "node"
+
+
+def _get_engine_screencast_ws_url(session_id: str) -> str:
+    parsed = urlparse(settings.rpa_engine_base_url.rstrip("/"))
+    ws_scheme = "wss" if parsed.scheme == "https" else "ws"
+    return parsed._replace(
+        scheme=ws_scheme,
+        path=f"/sessions/{session_id}/screencast",
+        query="",
+        fragment="",
+    ).geturl()
+
+
+def _get_engine_proxy_headers() -> list[tuple[str, str]] | None:
+    token = (getattr(settings, "rpa_engine_auth_token", "") or "").strip()
+    if not token:
+        return None
+    return [("Authorization", f"Bearer {token}")]
+
+
 def _get_sandbox_proxy_headers() -> list[tuple[str, str]] | None:
     """Parse optional proxy request headers from env.
 
@@ -263,7 +285,7 @@ async def start_rpa_session(
     current_user: User = Depends(get_current_user),
 ):
     try:
-        session = await rpa_manager.create_session(
+        session = await rpa_manager.start_session(
             user_id=str(current_user.id),
             sandbox_session_id=request.sandbox_session_id,
         )
@@ -662,6 +684,59 @@ async def rpa_screencast(websocket: WebSocket, session_id: str):
             session.user_id,
         )
         await websocket.close(code=1008, reason="Not authorized")
+        return
+
+    if _should_proxy_session_screencast():
+        upstream_url = _get_engine_screencast_ws_url(session_id)
+        logger.info("Screencast websocket proxying session=%s upstream=%s", session_id, upstream_url)
+        try:
+            async with websockets.connect(
+                upstream_url,
+                additional_headers=_get_engine_proxy_headers(),
+                ping_interval=20,
+                ping_timeout=20,
+                max_size=None,
+            ) as upstream:
+
+                async def client_to_upstream():
+                    while True:
+                        message = await websocket.receive()
+                        if message["type"] == "websocket.disconnect":
+                            break
+                        if message.get("bytes") is not None:
+                            await upstream.send(message["bytes"])
+                        elif message.get("text") is not None:
+                            await upstream.send(message["text"])
+
+                async def upstream_to_client():
+                    async for message in upstream:
+                        if isinstance(message, bytes):
+                            await websocket.send_bytes(message)
+                        else:
+                            await websocket.send_text(message)
+
+                relay_tasks = {
+                    asyncio.create_task(client_to_upstream()),
+                    asyncio.create_task(upstream_to_client()),
+                }
+                done, pending = await asyncio.wait(
+                    relay_tasks,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                await asyncio.gather(*done, return_exceptions=True)
+        except ConnectionClosed as exc:
+            logger.info("Screencast websocket proxy closed session=%s detail=%s", session_id, exc)
+        except WebSocketDisconnect:
+            logger.info("Screencast websocket proxy local disconnect session=%s", session_id)
+        except Exception as e:
+            logger.exception("Screencast proxy error session=%s: %s", session_id, e)
+            try:
+                await websocket.close(code=1011, reason="Screencast proxy failed")
+            except Exception:
+                pass
         return
 
     active_page = rpa_manager.get_page(session_id)

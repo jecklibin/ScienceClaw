@@ -6,10 +6,14 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime
 from urllib.parse import urlparse
 
+import httpx
 from pydantic import BaseModel, Field
 from playwright.async_api import Page, BrowserContext
 
+from backend.config import settings
 from .cdp_connector import get_cdp_connector
+from .compat_mapper import to_legacy_session, to_legacy_tabs
+from .session_gateway import RPASessionGateway
 
 logger = logging.getLogger(__name__)
 
@@ -722,6 +726,66 @@ class RPASessionManager:
         self._tab_meta: Dict[str, Dict[str, RPATab]] = {}
         self._page_tab_ids: Dict[str, Dict[int, str]] = {}
         self._bridged_context_ids: Dict[str, set[int]] = {}
+        self._gateway = RPASessionGateway(settings=settings)
+        self._compat_tabs: Dict[str, List[Dict[str, Any]]] = {}
+        self._engine_sessions: Dict[str, dict[str, Any]] = {}
+
+    @staticmethod
+    def _is_engine_mode() -> bool:
+        return getattr(settings, "rpa_engine_mode", "legacy") == "node"
+
+    def _engine_base_url(self) -> str:
+        return self._gateway.mode_config.base_url.rstrip("/")
+
+    def _engine_headers(self) -> dict[str, str]:
+        client = getattr(self._gateway, "_client", None)
+        return dict(getattr(client, "_headers", {}))
+
+    def _cache_engine_session(self, session_payload: dict[str, Any]) -> RPASession:
+        legacy_session = RPASession.model_validate(to_legacy_session(session_payload))
+        self.sessions[legacy_session.id] = legacy_session
+        self._compat_tabs[legacy_session.id] = to_legacy_tabs(session_payload)
+        self._engine_sessions[legacy_session.id] = dict(session_payload)
+        return legacy_session
+
+    async def _start_engine_session(self, user_id: str, sandbox_session_id: str) -> RPASession:
+        await self._gateway.ensure_engine_ready()
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{self._engine_base_url()}/sessions",
+                json={
+                    "userId": user_id,
+                    "sandboxSessionId": sandbox_session_id,
+                    "metadata": {"sandboxSessionId": sandbox_session_id},
+                },
+                headers=self._engine_headers(),
+            )
+        if response.status_code not in {200, 201}:
+            raise RuntimeError("failed to start engine-backed rpa session")
+        payload = response.json()
+        session_payload = payload.get("session", payload)
+        if not session_payload.get("sandboxSessionId"):
+            session_payload["sandboxSessionId"] = sandbox_session_id
+        if not session_payload.get("status") and session_payload.get("mode"):
+            session_payload["status"] = session_payload["mode"]
+        return self._cache_engine_session(session_payload)
+
+    async def _fetch_engine_session(self, session_id: str) -> Optional[dict[str, Any]]:
+        await self._gateway.ensure_engine_ready()
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{self._engine_base_url()}/sessions/{session_id}",
+                headers=self._engine_headers(),
+            )
+        if response.status_code == 404:
+            return None
+        if response.status_code != 200:
+            raise RuntimeError("failed to fetch engine-backed rpa session")
+        payload = response.json()
+        session_payload = payload.get("session", payload)
+        if not session_payload.get("status") and session_payload.get("mode"):
+            session_payload["status"] = session_payload["mode"]
+        return session_payload
 
     def attach_context(self, session_id: str, context: BrowserContext):
         self._contexts[session_id] = context
@@ -751,7 +815,27 @@ class RPASessionManager:
         if session:
             session.active_tab_id = None
 
-    async def create_session(self, user_id: str, sandbox_session_id: str) -> RPASession:
+    async def start_session(self, user_id: str, sandbox_session_id: str) -> RPASession | dict[str, Any]:
+        if self._is_engine_mode():
+            gateway_start_session = getattr(self._gateway, "start_session", None)
+            if callable(gateway_start_session):
+                return await gateway_start_session(
+                    user_id=user_id,
+                    sandbox_session_id=sandbox_session_id,
+                )
+            return await self._start_engine_session(
+                user_id=user_id,
+                sandbox_session_id=sandbox_session_id,
+            )
+        return await self._start_legacy_session(
+            user_id=user_id,
+            sandbox_session_id=sandbox_session_id,
+        )
+
+    async def create_session(self, user_id: str, sandbox_session_id: str) -> RPASession | dict[str, Any]:
+        return await self.start_session(user_id=user_id, sandbox_session_id=sandbox_session_id)
+
+    async def _start_legacy_session(self, user_id: str, sandbox_session_id: str) -> RPASession:
         session_id = str(uuid.uuid4())
         session = RPASession(
             id=session_id,
@@ -997,6 +1081,9 @@ class RPASessionManager:
                 self._pages.pop(session_id, None)
 
     def list_tabs(self, session_id: str) -> List[Dict[str, Any]]:
+        if self._is_engine_mode():
+            return list(self._compat_tabs.get(session_id, []))
+
         active_tab_id = None
         if session_id in self.sessions:
             active_tab_id = self.sessions[session_id].active_tab_id
@@ -1205,6 +1292,11 @@ class RPASessionManager:
         logger.info(f"[RPA] Session {session_id} stopped")
 
     async def get_session(self, session_id: str) -> Optional[RPASession]:
+        if self._is_engine_mode():
+            session_payload = await self._fetch_engine_session(session_id)
+            if not session_payload:
+                return None
+            return self._cache_engine_session(session_payload)
         return self.sessions.get(session_id)
 
     async def delete_step(self, session_id: str, step_index: int) -> bool:
@@ -1216,6 +1308,9 @@ class RPASessionManager:
         return True
 
     async def select_step_locator_candidate(self, session_id: str, step_index: int, candidate_index: int) -> RPAStep:
+        if self._is_engine_mode() and session_id not in self.sessions:
+            await self.get_session(session_id)
+
         session = self.sessions.get(session_id)
         if not session or step_index < 0 or step_index >= len(session.steps):
             raise ValueError("Invalid step index")
@@ -1232,7 +1327,21 @@ class RPASessionManager:
         if not locator:
             raise ValueError("Locator candidate is missing locator payload")
 
-        step.target = json.dumps(locator)
+        if self._is_engine_mode():
+            step.target = locator if isinstance(locator, str) else locator.get("selector", "")
+            engine_session = self._engine_sessions.get(session_id)
+            if engine_session and step_index < len(engine_session.get("actions", [])):
+                action = engine_session["actions"][step_index]
+                alternatives = action.get("locatorAlternatives", [])
+                if candidate_index < len(alternatives):
+                    action["locator"] = {
+                        "selector": step.target,
+                        "locatorAst": (alternatives[candidate_index] or {}).get("locatorAst", {}),
+                    }
+                for index, candidate in enumerate(alternatives):
+                    candidate["isSelected"] = index == candidate_index
+        else:
+            step.target = json.dumps(locator)
         if step.validation:
             step.validation["selected_candidate_index"] = candidate_index
             step.validation["selected_candidate_kind"] = selected_candidate.get("kind", "")
