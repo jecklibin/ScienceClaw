@@ -135,10 +135,14 @@ const connectScreencast = (sid: string) => {
 
   screencastWs.onerror = (e) => {
     console.error('[TestPage] Screencast error:', e);
+    error.value = '无法连接测试画面流，请检查后端 screencast WebSocket/代理配置。';
   };
 
   screencastWs.onclose = (e) => {
     console.log('[TestPage] Screencast closed:', e.code, e.reason);
+    if (!error.value) {
+      error.value = `测试画面流已断开（code=${e.code}${e.reason ? `, reason=${e.reason}` : ''}）`;
+    }
     screencastWs = null;
   };
 };

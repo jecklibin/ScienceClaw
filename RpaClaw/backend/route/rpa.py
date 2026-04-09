@@ -636,23 +636,46 @@ async def steps_stream(websocket: WebSocket, session_id: str):
 @router.websocket("/screencast/{session_id}")
 async def rpa_screencast(websocket: WebSocket, session_id: str):
     """Session-scoped CDP screencast with active-tab switching."""
+    logger.info(
+        "Screencast websocket connect session=%s client=%s query=%s",
+        session_id,
+        getattr(websocket.client, "host", None),
+        dict(websocket.query_params),
+    )
     user = await _get_ws_user(websocket)
     await websocket.accept()
     if not user:
+        logger.warning("Screencast websocket unauthenticated session=%s", session_id)
         await websocket.close(code=1008, reason="Not authenticated")
         return
 
     session = await rpa_manager.get_session(session_id)
     if not session:
+        logger.warning("Screencast websocket missing session=%s user=%s", session_id, user.username)
         await websocket.close(code=1008, reason="Session not found")
         return
     if session.user_id != str(user.id):
+        logger.warning(
+            "Screencast websocket forbidden session=%s request_user=%s owner=%s",
+            session_id,
+            user.id,
+            session.user_id,
+        )
         await websocket.close(code=1008, reason="Not authorized")
         return
 
-    if not rpa_manager.get_page(session_id):
+    active_page = rpa_manager.get_page(session_id)
+    if not active_page:
+        logger.warning("Screencast websocket has no active page session=%s", session_id)
         await websocket.close(code=1008, reason="No active page")
         return
+    logger.info(
+        "Screencast websocket ready session=%s user=%s page_id=%s url=%s",
+        session_id,
+        user.username,
+        id(active_page),
+        getattr(active_page, "url", ""),
+    )
 
     screencast = SessionScreencastController(
         page_provider=lambda: rpa_manager.get_page(session_id),
@@ -661,9 +684,9 @@ async def rpa_screencast(websocket: WebSocket, session_id: str):
     try:
         await screencast.start(websocket)
     except WebSocketDisconnect:
-        pass
+        logger.info("Screencast websocket disconnected session=%s", session_id)
     except Exception as e:
-        logger.error(f"Screencast error: {e}")
+        logger.exception("Screencast error session=%s: %s", session_id, e)
     finally:
         await screencast.stop()
 

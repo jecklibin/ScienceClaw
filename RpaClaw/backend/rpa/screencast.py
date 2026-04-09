@@ -29,10 +29,13 @@ class SessionScreencastController:
         self._viewport_height = 720
         self._tabs_snapshot_json = ""
         self._last_preview_error = ""
+        self._frames_sent = 0
+        self._started_at = time.time()
 
     async def start(self, websocket: WebSocket) -> None:
         self._ws = websocket
         self._running = True
+        logger.info("[Screencast] start controller")
         await self._emit_tabs_snapshot(force=True)
         await self._switch_page_if_needed(force=True)
 
@@ -50,6 +53,11 @@ class SessionScreencastController:
         if not self._running:
             return
         self._running = False
+        logger.info(
+            "[Screencast] stop controller frames_sent=%s uptime_s=%.2f",
+            self._frames_sent,
+            time.time() - self._started_at,
+        )
         await self._detach_current_page()
 
     async def _monitor_loop(self) -> None:
@@ -76,6 +84,7 @@ class SessionScreencastController:
         next_page = self._page_provider()
         if next_page is None:
             if self._page is not None:
+                logger.info("[Screencast] active page disappeared, detaching current page")
                 await self._detach_current_page()
             return
         if not force and next_page is self._page:
@@ -86,6 +95,12 @@ class SessionScreencastController:
         for attempt in range(2):
             try:
                 self._page = next_page
+                logger.info(
+                    "[Screencast] attaching to page attempt=%s page_id=%s url=%s",
+                    attempt + 1,
+                    id(next_page),
+                    getattr(next_page, "url", ""),
+                )
                 self._cdp = await next_page.context.new_cdp_session(next_page)
                 self._cdp.on("Page.screencastFrame", self._on_frame)
                 await self._cdp.send(
@@ -97,10 +112,21 @@ class SessionScreencastController:
                     },
                 )
                 self._last_preview_error = ""
+                logger.info(
+                    "[Screencast] attached to page page_id=%s url=%s",
+                    id(next_page),
+                    getattr(next_page, "url", ""),
+                )
                 return
             except Exception as exc:
                 last_error = exc
-                logger.warning(f"[Screencast] failed to attach page on attempt {attempt + 1}: {exc}")
+                logger.warning(
+                    "[Screencast] failed to attach page attempt=%s page_id=%s url=%s error=%r",
+                    attempt + 1,
+                    id(next_page),
+                    getattr(next_page, "url", ""),
+                    exc,
+                )
                 await self._detach_current_page()
                 if attempt == 0:
                     await asyncio.sleep(0.2)
@@ -112,6 +138,11 @@ class SessionScreencastController:
     async def _detach_current_page(self) -> None:
         if not self._cdp:
             return
+        logger.info(
+            "[Screencast] detaching page page_id=%s url=%s",
+            id(self._page) if self._page is not None else None,
+            getattr(self._page, "url", "") if self._page is not None else "",
+        )
         try:
             await self._cdp.send("Page.stopScreencast", {})
         except Exception:
@@ -189,6 +220,13 @@ class SessionScreencastController:
                     },
                 }
             )
+            self._frames_sent += 1
+            if self._frames_sent == 1:
+                logger.info(
+                    "[Screencast] first frame sent viewport=%sx%s",
+                    self._viewport_width,
+                    self._viewport_height,
+                )
             self._last_preview_error = ""
         except Exception:
             self._running = False

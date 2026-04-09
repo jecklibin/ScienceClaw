@@ -2,6 +2,7 @@ from backend.runtime.models import SessionRuntimeRecord
 from backend.runtime.docker_runtime_provider import DockerRuntimeProvider
 from backend.runtime.k8s_runtime_provider import K8sRuntimeProvider
 from backend.runtime.provider import build_runtime_provider
+from backend.runtime.shared_runtime_provider import SharedRuntimeProvider
 from backend.runtime.session_runtime_manager import (
     SessionRuntimeManager,
     get_session_runtime_manager,
@@ -51,6 +52,20 @@ def test_provider_factory_returns_docker_provider_when_requested():
 def test_provider_factory_returns_k8s_provider_when_requested():
     provider = build_runtime_provider(_Settings("session_pod"))
     assert provider.__class__.__name__ == "K8sRuntimeProvider"
+
+
+@pytest.mark.asyncio
+async def test_shared_runtime_provider_derives_rest_base_from_sandbox_mcp_url_when_env_not_set(monkeypatch):
+    monkeypatch.delenv("SHARED_SANDBOX_REST_URL", raising=False)
+
+    settings = _Settings("shared")
+    settings.sandbox_mcp_url = "http://sandbox:8080/mcp"
+    settings.shared_sandbox_rest_url = "http://sandbox:8080"
+    settings.k8s_namespace = "default"
+
+    runtime = await SharedRuntimeProvider(settings).create_runtime("sess-1", "user-1")
+
+    assert runtime.rest_base_url == "http://sandbox:8080"
 
 
 class _FakeProvider:

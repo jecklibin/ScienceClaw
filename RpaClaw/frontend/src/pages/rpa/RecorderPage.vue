@@ -236,11 +236,18 @@ const connectScreencast = (sid: string) => {
     screencastWs = null;
   }
   const wsUrl = getBackendWsUrl(`/rpa/screencast/${sid}`);
+  console.log('[RecorderPage] Connecting screencast:', wsUrl);
   screencastWs = new WebSocket(wsUrl);
+
+  screencastWs.onopen = () => {
+    console.log('[RecorderPage] Screencast connected');
+    error.value = null;
+  };
 
   screencastWs.onmessage = (ev) => {
     try {
       const msg = JSON.parse(ev.data);
+      console.log('[RecorderPage] Screencast message:', msg.type, msg.message || '');
       if (msg.type === 'frame') {
         error.value = null;
         drawFrame(msg.data, msg.metadata);
@@ -249,15 +256,22 @@ const connectScreencast = (sid: string) => {
       } else if (msg.type === 'preview_error') {
         error.value = msg.message || '预览切换失败';
       }
-    } catch { /* ignore parse errors */ }
+    } catch (parseError) {
+      console.error('[RecorderPage] Screencast parse error:', parseError);
+    }
   };
 
-  screencastWs.onclose = () => {
+  screencastWs.onclose = (ev) => {
+    console.warn('[RecorderPage] Screencast closed:', ev.code, ev.reason);
+    if (!error.value) {
+      error.value = `录制画面流已断开（code=${ev.code}${ev.reason ? `, reason=${ev.reason}` : ''}）`;
+    }
     screencastWs = null;
   };
 
-  screencastWs.onerror = () => {
-    error.value = '无法连接录制画面流，请检查后端 screencast 服务。';
+  screencastWs.onerror = (ev) => {
+    console.error('[RecorderPage] Screencast error:', ev);
+    error.value = '无法连接录制画面流，请检查后端 screencast WebSocket/代理配置。';
   };
 };
 
