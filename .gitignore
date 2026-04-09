@@ -92,6 +92,7 @@ Desktop.ini
 *.temp
 .cache/
 .pytest_cache
+.worktrees/
 .cursor
 .trae
 workspace
