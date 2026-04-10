@@ -221,6 +221,34 @@ function createControllerHarness(pageCount = 1) {
   return { controller, interactions, context, rootPage };
 }
 
+function createRestartableControllerHarness(pagesPerLaunch = 2) {
+  const interactions: string[] = [];
+  let launchCount = 0;
+
+  const controller = new PlaywrightSessionRuntimeController({
+    async launchBrowser() {
+      launchCount += 1;
+      const popupPage = new FakePage(interactions, `Launch ${launchCount} Popup`, 'https://example.com/popup');
+      const pages = Array.from({ length: pagesPerLaunch }, (_, index) =>
+        new FakePage(
+          interactions,
+          `Launch ${launchCount} Page ${index + 1}`,
+          launchCount === 1 && index === 1 ? 'https://example.com/recording-tab' : 'about:blank',
+          index === 0 ? popupPage : null,
+        ),
+      );
+      const context = new FakeContext(pages);
+      return new FakeBrowser(context);
+    },
+  });
+
+  return {
+    controller,
+    interactions,
+    getLaunchCount: () => launchCount,
+  };
+}
+
 async function connectJsonWebSocket(url: string) {
   const ws = new WebSocket(url);
   const queue: unknown[] = [];
@@ -253,7 +281,7 @@ async function connectJsonWebSocket(url: string) {
 
 describe('PlaywrightSessionRuntimeController integration', () => {
   it('replays popup clicks inside frames against the live runtime session', async () => {
-    const { controller, interactions } = createControllerHarness();
+    const { controller, interactions } = createRestartableControllerHarness(1);
     const session: RuntimeSession = createRuntimeSession({ userId: 'u1', sandboxSessionId: 'sandbox-1' });
 
     await controller.startSession(session);
@@ -477,6 +505,61 @@ describe('PlaywrightSessionRuntimeController integration', () => {
     );
 
     expect(result.success).toBe(true);
+    expect(interactions).toContain('goto:https://example.com/replay');
+  });
+
+  it('restarts replay in a fresh browser instance instead of reusing recording tabs', async () => {
+    const { controller, interactions, getLaunchCount } = createRestartableControllerHarness();
+    const session: RuntimeSession = createRuntimeSession({ userId: 'u1', sandboxSessionId: 'sandbox-1' });
+
+    await controller.startSession(session);
+    await controller.activatePage(session, 'page-2');
+
+    expect(getLaunchCount()).toBe(1);
+    expect(session.activePageAlias).toBe('page-2');
+    expect(session.pages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ alias: 'page', status: 'open' }),
+        expect.objectContaining({ alias: 'page-2', url: 'https://example.com/recording-tab', status: 'open' }),
+      ]),
+    );
+
+    const result = await controller.replay(
+      session,
+      [
+        {
+          id: 'action-1',
+          sessionId: session.id,
+          seq: 1,
+          kind: 'navigate',
+          pageAlias: 'page',
+          framePath: [],
+          locator: {
+            selector: '',
+            locatorAst: { kind: 'url' },
+          },
+          locatorAlternatives: [],
+          signals: {},
+          input: { url: 'https://example.com/replay' },
+          timing: {},
+          snapshot: { url: 'https://example.com/replay' },
+          status: 'recorded',
+        },
+      ],
+      {},
+    );
+
+    expect(result.success).toBe(true);
+    expect(getLaunchCount()).toBe(2);
+    expect(session.activePageAlias).toBe('page');
+    expect(session.pages).toEqual([
+      expect.objectContaining({
+        alias: 'page',
+        url: 'https://example.com/replay',
+        openerPageAlias: null,
+        status: 'open',
+      }),
+    ]);
     expect(interactions).toContain('goto:https://example.com/replay');
   });
 

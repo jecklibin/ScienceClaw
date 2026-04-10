@@ -391,6 +391,7 @@ export class PlaywrightSessionRuntimeController implements SessionRuntimeControl
 
   async startSession(session: RuntimeSession): Promise<void> {
     await this.stopSession(session.id);
+    this.#resetSessionPages(session);
     const browser = await this.#driver.launchBrowser();
     const context = await browser.newContext({ noViewport: true, acceptDownloads: true });
     const runtime: RuntimeHandles = {
@@ -452,9 +453,7 @@ export class PlaywrightSessionRuntimeController implements SessionRuntimeControl
     actions: RuntimeAction[],
     params: Record<string, unknown>,
   ): Promise<RuntimeReplayResult> {
-    if (!this.#runtimes.has(session.id)) {
-      await this.startSession(session);
-    }
+    await this.startSession(session);
     const runtime = this.#requireRuntime(session.id);
     const typedActions = actions as RecordedAction[];
     const results: Record<string, unknown> = {};
@@ -667,6 +666,11 @@ export class PlaywrightSessionRuntimeController implements SessionRuntimeControl
     runtime.pages.set(pageAlias, page);
     await this.#syncPageState(session, pageAlias, page, null);
     return page;
+  }
+
+  #resetSessionPages(session: RuntimeSession): void {
+    session.pages = [];
+    session.activePageAlias = null;
   }
 
   #bindContextPages(session: RuntimeSession, runtime: RuntimeHandles): void {
