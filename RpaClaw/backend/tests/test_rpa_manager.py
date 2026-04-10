@@ -90,10 +90,10 @@ class _FakeFrameElement:
         return self.attrs.get(name)
 
     async def evaluate(self, expression):
-        if "tagName" in expression:
-            return self.tag_name.upper()
         if "nth-of-type" in expression:
             return f"{self.tag_name}:nth-of-type({self.nth_of_type})"
+        if expression.strip() == "el => el.tagName.toLowerCase()":
+            return self.tag_name.upper()
         raise AssertionError(f"Unexpected evaluate expression: {expression}")
 
 
@@ -732,6 +732,23 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             frame_path,
             ["iframe[name='workspace']", "iframe[src='https://child.example/frame']"],
+        )
+
+    async def test_build_frame_path_does_not_prefer_src_selector_when_frame_element_is_available(self):
+        page = _FakePage("https://example.com", "Example")
+        outer_frame = _FakeFrame(page, attrs={"name": "workspace"})
+        inner_frame = _FakeFrame(
+            page,
+            parent_frame=outer_frame,
+            attrs={"src": "https://child.example/frame"},
+            nth_of_type=2,
+        )
+
+        frame_path = await self.manager.build_frame_path(inner_frame)
+
+        self.assertEqual(
+            frame_path,
+            ["iframe[name='workspace']", "iframe:nth-of-type(2)"],
         )
 
     async def test_context_binding_callback_falls_back_to_active_tab_when_source_page_missing(self):

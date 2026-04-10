@@ -42,10 +42,6 @@ async def build_frame_selector(frame) -> str:
         if element_id and not _is_guid_like(element_id):
             return f"{tag_name}#{_escape_css_identifier(element_id)}"
 
-        src_attr = await frame_element.get_attribute("src")
-        if src_attr:
-            return f'{tag_name}[src="{_escape_css_double_quoted_attr_value(src_attr)}"]'
-
         selector = await frame_element.evaluate(
             """
             el => {
@@ -95,7 +91,6 @@ def _escape_css_attr_value(value: str) -> str:
 
 def _escape_css_double_quoted_attr_value(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
-
 
 def _escape_css_identifier(value: str) -> str:
     escaped = []
