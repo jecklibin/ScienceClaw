@@ -37,6 +37,13 @@ async def _get_cdp_url() -> str:
 {execute_skill_func}
 
 
+def _rpa_log(message):
+    try:
+        __rpa_log__(message)
+    except NameError:
+        print(message)
+
+
 async def main():
     kwargs = {{}}
     for arg in sys.argv[1:]:
@@ -77,6 +84,13 @@ from playwright.async_api import async_playwright
 
 
 {execute_skill_func}
+
+
+def _rpa_log(message):
+    try:
+        __rpa_log__(message)
+    except NameError:
+        print(message)
 
 
 async def main():
@@ -126,6 +140,64 @@ if __name__ == "__main__":
             "    _results = {}",
             f'    tabs = {{"{root_tab_id}": page}}',
             "    current_page = page",
+            "    async def _rpa_debug_locator(label, locator_ref, page_ref):",
+            "        try:",
+            "            count = await locator_ref.count()",
+            "        except Exception as exc:",
+            '            _rpa_log(f"[RPA_DEBUG] {label} count_error={exc}")',
+            "            count = None",
+            "        try:",
+            "            visible = await locator_ref.first.is_visible() if count else False",
+            "        except Exception as exc:",
+            '            _rpa_log(f"[RPA_DEBUG] {label} visible_error={exc}")',
+            "            visible = None",
+            "        try:",
+            "            box = await locator_ref.first.bounding_box() if count else None",
+            "        except Exception as exc:",
+            '            _rpa_log(f"[RPA_DEBUG] {label} box_error={exc}")',
+            "            box = None",
+            "        try:",
+            "            ready_state = await page_ref.evaluate(\"document.readyState\")",
+            "        except Exception as exc:",
+            '            _rpa_log(f"[RPA_DEBUG] {label} ready_state_error={exc}")',
+            "            ready_state = None",
+            "        try:",
+            "            loading_count = await page_ref.locator('[aria-busy=\"true\"], [data-loading=\"true\"], .loading, .spinner, .ant-spin-spinning, .el-loading-mask').count()",
+            "        except Exception as exc:",
+            '            _rpa_log(f"[RPA_DEBUG] {label} loading_error={exc}")',
+            "            loading_count = None",
+            "        top_element = None",
+            "        if box:",
+            "            try:",
+            "                center_x = box['x'] + box['width'] / 2",
+            "                center_y = box['y'] + box['height'] / 2",
+            "                top_element = await page_ref.evaluate(",
+            "                    '''([x, y]) => {",
+            "                        const el = document.elementFromPoint(x, y);",
+            "                        if (!el) return null;",
+            "                        return {",
+            "                            tag: el.tagName.toLowerCase(),",
+            "                            text: (el.textContent || '').trim().slice(0, 80),",
+            "                            classes: (typeof el.className === 'string' ? el.className.trim().split(/\\s+/).filter(Boolean).slice(0, 4) : []),",
+            "                            ariaBusy: el.getAttribute('aria-busy') || '',",
+            "                        };",
+            "                    }''',",
+            "                    [center_x, center_y],",
+            "                )",
+            "            except Exception as exc:",
+            '                _rpa_log(f"[RPA_DEBUG] {label} top_element_error={exc}")',
+            "        _rpa_log(",
+            "            '[RPA_DEBUG] ' + _json.dumps({",
+            "                'label': label,",
+            "                'url': page_ref.url,",
+            "                'readyState': ready_state,",
+            "                'count': count,",
+            "                'visible': visible,",
+            "                'box': box,",
+            "                'loadingCount': loading_count,",
+            "                'topElement': top_element,",
+            "            }, ensure_ascii=False, default=str)",
+            "        )",
         ]
 
         current_tab_id = root_tab_id
@@ -231,8 +303,13 @@ if __name__ == "__main__":
             if action == "open_tab_click":
                 target_tab_id = step.get("target_tab_id") or step.get("tab_id") or "tab-new"
                 lines.extend(self._build_locator_ready_steps(locator))
-                lines.append("    async with current_page.expect_popup() as popup_info:")
-                lines.append(f"        await {locator}.click()")
+                lines.append(f'    await _rpa_debug_locator("open_tab_click.before", {locator}, current_page)')
+                lines.append("    try:")
+                lines.append("        async with current_page.expect_popup() as popup_info:")
+                lines.append(f"            await {locator}.click()")
+                lines.append("    except Exception:")
+                lines.append(f'        await _rpa_debug_locator("open_tab_click.error", {locator}, current_page)')
+                lines.append("        raise")
                 lines.append("    new_page = await popup_info.value")
                 lines.append('    await new_page.wait_for_load_state("domcontentloaded")')
                 lines.append(f'    tabs["{target_tab_id}"] = new_page')
@@ -248,43 +325,58 @@ if __name__ == "__main__":
                 # (e.g. iframe reloads, pushState) and never resolve for the real one.
                 expected_url = self._escape(step.get("expected_url") or step.get("url") or "")
                 lines.extend(self._build_locator_ready_steps(locator))
-                lines.append(f"    _nav_before_url = current_page.url")
-                lines.append(f"    await {locator}.click()")
-                if expected_url:
-                    lines.append("    try:")
-                    lines.append(f'        await current_page.wait_for_url("{expected_url}", timeout={RPA_NAVIGATION_TIMEOUT_MS // 2})')
-                    lines.append("    except Exception:")
-                    lines.append(f"        await current_page.wait_for_load_state('domcontentloaded', timeout={RPA_NAVIGATION_TIMEOUT_MS // 2})")
-                else:
-                    lines.append(f"    await current_page.wait_for_load_state('domcontentloaded', timeout={RPA_NAVIGATION_TIMEOUT_MS // 2})")
+                lines.append(f'    await _rpa_debug_locator("navigate_click.before", {locator}, current_page)')
                 lines.append("    try:")
-                lines.append(f"        await current_page.wait_for_load_state('networkidle', timeout=15000)")
-                lines.append("    except Exception:")
-                lines.append("        pass  # best-effort TTI: some pages never reach networkidle")
-                # Verify navigation actually happened; retry once if URL unchanged
-                lines.append("    if current_page.url == _nav_before_url:")
-                lines.extend([f"        {line.strip()}" for line in self._build_locator_ready_steps(locator)])
+                lines.append(f"        _nav_before_url = current_page.url")
                 lines.append(f"        await {locator}.click()")
                 if expected_url:
                     lines.append("        try:")
                     lines.append(f'            await current_page.wait_for_url("{expected_url}", timeout={RPA_NAVIGATION_TIMEOUT_MS // 2})')
                     lines.append("        except Exception:")
                     lines.append(f"            await current_page.wait_for_load_state('domcontentloaded', timeout={RPA_NAVIGATION_TIMEOUT_MS // 2})")
-                    lines.append(f'        if current_page.url != "{expected_url}":')
-                    lines.append(f'            raise RuntimeError("Click did not reach expected URL: {expected_url}")')
                 else:
                     lines.append(f"        await current_page.wait_for_load_state('domcontentloaded', timeout={RPA_NAVIGATION_TIMEOUT_MS // 2})")
+                lines.append("        try:")
+                lines.append(f"            await current_page.wait_for_load_state('networkidle', timeout=15000)")
+                lines.append("        except Exception:")
+                lines.append("            pass  # best-effort TTI: some pages never reach networkidle")
+                lines.append("        if current_page.url == _nav_before_url:")
+                lines.extend([f"        {line}" for line in self._build_locator_ready_steps(locator, indent_level=2)])
+                lines.append(f"            await {locator}.click()")
+                if expected_url:
+                    lines.append("            try:")
+                    lines.append(f'                await current_page.wait_for_url("{expected_url}", timeout={RPA_NAVIGATION_TIMEOUT_MS // 2})')
+                    lines.append("            except Exception:")
+                    lines.append(f"                await current_page.wait_for_load_state('domcontentloaded', timeout={RPA_NAVIGATION_TIMEOUT_MS // 2})")
+                    lines.append(f'            if current_page.url != "{expected_url}":')
+                    lines.append(f'                raise RuntimeError("Click did not reach expected URL: {expected_url}")')
+                else:
+                    lines.append(f"            await current_page.wait_for_load_state('domcontentloaded', timeout={RPA_NAVIGATION_TIMEOUT_MS // 2})")
+                lines.append("    except Exception:")
+                lines.append(f'        await _rpa_debug_locator("navigate_click.error", {locator}, current_page)')
+                lines.append('        _rpa_log(f"[RPA_DEBUG] navigate_click url={current_page.url}")')
+                lines.append("        raise")
             elif action == "click":
                 lines.extend(self._build_locator_ready_steps(locator))
-                lines.append(f"    await {locator}.click()")
-                # After non-navigation click, wait briefly for UI changes
-                lines.append("    await current_page.wait_for_timeout(500)")
+                lines.append(f'    await _rpa_debug_locator("click.before", {locator}, current_page)')
+                lines.append("    try:")
+                lines.append(f"        await {locator}.click()")
+                lines.append("        await current_page.wait_for_timeout(500)")
+                lines.append("    except Exception:")
+                lines.append(f'        await _rpa_debug_locator("click.error", {locator}, current_page)')
+                lines.append('        _rpa_log(f"[RPA_DEBUG] click url={current_page.url}")')
+                lines.append("        raise")
             elif action == "download_click":
                 # Click that triggers a file download — wrap with expect_download
                 safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', (value or "file").split('.')[0]) or "file"
                 lines.extend(self._build_locator_ready_steps(locator))
-                lines.append(f"    async with current_page.expect_download() as _dl_info:")
-                lines.append(f"        await {locator}.click()")
+                lines.append(f'    await _rpa_debug_locator("download_click.before", {locator}, current_page)')
+                lines.append("    try:")
+                lines.append(f"        async with current_page.expect_download() as _dl_info:")
+                lines.append(f"            await {locator}.click()")
+                lines.append("    except Exception:")
+                lines.append(f'        await _rpa_debug_locator("download_click.error", {locator}, current_page)')
+                lines.append("        raise")
                 lines.append(f"    _dl = await _dl_info.value")
                 lines.append(f"    _dl_dir = kwargs.get('_downloads_dir', '.')")
                 lines.append(f"    import os as _os; _os.makedirs(_dl_dir, exist_ok=True)")
@@ -332,10 +424,11 @@ if __name__ == "__main__":
         return f"{key}_{count}"
 
     @staticmethod
-    def _build_locator_ready_steps(locator: str) -> List[str]:
+    def _build_locator_ready_steps(locator: str, indent_level: int = 1) -> List[str]:
+        indent = "    " * indent_level
         return [
-            f'    await {locator}.wait_for(state="visible", timeout={RPA_NAVIGATION_TIMEOUT_MS // 2})',
-            f"    await {locator}.scroll_into_view_if_needed()",
+            f'{indent}await {locator}.wait_for(state="visible", timeout={RPA_NAVIGATION_TIMEOUT_MS // 2})',
+            f"{indent}await {locator}.scroll_into_view_if_needed()",
         ]
 
     def _normalize_result_key(self, raw_key: Any) -> str:
