@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from playwright.async_api import Page, BrowserContext
 
 from .cdp_connector import get_cdp_connector
+from .frame_selectors import build_frame_path
 
 logger = logging.getLogger(__name__)
 
@@ -1207,7 +1208,13 @@ class RPASessionManager:
                     resolved_tab_id = session.active_tab_id if session else None
                 if resolved_tab_id:
                     evt.setdefault("tab_id", resolved_tab_id)
-                if source_frame and not evt.get("frame_path"):
+                if source_frame:
+                    reported_frame_path = evt.get("frame_path", []) or []
+                    if reported_frame_path:
+                        signals = evt.get("signals")
+                        normalized_signals = dict(signals) if isinstance(signals, dict) else {}
+                        normalized_signals["reported_frame_path"] = list(reported_frame_path)
+                        evt["signals"] = normalized_signals
                     evt["frame_path"] = await self._build_frame_path(source_frame)
                 await self._handle_event(session_id, evt)
             except Exception as e:
@@ -1218,78 +1225,10 @@ class RPASessionManager:
         bridged_context_ids.add(context_key)
 
     async def _build_frame_path(self, frame) -> List[str]:
-        path: List[str] = []
-        current_frame = frame
-        while current_frame:
-            try:
-                frame_selector = await self._describe_frame_selector(current_frame)
-            except Exception:
-                break
-            path.append(frame_selector)
-            current_frame = getattr(current_frame, "parent_frame", None)
-        path.reverse()
-        return path
+        return await build_frame_path(frame)
 
     async def build_frame_path(self, frame) -> List[str]:
         return await self._build_frame_path(frame)
-
-    async def _describe_frame_selector(self, frame) -> str:
-        frame_element = await frame.frame_element()
-        tag_name = str(await frame_element.evaluate("el => el.tagName.toLowerCase()")).lower()
-        name_attr = await frame_element.get_attribute("name")
-        if name_attr:
-            return f"{tag_name}[name='{self._escape_css_attr_value(name_attr)}']"
-        title_attr = await frame_element.get_attribute("title")
-        if title_attr:
-            return f"{tag_name}[title='{self._escape_css_attr_value(title_attr)}']"
-        element_id = await frame_element.get_attribute("id")
-        if element_id and not self._is_guid_like(element_id):
-            return f"{tag_name}#{self._escape_css_identifier(element_id)}"
-        return await frame_element.evaluate(
-            """
-            el => {
-                const tag = el.tagName.toLowerCase();
-                if (!el.parentElement) return tag;
-                const siblings = Array.from(el.parentElement.children)
-                    .filter(child => child.tagName === el.tagName);
-                if (siblings.length <= 1) return tag;
-                const index = siblings.indexOf(el) + 1;
-                return `${tag}:nth-of-type(${index})`;
-            }
-            """
-        )
-
-    @staticmethod
-    def _escape_css_attr_value(value: str) -> str:
-        return value.replace("\\", "\\\\").replace("'", "\\'")
-
-    @staticmethod
-    def _escape_css_identifier(value: str) -> str:
-        escaped = []
-        for char in value:
-            if char.isalnum() or char in {"-", "_"}:
-                escaped.append(char)
-            else:
-                escaped.append(f"\\{char}")
-        return "".join(escaped)
-
-    @staticmethod
-    def _is_guid_like(value: str) -> bool:
-        transitions = 0
-        previous_type: Optional[str] = None
-        for char in value:
-            if char.islower():
-                current_type = "lower"
-            elif char.isupper():
-                current_type = "upper"
-            elif char.isdigit():
-                current_type = "digit"
-            else:
-                current_type = "other"
-            if previous_type and current_type != previous_type:
-                transitions += 1
-            previous_type = current_type
-        return bool(value) and transitions >= len(value) / 4
 
     async def _bind_page(self, session_id: str, tab_id: str, page: Page):
         last_url = {"value": ""}

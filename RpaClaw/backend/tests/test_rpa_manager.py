@@ -107,6 +107,32 @@ class _FakeFrame:
         return self._element
 
 
+class _BrokenFrame(_FakeFrame):
+    def __init__(
+        self,
+        page,
+        parent_frame=None,
+        attrs=None,
+        tag_name="iframe",
+        nth_of_type=1,
+        name="",
+        url="",
+    ):
+        super().__init__(page, parent_frame=parent_frame, attrs=attrs, tag_name=tag_name, nth_of_type=nth_of_type)
+        self._name = name
+        self._url = url
+
+    async def frame_element(self):
+        raise RuntimeError("frame was detached")
+
+    def name(self):
+        return self._name
+
+    @property
+    def url(self):
+        return self._url
+
+
 class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.manager = MANAGER_MODULE.RPASessionManager()
@@ -624,6 +650,88 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.session.steps[-1].frame_path,
             ["iframe[name='workspace']", "iframe[title='editor']"],
+        )
+
+    async def test_context_binding_callback_overrides_truncated_client_frame_path(self):
+        context = _FakeContext()
+        page = _FakePage("https://example.com", "Example", context=context)
+        await self.manager.register_page(self.session.id, page, make_active=True)
+
+        _, binding_callback, _ = context.exposed_bindings[0]
+        outer_frame = _FakeFrame(page, attrs={"name": "workspace"})
+        inner_frame = _FakeFrame(page, parent_frame=outer_frame, attrs={"title": "editor"})
+
+        await binding_callback(
+            SimpleNamespace(page=page, frame=inner_frame),
+            json.dumps(
+                {
+                    "action": "click",
+                    "tag": "BUTTON",
+                    "timestamp": 1234567890,
+                    "frame_path": ["iframe[title='editor']"],
+                    "locator": {"method": "role", "role": "button", "name": "Save"},
+                }
+            ),
+        )
+
+        self.assertEqual(
+            self.session.steps[-1].frame_path,
+            ["iframe[name='workspace']", "iframe[title='editor']"],
+        )
+
+    async def test_context_binding_callback_preserves_reported_frame_path_for_debug(self):
+        context = _FakeContext()
+        page = _FakePage("https://example.com", "Example", context=context)
+        await self.manager.register_page(self.session.id, page, make_active=True)
+
+        _, binding_callback, _ = context.exposed_bindings[0]
+        outer_frame = _FakeFrame(page, attrs={"name": "workspace"})
+        inner_frame = _FakeFrame(page, parent_frame=outer_frame, attrs={"title": "editor"})
+
+        await binding_callback(
+            SimpleNamespace(page=page, frame=inner_frame),
+            json.dumps(
+                {
+                    "action": "click",
+                    "tag": "BUTTON",
+                    "timestamp": 1234567890,
+                    "frame_path": ["iframe[title='editor']"],
+                    "locator": {"method": "role", "role": "button", "name": "Save"},
+                }
+            ),
+        )
+
+        self.assertEqual(
+            self.session.steps[-1].signals.get("reported_frame_path"),
+            ["iframe[title='editor']"],
+        )
+
+    async def test_build_frame_path_falls_back_to_frame_name_when_frame_element_fails(self):
+        page = _FakePage("https://example.com", "Example")
+        outer_frame = _FakeFrame(page, attrs={"name": "workspace"})
+        inner_frame = _BrokenFrame(page, parent_frame=outer_frame, name="editor-frame")
+
+        frame_path = await self.manager.build_frame_path(inner_frame)
+
+        self.assertEqual(
+            frame_path,
+            ["iframe[name='workspace']", "iframe[name='editor-frame']"],
+        )
+
+    async def test_build_frame_path_falls_back_to_frame_url_when_name_missing(self):
+        page = _FakePage("https://example.com", "Example")
+        outer_frame = _FakeFrame(page, attrs={"name": "workspace"})
+        inner_frame = _BrokenFrame(
+            page,
+            parent_frame=outer_frame,
+            url="https://child.example/frame",
+        )
+
+        frame_path = await self.manager.build_frame_path(inner_frame)
+
+        self.assertEqual(
+            frame_path,
+            ["iframe[name='workspace']", "iframe[src='https://child.example/frame']"],
         )
 
     async def test_context_binding_callback_falls_back_to_active_tab_when_source_page_missing(self):

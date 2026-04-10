@@ -5,6 +5,8 @@ import json
 import re
 from typing import Any, Callable, Dict, List, Optional
 
+from .frame_selectors import build_frame_path
+
 
 EXTRACT_ELEMENTS_JS = r"""() => {
     const INTERACTIVE = 'a,button,input,textarea,select,[role=button],[role=link],[role=menuitem],[role=menuitemradio],[role=tab],[role=checkbox],[role=radio],[contenteditable=true]';
@@ -204,46 +206,8 @@ async def _resolve_frame_path(frame, frame_path_builder: Callable[[Any], Any]) -
     return list(value)
 
 
-async def _describe_frame_selector(frame) -> str:
-    frame_element = await frame.frame_element()
-    tag_name = str(await frame_element.evaluate("el => el.tagName.toLowerCase()")).lower()
-    name_attr = await frame_element.get_attribute("name")
-    if name_attr:
-        escaped = name_attr.replace("\\", "\\\\").replace("'", "\\'")
-        return f"{tag_name}[name='{escaped}']"
-    title_attr = await frame_element.get_attribute("title")
-    if title_attr:
-        escaped = title_attr.replace("\\", "\\\\").replace("'", "\\'")
-        return f"{tag_name}[title='{escaped}']"
-    element_id = await frame_element.get_attribute("id")
-    if element_id:
-        return f"{tag_name}#{element_id}"
-    return await frame_element.evaluate(
-        """
-        el => {
-            const tag = el.tagName.toLowerCase();
-            if (!el.parentElement) return tag;
-            const siblings = Array.from(el.parentElement.children)
-                .filter(child => child.tagName === el.tagName);
-            if (siblings.length <= 1) return tag;
-            const index = siblings.indexOf(el) + 1;
-            return `${tag}:nth-of-type(${index})`;
-        }
-        """
-    )
-
-
 async def build_frame_path_from_frame(frame) -> List[str]:
-    path: List[str] = []
-    current_frame = frame
-    while current_frame:
-        parent_frame = getattr(current_frame, "parent_frame", None)
-        if not parent_frame:
-            break
-        path.append(await _describe_frame_selector(current_frame))
-        current_frame = parent_frame
-    path.reverse()
-    return path
+    return await build_frame_path(frame)
 
 
 async def build_page_snapshot(page, frame_path_builder: Callable[[Any], Any]) -> Dict[str, Any]:
