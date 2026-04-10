@@ -1487,6 +1487,9 @@ function buildLocatorFromPayload(
   if (method === 'placeholder') {
     return scope.getByPlaceholder(String(payload.value ?? ''));
   }
+  if (method === 'title') {
+    return scope.getByTitle(String(payload.value ?? ''));
+  }
   return scope.locator(String(payload.value ?? ''));
 }
 

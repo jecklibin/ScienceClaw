@@ -352,6 +352,85 @@ class RPAReActAgentTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_react_agent_run_with_engine_executes_structured_action(self):
+        agent = ASSISTANT_MODULE.RPAReActAgent()
+        snapshot = {
+            "url": "https://example.com",
+            "title": "Example",
+            "frames": [
+                {
+                    "frame_path": [],
+                    "frame_hint": "main document",
+                    "elements": [
+                        {"index": 1, "tag": "input", "role": "textbox", "placeholder": "搜索"},
+                    ],
+                    "collections": [],
+                }
+            ],
+        }
+        responses = [
+            json.dumps(
+                {
+                    "thought": "先在搜索框输入内容",
+                    "action": "execute",
+                    "operation": "fill",
+                    "description": "输入搜索词",
+                    "target_hint": {"role": "textbox", "name": "搜索"},
+                    "value": "test",
+                    "risk": "none",
+                    "risk_reason": "",
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "thought": "done",
+                    "action": "done",
+                    "description": "done",
+                    "risk": "none",
+                    "risk_reason": "",
+                },
+                ensure_ascii=False,
+            ),
+        ]
+        executed_intents = []
+
+        async def fake_stream(_history, _model_config=None):
+            yield responses.pop(0)
+
+        async def snapshot_provider():
+            return snapshot
+
+        async def intent_executor(intent):
+            executed_intents.append(intent)
+            return {
+                "success": True,
+                "output": "ok",
+                "step": {"action": "fill", "source": "ai"},
+            }
+
+        agent._stream_llm = fake_stream
+
+        events = []
+        async for event in agent.run_with_engine(
+            session_id="session-1",
+            goal="输入 test",
+            existing_steps=[],
+            snapshot_provider=snapshot_provider,
+            intent_executor=intent_executor,
+        ):
+            events.append(event)
+
+        self.assertEqual(events[0]["event"], "agent_thought")
+        self.assertEqual(executed_intents[0]["action"], "fill")
+        self.assertEqual(executed_intents[0]["resolved"]["locator"]["method"], "placeholder")
+        self.assertEqual(executed_intents[0]["resolved"]["locator"]["value"], "搜索")
+        self.assertNotIn("resolved", executed_intents[0]["resolved"])
+        event_names = [event["event"] for event in events]
+        self.assertIn("agent_action", event_names)
+        self.assertIn("agent_step_done", event_names)
+        self.assertEqual(event_names[-1], "agent_done")
+
 class RPAAssistantFrameAwareSnapshotTests(unittest.IsolatedAsyncioTestCase):
     async def test_build_page_snapshot_includes_iframe_elements_and_collections(self):
         iframe = _FakeSnapshotFrame(
@@ -611,6 +690,48 @@ class RPAAssistantStructuredExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["step"]["action"], "extract_text")
         self.assertEqual(result["step"]["result_key"], "latest_issue_title")
 
+    async def test_execute_single_engine_response_passes_inner_resolved_payload(self):
+        assistant = ASSISTANT_MODULE.RPAAssistant()
+        captured = {}
+        snapshot = {
+            "frames": [
+                {
+                    "frame_path": [],
+                    "frame_hint": "main document",
+                    "elements": [
+                        {"index": 1, "tag": "input", "role": "textbox", "placeholder": "搜索"}
+                    ],
+                    "collections": [],
+                }
+            ]
+        }
+
+        async def fake_executor(intent):
+            captured.update(intent)
+            return {"success": True, "output": "ok", "step": {"action": "fill", "source": "ai"}}
+
+        result, resolution = await assistant._execute_single_engine_response(
+            snapshot,
+            json.dumps(
+                {
+                    "action": "fill",
+                    "description": "输入搜索词",
+                    "prompt": "输入搜索词",
+                    "target_hint": {"role": "textbox", "name": "搜索"},
+                    "value": "test",
+                },
+                ensure_ascii=False,
+            ),
+            fake_executor,
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(captured["action"], "fill")
+        self.assertEqual(captured["resolved"]["locator"]["method"], "placeholder")
+        self.assertEqual(captured["resolved"]["locator"]["value"], "搜索")
+        self.assertNotIn("resolved", captured["resolved"])
+        self.assertEqual(resolution["resolved"]["locator"]["method"], "placeholder")
+
     async def test_resolve_structured_intent_prefers_collection_item_inside_iframe(self):
         snapshot = {
             "frames": [
@@ -781,6 +902,34 @@ class RPAAssistantStructuredExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resolved["resolved"]["locator"]["method"], "role")
         self.assertEqual(resolved["resolved"]["locator"]["name"], "Search")
         self.assertEqual(resolved["resolved"]["collection_hint"], {})
+
+    async def test_resolve_structured_intent_matches_placeholder_when_accessible_name_is_missing(self):
+        snapshot = {
+            "frames": [
+                {
+                    "frame_path": [],
+                    "frame_hint": "main document",
+                    "elements": [
+                        {"index": 1, "tag": "input", "role": "textbox", "placeholder": "搜索"}
+                    ],
+                    "collections": [],
+                }
+            ]
+        }
+
+        resolved = ASSISTANT_MODULE.resolve_structured_intent(
+            snapshot,
+            {
+                "action": "fill",
+                "description": "在搜索框中输入关键词",
+                "prompt": "在搜索框中输入关键词",
+                "target_hint": {"role": "textbox", "name": "搜索"},
+                "value": "test",
+            },
+        )
+
+        self.assertEqual(resolved["resolved"]["locator"]["method"], "placeholder")
+        self.assertEqual(resolved["resolved"]["locator"]["value"], "搜索")
 
     async def test_resolve_structured_intent_prefers_primary_collection_items_over_repeated_controls(self):
         snapshot = {

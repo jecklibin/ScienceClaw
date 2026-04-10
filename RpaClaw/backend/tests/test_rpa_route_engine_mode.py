@@ -511,3 +511,64 @@ def test_chat_route_uses_engine_assistant_without_python_page(monkeypatch):
     assert response.status_code == 200
     assert "event: result" in response.text
     assert '"success": true' in response.text
+
+
+def test_chat_route_uses_engine_react_agent_without_python_page(monkeypatch):
+    class _FakeManager:
+        async def get_session(self, session_id: str):
+            assert session_id == "session-1"
+            return SimpleNamespace(id=session_id, user_id="user-1", steps=[], paused=False)
+
+        def pause_recording(self, _session_id: str):
+            return None
+
+        def resume_recording(self, _session_id: str):
+            return None
+
+        def get_page(self, _session_id: str):
+            return None
+
+        async def capture_engine_snapshot(self, session_id: str):
+            assert session_id == "session-1"
+            return {"url": "https://example.com", "title": "Example", "frames": []}
+
+        async def execute_engine_assistant_intent(self, session_id: str, intent: dict):
+            assert session_id == "session-1"
+            assert intent["action"] == "click"
+            return {"success": True, "output": "ok", "step": {"action": "click", "source": "ai"}}
+
+        async def add_step(self, session_id: str, step: dict):
+            assert session_id == "session-1"
+            assert step["action"] == "click"
+
+    class _FakeAgent:
+        async def run_with_engine(self, *, session_id: str, goal: str, existing_steps: list, model_config, snapshot_provider, intent_executor):
+            assert session_id == "session-1"
+            assert goal == "click it"
+            assert existing_steps == []
+            snapshot = await snapshot_provider()
+            assert snapshot["url"] == "https://example.com"
+            result = await intent_executor({"action": "click", "resolved": {"frame_path": [], "locator": {"method": "css", "value": "#target"}}})
+            yield {"event": "agent_step_done", "data": {"step": result["step"]}}
+            yield {"event": "agent_done", "data": {"total_steps": 1}}
+
+    monkeypatch.setattr(rpa_route, "rpa_manager", _FakeManager())
+    monkeypatch.setattr(rpa_route.settings, "rpa_engine_mode", "node")
+
+    async def fake_model_config(_user_id: str):
+        return {}
+
+    monkeypatch.setattr(rpa_route, "_resolve_user_model_config", fake_model_config)
+    monkeypatch.setattr(rpa_route, "_active_agents", {})
+    monkeypatch.setattr(rpa_route, "RPAReActAgent", _FakeAgent)
+
+    client = _build_client()
+    response = client.post(
+        "/api/v1/rpa/session/session-1/chat",
+        json={"message": "click it", "mode": "react"},
+    )
+
+    assert response.status_code == 200
+    assert "ReAct mode is not yet supported in node engine mode" not in response.text
+    assert "event: agent_step_done" in response.text
+    assert "event: agent_done" in response.text

@@ -449,6 +449,121 @@ class RPAReActAgent:
 
         yield {"event": "agent_done", "data": {"total_steps": steps_done}}
 
+    async def run_with_engine(
+        self,
+        session_id: str,
+        goal: str,
+        existing_steps: List[Dict[str, Any]],
+        snapshot_provider: Callable[[], Any],
+        intent_executor: Callable[[Dict[str, Any]], Any],
+        model_config: Optional[Dict[str, Any]] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        self._aborted = False
+        steps_done = 0
+
+        steps_summary = ""
+        if existing_steps:
+            lines = [f"{i+1}. {s.get('description', s.get('action', ''))}" for i, s in enumerate(existing_steps)]
+            steps_summary = "\nExisting steps:\n" + "\n".join(lines) + "\n"
+        self._history.append({"role": "user", "content": f"Goal: {goal}{steps_summary}"})
+
+        for _iteration in range(self.MAX_STEPS):
+            if self._aborted:
+                yield {"event": "agent_aborted", "data": {"reason": "鐢ㄦ埛涓"}}
+                return
+
+            snapshot = await snapshot_provider()
+            obs = self._build_observation(snapshot, steps_done)
+            self._history.append({"role": "user", "content": obs})
+
+            full_response = ""
+            async for chunk in self._stream_llm(self._history, model_config):
+                full_response += chunk
+
+            self._history.append({"role": "assistant", "content": full_response})
+
+            parsed = self._parse_json(full_response)
+            if not parsed:
+                yield {"event": "agent_aborted", "data": {"reason": f"Unable to parse agent response: {full_response[:200]}"}}
+                return
+
+            thought = parsed.get("thought", "")
+            action = parsed.get("action", "execute")
+            structured_intent = self._extract_structured_execute_intent(parsed, goal)
+            description = parsed.get("description", "Execute step")
+            risk = parsed.get("risk", "none")
+            risk_reason = parsed.get("risk_reason", "")
+            action_payload = json.dumps(structured_intent, ensure_ascii=False) if structured_intent else ""
+
+            yield {"event": "agent_thought", "data": {"text": thought}}
+
+            if action == "done":
+                yield {"event": "agent_done", "data": {"total_steps": steps_done}}
+                return
+
+            if action == "abort":
+                yield {"event": "agent_aborted", "data": {"reason": thought}}
+                return
+
+            if not structured_intent:
+                self._history.append(
+                    {
+                        "role": "user",
+                        "content": "Execution failed: Node engine ReAct mode only supports structured assistant actions.\nReturn one structured atomic action instead of code.",
+                    }
+                )
+                continue
+
+            if risk == "high":
+                self._confirm_event = asyncio.Event()
+                self._confirm_approved = False
+                yield {"event": "confirm_required", "data": {
+                    "description": description,
+                    "risk_reason": risk_reason,
+                    "code": action_payload,
+                }}
+                await self._confirm_event.wait()
+                self._confirm_event = None
+                if self._aborted:
+                    yield {"event": "agent_aborted", "data": {"reason": "User aborted"}}
+                    return
+                if not self._confirm_approved:
+                    self._history.append({"role": "user", "content": "User rejected that step. Continue with a safer next step or finish."})
+                    continue
+
+            yield {
+                "event": "agent_action",
+                "data": {
+                    "description": description,
+                    "code": action_payload,
+                },
+            }
+            try:
+                execution_intent = RPAAssistant._build_engine_execution_intent(snapshot, structured_intent)
+                result = await intent_executor(execution_intent)
+            except Exception as exc:
+                result = {"success": False, "error": str(exc), "output": ""}
+            if result["success"]:
+                steps_done += 1
+                step_data = result.get("step") or {
+                    "action": structured_intent["action"],
+                    "source": "ai",
+                    "description": description,
+                    "prompt": goal,
+                }
+                output = result.get("output", "")
+                if output and output != "ok" and output != "None":
+                    yield {"event": "agent_step_done", "data": {"step": step_data, "output": output}}
+                    self._history.append({"role": "user", "content": f"Step succeeded: {description}\nOutput: {output}"})
+                else:
+                    yield {"event": "agent_step_done", "data": {"step": step_data}}
+                    self._history.append({"role": "user", "content": f"Step succeeded: {description}"})
+            else:
+                error_msg = result.get("error", "Unknown error")
+                self._history.append({"role": "user", "content": f"Execution failed: {error_msg[:500]}\nAnalyze the failure and adjust the strategy."})
+
+        yield {"event": "agent_done", "data": {"total_steps": steps_done}}
+
     @staticmethod
     def _build_observation(snapshot: Dict[str, Any], steps_done: int) -> str:
         frame_lines = _snapshot_frame_lines(snapshot)
@@ -804,10 +919,7 @@ class RPAAssistant:
         if not structured_intent:
             raise ValueError("Unable to extract structured intent from assistant response")
         resolved_intent = resolve_structured_intent(snapshot, structured_intent)
-        execution_intent = {
-            **structured_intent,
-            "resolved": resolved_intent,
-        }
+        execution_intent = self._build_engine_execution_intent(snapshot, structured_intent)
         result = await intent_executor(execution_intent)
         return result, resolved_intent
 
@@ -929,6 +1041,14 @@ class RPAAssistant:
 
     async def _execute_on_page(self, page: Page, code: str) -> Dict[str, Any]:
         return await _execute_on_page(page, code)
+
+    @staticmethod
+    def _build_engine_execution_intent(snapshot: Dict[str, Any], structured_intent: Dict[str, Any]) -> Dict[str, Any]:
+        resolved_intent = resolve_structured_intent(snapshot, structured_intent)
+        return {
+            **structured_intent,
+            "resolved": resolved_intent.get("resolved", {}),
+        }
 
 
 

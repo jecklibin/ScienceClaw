@@ -324,14 +324,18 @@ def _build_locator_candidates_for_element(element: Dict[str, Any]) -> List[Dict[
     candidates: List[Dict[str, Any]] = []
     role = element.get("role")
     name = element.get("name")
+    text = element.get("text")
+    value = element.get("value")
+    title = element.get("title")
     placeholder = element.get("placeholder")
     href = element.get("href")
-    if role and name:
+    semantic_name = name or text or value
+    if role and semantic_name:
         candidates.append(
             {
                 "kind": "role",
                 "selected": True,
-                "locator": {"method": "role", "role": role, "name": name},
+                "locator": {"method": "role", "role": role, "name": semantic_name},
             }
         )
     elif placeholder:
@@ -348,6 +352,14 @@ def _build_locator_candidates_for_element(element: Dict[str, Any]) -> List[Dict[
                 "kind": "text",
                 "selected": True,
                 "locator": {"method": "text", "value": name},
+            }
+        )
+    elif title:
+        candidates.append(
+            {
+                "kind": "title",
+                "selected": True,
+                "locator": {"method": "title", "value": title},
             }
         )
     elif href:
@@ -378,6 +390,51 @@ def _candidate_locator_payload(candidates: List[Dict[str, Any]]) -> Dict[str, An
 
 def _normalize_hint(value: Optional[str]) -> str:
     return (value or "").strip().lower()
+
+
+def _match_text_score(expected: str, candidate: Optional[str]) -> int:
+    normalized_candidate = _normalize_hint(candidate)
+    if not expected or not normalized_candidate:
+        return 0
+    if expected == normalized_candidate:
+        return 6
+    if expected in normalized_candidate or normalized_candidate in expected:
+        return 4
+    expected_tokens = _tokenize_text(expected)
+    candidate_tokens = _tokenize_text(normalized_candidate)
+    overlap = len(expected_tokens & candidate_tokens)
+    if overlap:
+        return min(overlap + 1, 3)
+    return 0
+
+
+def _score_direct_target_match(element: Dict[str, Any], expected_role: str, expected_name: str) -> int:
+    role = _normalize_hint(element.get("role"))
+    if expected_role and role != expected_role:
+        return -1
+
+    score = 1 if not expected_role and not expected_name else 0
+    if expected_role:
+        score += 3
+    if not expected_name:
+        return score
+
+    candidate_scores = []
+    for bonus, field in (
+        (5, element.get("name")),
+        (4, element.get("placeholder")),
+        (3, element.get("text")),
+        (3, element.get("value")),
+        (2, element.get("title")),
+        (1, element.get("href")),
+    ):
+        field_score = _match_text_score(expected_name, field)
+        if field_score > 0:
+            candidate_scores.append(field_score + bonus)
+    best_name_score = max(candidate_scores, default=0)
+    if best_name_score <= 0:
+        return -1
+    return score + best_name_score
 
 
 def _tokenize_text(value: Optional[str]) -> set[str]:
@@ -585,19 +642,15 @@ def resolve_structured_intent(snapshot: Dict[str, Any], intent: Dict[str, Any]) 
     expected_name = _normalize_hint(target_hint.get("name") or target_hint.get("text") or target_hint.get("value"))
     best_match: Optional[Dict[str, Any]] = None
     best_frame_path: List[str] = []
+    best_score = -1
     for frame in snapshot.get("frames", []):
         for element in frame.get("elements", []):
-            role = _normalize_hint(element.get("role"))
-            name = _normalize_hint(element.get("name"))
-            if expected_role and role != expected_role:
-                continue
-            if expected_name and expected_name not in name:
+            score = _score_direct_target_match(element, expected_role, expected_name)
+            if score < 0 or score <= best_score:
                 continue
             best_match = element
             best_frame_path = frame.get("frame_path", [])
-            break
-        if best_match:
-            break
+            best_score = score
 
     if not best_match:
         raise ValueError("No frame-aware target matched the structured intent")

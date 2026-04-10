@@ -592,29 +592,49 @@ async def chat_with_assistant(
 
             if _is_node_engine_mode():
                 if request.mode == "react":
-                    yield {
-                        "event": "error",
-                        "data": json.dumps({"message": "ReAct mode is not yet supported in node engine mode"}, ensure_ascii=False),
-                    }
-                    yield {"event": "done", "data": "{}"}
-                    return
-
-                async for event in assistant.chat_with_engine(
-                    session_id=session_id,
-                    message=request.message,
-                    steps=steps,
-                    model_config=model_config,
-                    snapshot_provider=lambda: rpa_manager.capture_engine_snapshot(session_id),
-                    intent_executor=lambda intent: rpa_manager.execute_engine_assistant_intent(session_id, intent),
-                ):
-                    evt_type = event.get("event", "message")
-                    evt_data = event.get("data", {})
-                    if evt_type == "result" and evt_data.get("success") and evt_data.get("step"):
-                        await rpa_manager.add_step(session_id, evt_data["step"])
-                    yield {
-                        "event": evt_type,
-                        "data": json.dumps(evt_data, ensure_ascii=False),
-                    }
+                    agent = _active_agents.get(session_id)
+                    if agent is None:
+                        agent = RPAReActAgent()
+                        _active_agents[session_id] = agent
+                    try:
+                        async for event in agent.run_with_engine(
+                            session_id=session_id,
+                            goal=request.message,
+                            existing_steps=steps,
+                            model_config=model_config,
+                            snapshot_provider=lambda: rpa_manager.capture_engine_snapshot(session_id),
+                            intent_executor=lambda intent: rpa_manager.execute_engine_assistant_intent(session_id, intent),
+                        ):
+                            evt_type = event.get("event", "message")
+                            evt_data = event.get("data", {})
+                            if evt_type == "agent_step_done" and evt_data.get("step"):
+                                await rpa_manager.add_step(session_id, evt_data["step"])
+                            if evt_type == "agent_aborted":
+                                _active_agents.pop(session_id, None)
+                            yield {
+                                "event": evt_type,
+                                "data": json.dumps(evt_data, ensure_ascii=False),
+                            }
+                    except Exception:
+                        _active_agents.pop(session_id, None)
+                        raise
+                else:
+                    async for event in assistant.chat_with_engine(
+                        session_id=session_id,
+                        message=request.message,
+                        steps=steps,
+                        model_config=model_config,
+                        snapshot_provider=lambda: rpa_manager.capture_engine_snapshot(session_id),
+                        intent_executor=lambda intent: rpa_manager.execute_engine_assistant_intent(session_id, intent),
+                    ):
+                        evt_type = event.get("event", "message")
+                        evt_data = event.get("data", {})
+                        if evt_type == "result" and evt_data.get("success") and evt_data.get("step"):
+                            await rpa_manager.add_step(session_id, evt_data["step"])
+                        yield {
+                            "event": evt_type,
+                            "data": json.dumps(evt_data, ensure_ascii=False),
+                        }
             elif request.mode == "react":
                 # Reuse existing agent for this session to preserve history across turns
                 agent = _active_agents.get(session_id)
