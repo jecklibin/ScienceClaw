@@ -206,6 +206,21 @@ def _is_node_engine_mode() -> bool:
     return getattr(settings, "rpa_engine_mode", "legacy") == "node"
 
 
+async def _resolve_node_test_params(user_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    resolved: Dict[str, Any] = {}
+    for name, descriptor in (params or {}).items():
+        if isinstance(descriptor, dict):
+            original = descriptor.get("original_value")
+            if original not in (None, "", "{{credential}}"):
+                resolved[name] = original
+        else:
+            resolved[name] = descriptor
+
+    if params:
+        resolved.update(await inject_credentials(user_id, params, resolved))
+    return resolved
+
+
 def _get_sandbox_proxy_headers() -> list[tuple[str, str]] | None:
     """Parse optional proxy request headers from env.
 
@@ -466,7 +481,8 @@ async def test_script(
         raise HTTPException(status_code=404, detail="Session not found")
 
     if _is_node_engine_mode():
-        result = await rpa_manager.replay_with_engine(session_id, request.params)
+        replay_params = await _resolve_node_test_params(str(current_user.id), request.params)
+        result = await rpa_manager.replay_with_engine(session_id, replay_params)
         return {"status": "success", **result}
 
     steps = [step.model_dump() for step in session.steps]

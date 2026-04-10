@@ -10,4 +10,8 @@ export class SessionRegistry {
   get(sessionId: string): RuntimeSession | undefined {
     return this.#sessions.get(sessionId);
   }
+
+  delete(sessionId: string): void {
+    this.#sessions.delete(sessionId);
+  }
 }

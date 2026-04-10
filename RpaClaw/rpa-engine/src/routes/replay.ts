@@ -75,6 +75,11 @@ export async function registerReplayRoutes(app: FastifyInstance) {
     }
 
     const actions = resolveActions(parsedBody.data, session.actions);
-    return runReplay(actions, parsedBody.data.params);
+    return runReplay(
+      actions,
+      parsedBody.data.params,
+      ({ actions: replayActions, params }) =>
+        app.runtimeController.replay(session, replayActions, params),
+    );
   });
 }

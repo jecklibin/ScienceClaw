@@ -30,6 +30,7 @@ export async function registerSessionRoutes(app: FastifyInstance) {
       sandboxSessionId: parsedBody.data.sandboxSessionId,
     });
 
+    await app.runtimeController.startSession(session);
     app.sessionRegistry.set(session);
     app.eventBus.publish('session.created', session);
 
@@ -62,7 +63,7 @@ export async function registerSessionRoutes(app: FastifyInstance) {
     }
 
     ensureRuntimePage(session, parsedBody.data.pageAlias);
-    session.activePageAlias = parsedBody.data.pageAlias;
+    await app.runtimeController.activatePage(session, parsedBody.data.pageAlias);
     app.eventBus.publish('session.updated', session);
     return { session };
   });
@@ -85,7 +86,7 @@ export async function registerSessionRoutes(app: FastifyInstance) {
     const pageAlias = parsedBody.data.pageAlias ?? session.activePageAlias ?? 'page';
     const page = ensureRuntimePage(session, pageAlias);
     page.url = normalizedUrl;
-    session.activePageAlias = pageAlias;
+    await app.runtimeController.navigate(session, normalizedUrl, pageAlias);
     app.eventBus.publish('session.updated', session);
     return { session };
   });
@@ -97,6 +98,7 @@ export async function registerSessionRoutes(app: FastifyInstance) {
       return reply.code(404).send({ message: `unknown session ${id}` });
     }
 
+    await app.runtimeController.stopSession(id);
     session.mode = 'stopped';
     session.status = 'stopped';
     app.eventBus.publish('session.updated', session);

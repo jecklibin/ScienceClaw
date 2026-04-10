@@ -20,3 +20,22 @@ export type RuntimeSession = {
   pages: RuntimePage[];
   actions: RuntimeAction[];
 };
+
+export type RuntimeReplayResult = {
+  success: boolean;
+  output: string;
+  error?: string;
+  data?: Record<string, unknown>;
+};
+
+export interface SessionRuntimeController {
+  startSession(session: RuntimeSession): Promise<void>;
+  activatePage(session: RuntimeSession, pageAlias: string): Promise<void>;
+  navigate(session: RuntimeSession, url: string, pageAlias?: string): Promise<void>;
+  replay(
+    session: RuntimeSession,
+    actions: RuntimeAction[],
+    params: Record<string, unknown>,
+  ): Promise<RuntimeReplayResult>;
+  stopSession(sessionId: string): Promise<void>;
+}

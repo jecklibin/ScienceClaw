@@ -364,6 +364,48 @@ def test_test_route_uses_manager_replay_in_node_mode(monkeypatch):
     assert fake_manager.calls == [("replay", "session-1", {})]
 
 
+def test_test_route_resolves_descriptor_params_before_node_engine_replay(monkeypatch):
+    class _FakeManager:
+        def __init__(self):
+            self.calls = []
+
+        async def get_session(self, session_id: str):
+            assert session_id == "session-1"
+            return SimpleNamespace(id=session_id, user_id="user-1", sandbox_session_id="sandbox-1", steps=[])
+
+        async def replay_with_engine(self, session_id: str, params: dict):
+            self.calls.append(("replay", session_id, params))
+            return {
+                "result": {"success": False, "output": "SKILL_ERROR", "error": "blocked", "data": {}},
+                "logs": [],
+                "script": "async def execute_skill(page, **kwargs):\n    return {}\n",
+                "plan": [],
+            }
+
+    async def fake_inject_credentials(_user_id: str, params: dict, _seed: dict):
+        assert params["api_key"]["credential_id"] == "cred-1"
+        return {"api_key": "resolved-secret"}
+
+    fake_manager = _FakeManager()
+    monkeypatch.setattr(rpa_route, "rpa_manager", fake_manager)
+    monkeypatch.setattr(rpa_route.settings, "rpa_engine_mode", "node")
+    monkeypatch.setattr(rpa_route, "inject_credentials", fake_inject_credentials)
+
+    client = _build_client()
+    response = client.post(
+        "/api/v1/rpa/session/session-1/test",
+        json={
+            "params": {
+                "api_key": {"sensitive": True, "credential_id": "cred-1", "original_value": "{{credential}}"},
+                "query": {"original_value": "science"},
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    assert fake_manager.calls == [("replay", "session-1", {"api_key": "resolved-secret", "query": "science"})]
+
+
 def test_save_route_uses_manager_codegen_in_node_mode(monkeypatch):
     class _FakeManager:
         def __init__(self):
