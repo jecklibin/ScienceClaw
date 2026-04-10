@@ -1,4 +1,5 @@
 import { once } from 'node:events';
+import { createServer } from 'node:http';
 import { AddressInfo } from 'node:net';
 import { WebSocket } from 'ws';
 import { describe, expect, it } from 'vitest';
@@ -438,5 +439,73 @@ describe('PlaywrightSessionRuntimeController integration', () => {
       },
       status: 'recorded',
     });
+  });
+
+  it('records click actions after navigating a live page through dispatched mouse input', async () => {
+    const site = createServer((_, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html>
+        <html>
+          <body style="margin:0;display:flex;align-items:center;justify-content:center;height:100vh">
+            <button id="target" style="width:240px;height:120px;font-size:32px">Click me</button>
+          </body>
+        </html>`);
+    });
+    await new Promise<void>(resolve => site.listen(0, '127.0.0.1', resolve));
+    const address = site.address() as AddressInfo;
+    const targetUrl = `http://127.0.0.1:${address.port}`;
+
+    const controller = new PlaywrightSessionRuntimeController();
+    const session: RuntimeSession = createRuntimeSession({ userId: 'u1', sandboxSessionId: 'sandbox-1' });
+
+    try {
+      await controller.startSession(session);
+      await controller.navigate(session, targetUrl, 'page');
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      await controller.dispatchInput(session, {
+        type: 'mouse',
+        action: 'mouseMoved',
+        x: 0.5,
+        y: 0.5,
+        button: 'left',
+        clickCount: 0,
+        modifiers: 0,
+      });
+      await controller.dispatchInput(session, {
+        type: 'mouse',
+        action: 'mousePressed',
+        x: 0.5,
+        y: 0.5,
+        button: 'left',
+        clickCount: 1,
+        modifiers: 0,
+      });
+      await controller.dispatchInput(session, {
+        type: 'mouse',
+        action: 'mouseReleased',
+        x: 0.5,
+        y: 0.5,
+        button: 'left',
+        clickCount: 0,
+        modifiers: 0,
+      });
+      await new Promise(resolve => setTimeout(resolve, 750));
+
+      expect(session.actions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ kind: 'navigate' }),
+          expect.objectContaining({
+            kind: 'click',
+            locator: expect.objectContaining({
+              selector: expect.stringMatching(/\S+/),
+            }),
+          }),
+        ]),
+      );
+    } finally {
+      await controller.stopSession(session.id);
+      await new Promise(resolve => site.close(resolve));
+    }
   });
 });

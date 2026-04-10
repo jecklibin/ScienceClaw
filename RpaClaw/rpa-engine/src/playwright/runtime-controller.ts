@@ -103,7 +103,9 @@ const RECORDER_INIT_SCRIPT = String.raw`
     try {
       return CSS.escape(String(value));
     } catch {
-      return String(value).replace(/([\\"'\\[\\](){}|^$.*+?])/g, '\\$1');
+      return Array.from(String(value), char => (
+        /[A-Za-z0-9_-]/.test(char) ? char : '\\' + char
+      )).join('');
     }
   };
   const roleMap = {
