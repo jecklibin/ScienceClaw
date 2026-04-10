@@ -43,6 +43,7 @@ class RPAStep(BaseModel):
     item_hint: Dict[str, Any] = Field(default_factory=dict)
     ordinal: Optional[str] = None
     assistant_diagnostics: Dict[str, Any] = Field(default_factory=dict)
+    sequence: Optional[int] = None
 
 
 class RPATab(BaseModel):
@@ -1295,6 +1296,12 @@ class RPASessionManager:
                             await self._broadcast_step(session_id, last_step)
                             logger.debug(f"[RPA] Upgraded click to navigate_click: {evt.get('url', '')[:60]}")
                             return
+                        if last_step.action == "press":
+                            last_step.action = "navigate_press"
+                            last_step.url = evt.get("url", last_step.url)
+                            await self._broadcast_step(session_id, last_step)
+                            logger.debug(f"[RPA] Upgraded press to navigate_press: {evt.get('url', '')[:60]}")
+                            return
                         logger.debug(f"[RPA] Preserving nav after {last_step.action}: {evt.get('url', '')[:60]}")
 
         locator_info = evt.get("locator", {})
@@ -1316,6 +1323,7 @@ class RPASessionManager:
             "tab_id": evt.get("tab_id"),
             "source_tab_id": evt.get("source_tab_id"),
             "target_tab_id": evt.get("target_tab_id"),
+            "sequence": evt.get("sequence"),
         }
         await self.add_step(session_id, step_data)
         logger.debug(f"[RPA] Step: {step_data['description'][:60]}")
@@ -1364,7 +1372,16 @@ class RPASessionManager:
 
         session = self.sessions[session_id]
         step = RPAStep(id=str(uuid.uuid4()), **step_data)
-        session.steps.append(step)
+        if step.sequence is None:
+            session.steps.append(step)
+        else:
+            insert_at = len(session.steps)
+            for index, existing_step in enumerate(session.steps):
+                existing_sequence = existing_step.sequence
+                if existing_sequence is not None and existing_sequence > step.sequence:
+                    insert_at = index
+                    break
+            session.steps.insert(insert_at, step)
 
         await self._broadcast_step(session_id, step)
         return step

@@ -395,6 +395,70 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.session.steps[-1].action, "navigate_click")
         self.assertEqual(self.session.steps[-1].url, "https://example.com/next")
 
+    async def test_handle_event_orders_steps_by_sequence_when_events_arrive_out_of_order(self):
+        page = _FakePage("https://example.com", "Example")
+        tab_id = await self.manager.register_page(self.session.id, page, make_active=True)
+
+        await self.manager._handle_event(
+            self.session.id,
+            {
+                "action": "click",
+                "tab_id": tab_id,
+                "tag": "BUTTON",
+                "timestamp": 1234567891,
+                "sequence": 20,
+                "locator": {"method": "role", "role": "button", "name": "Second"},
+            },
+        )
+        await self.manager._handle_event(
+            self.session.id,
+            {
+                "action": "click",
+                "tab_id": tab_id,
+                "tag": "BUTTON",
+                "timestamp": 1234567890,
+                "sequence": 10,
+                "locator": {"method": "role", "role": "button", "name": "First"},
+            },
+        )
+
+        self.assertEqual([step.sequence for step in self.session.steps], [10, 20])
+        self.assertIn("First", self.session.steps[0].description)
+        self.assertIn("Second", self.session.steps[1].description)
+
+    async def test_navigation_after_press_upgrades_step_to_navigate_press(self):
+        page = _FakePage("https://example.com", "Example")
+        tab_id = await self.manager.register_page(self.session.id, page, make_active=True)
+        await self.manager.add_step(
+            self.session.id,
+            {
+                "action": "press",
+                "target": "",
+                "value": "Enter",
+                "label": "",
+                "tag": "INPUT",
+                "url": "https://example.com",
+                "description": "鎸変笅 Enter 鍦?input",
+                "sensitive": False,
+                "tab_id": tab_id,
+            },
+        )
+
+        navigate_ts = int(datetime.now().timestamp() * 1000)
+        await self.manager._handle_event(
+            self.session.id,
+            {
+                "action": "navigate",
+                "url": "https://example.com/next",
+                "timestamp": navigate_ts,
+                "tab_id": tab_id,
+            },
+        )
+
+        self.assertEqual(len(self.session.steps), 1)
+        self.assertEqual(self.session.steps[-1].action, "navigate_press")
+        self.assertEqual(self.session.steps[-1].url, "https://example.com/next")
+
     async def test_register_context_page_upgrades_recent_click_to_open_tab_click(self):
         source_page = _FakePage("https://example.com", "Example")
         target_page = _FakePage("https://example.com/new", "Popup", context=source_page.context)
