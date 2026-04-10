@@ -432,7 +432,7 @@ class RPAReActAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event_names[-1], "agent_done")
 
 class RPAAssistantFrameAwareSnapshotTests(unittest.IsolatedAsyncioTestCase):
-    async def test_build_page_snapshot_includes_iframe_elements_and_collections(self):
+    async def test_build_page_snapshot_includes_iframe_elements_without_invented_collections(self):
         iframe = _FakeSnapshotFrame(
             name="editor",
             url="https://example.com/editor",
@@ -460,7 +460,7 @@ class RPAAssistantFrameAwareSnapshotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(snapshot["frames"]), 2)
         self.assertEqual(snapshot["frames"][1]["frame_path"], ["iframe[title='editor']"])
         self.assertEqual(snapshot["frames"][1]["elements"][0]["name"], "Quarterly Report")
-        self.assertEqual(snapshot["frames"][1]["collections"][0]["item_count"], 2)
+        self.assertEqual(snapshot["frames"][1]["collections"], [])
 
     async def test_build_page_snapshot_skips_detached_child_frame(self):
         detached = _FakeSnapshotFrame(
@@ -521,6 +521,19 @@ class RPAAssistantFrameAwareSnapshotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(collections[0]["item_hint"]["locator"], {"method": "css", "value": "h2 a"})
         self.assertEqual(collections[0]["items"][0]["name"], "Item A")
         self.assertEqual(collections[0]["items"][1]["name"], "Item B")
+        self.assertFalse(any(collection["kind"] == "search_results" for collection in collections))
+
+    async def test_detect_collections_does_not_infer_search_results_from_generic_links(self):
+        collections = ASSISTANT_RUNTIME_MODULE._detect_collections(
+            [
+                {"index": 1, "tag": "a", "role": "link", "name": "Docs"},
+                {"index": 2, "tag": "a", "role": "link", "name": "Blog"},
+                {"index": 3, "tag": "a", "role": "link", "name": "Pricing"},
+            ],
+            [],
+        )
+
+        self.assertEqual(collections, [])
 
     async def test_pick_first_item_uses_collection_scope_not_global_page_order(self):
         snapshot = {
@@ -596,7 +609,8 @@ class RPAAssistantStructuredExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["success"])
         self.assertIn("strict mode violation", result["error"])
         self.assertIn("rpa engine session request failed", result["error"])
-        self.assertEqual(retry_notice, "\n\nExecution failed. Retrying.\n\n")
+        self.assertIn("strict mode violation", retry_notice)
+        self.assertIn("Retrying with a narrower locator strategy", retry_notice)
 
     async def test_execute_structured_click_uses_frame_locator_chain(self):
         page = _FakeActionPage()
@@ -970,6 +984,49 @@ class RPAAssistantStructuredExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resolved["resolved"]["locator"]["method"], "placeholder")
         self.assertEqual(resolved["resolved"]["locator"]["value"], "搜索")
 
+    async def test_resolve_structured_intent_prefers_unique_id_over_shared_placeholder(self):
+        snapshot = {
+            "frames": [
+                {
+                    "frame_path": [],
+                    "frame_hint": "main document",
+                    "elements": [
+                        {
+                            "index": 1,
+                            "tag": "input",
+                            "role": "textbox",
+                            "placeholder": "鎼滅储",
+                            "id": "s",
+                            "id_unique": True,
+                            "placeholder_unique": False,
+                        },
+                        {
+                            "index": 2,
+                            "tag": "input",
+                            "role": "textbox",
+                            "placeholder": "鎼滅储",
+                            "placeholder_unique": False,
+                        },
+                    ],
+                    "collections": [],
+                }
+            ]
+        }
+
+        resolved = ASSISTANT_MODULE.resolve_structured_intent(
+            snapshot,
+            {
+                "action": "fill",
+                "description": "鍦ㄦ悳绱㈡涓緭鍏ヤ腑鏂?",
+                "prompt": "杈撳叆'涓枃'杩涜鎼滅储",
+                "target_hint": {"role": "textbox", "name": "鎼滅储"},
+                "value": "涓枃",
+            },
+        )
+
+        self.assertEqual(resolved["resolved"]["locator"]["method"], "css")
+        self.assertEqual(resolved["resolved"]["locator"]["value"], "#s")
+
     async def test_resolve_structured_intent_prefers_primary_collection_items_over_repeated_controls(self):
         snapshot = {
             "frames": [
@@ -1058,6 +1115,18 @@ class RPAAssistantPromptFormattingTests(unittest.TestCase):
         self.assertIn('"result_key": "short_ascii_snake_case_key_for_extracted_value"', prompt)
         self.assertIn("Do not mark the task done just because the data is visible on the page.", prompt)
         self.assertIn("Execute the extraction step first and return the extracted value.", prompt)
+
+    def test_system_prompt_forbids_collection_semantics_for_single_control_actions(self):
+        prompt = ASSISTANT_MODULE.SYSTEM_PROMPT
+
+        self.assertIn("Only include collection_hint or ordinal when the user explicitly refers to list position", prompt)
+        self.assertIn("For single controls such as one search box, omit collection_hint and ordinal.", prompt)
+
+    def test_react_system_prompt_forbids_strategy_drift_on_retry(self):
+        prompt = ASSISTANT_MODULE.REACT_SYSTEM_PROMPT
+
+        self.assertIn("Only include collection_hint or ordinal when the user explicitly refers to list position", prompt)
+        self.assertIn("When a fill or click fails, retry the same operation with a narrower locator", prompt)
 
 
 if __name__ == "__main__":

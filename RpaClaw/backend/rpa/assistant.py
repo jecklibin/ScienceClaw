@@ -90,13 +90,14 @@ For common atomic actions, respond with JSON in this shape:
 }
 
 Rules:
-1. If the user says first or nth, use collection semantics and avoid hard-coded dynamic content.
-2. Prefer role, label, placeholder, and structural hints over concrete titles or dynamic href values.
-3. For opening a website or navigating to a known URL, prefer `"action": "navigate"` with the URL in `value`. Do not model browser chrome such as the address bar as a page textbox.
-4. The backend resolves frame context automatically, so do not invent iframe selectors unless the user explicitly names a frame.
-5. Only output Python code for genuinely complex custom logic that cannot be expressed as one atomic structured action.
-6. If you output Python, define async def run(page): and use Playwright async API.
-7. For extract_text actions, include result_key as a short ASCII snake_case key such as latest_issue_title. Do not use Chinese, spaces, or hyphens.
+1. Only include collection_hint or ordinal when the user explicitly refers to list position, such as first, last, nth, list item, row, card, or result.
+2. For single controls such as one search box, omit collection_hint and ordinal.
+3. Prefer role, label, placeholder, stable ids, test ids, and structural hints over concrete titles or dynamic href values.
+4. For opening a website or navigating to a known URL, prefer `"action": "navigate"` with the URL in `value`. Do not model browser chrome such as the address bar as a page textbox.
+5. The backend resolves frame context automatically, so do not invent iframe selectors unless the user explicitly names a frame.
+6. Only output Python code for genuinely complex custom logic that cannot be expressed as one atomic structured action.
+7. If you output Python, define async def run(page): and use Playwright async API.
+8. For extract_text actions, include result_key as a short ASCII snake_case key such as latest_issue_title. Do not use Chinese, spaces, or hyphens.
 """
 
 async def _get_page_elements(page: Page) -> str:
@@ -287,17 +288,32 @@ Preferred format:
 }
 
 Rules:
-1. Prefer structured atomic actions with operation/target_hint/collection_hint over raw Playwright code.
-2. Use collection semantics for first, last, and nth requests. Do not hard-code dynamic titles or href values.
-3. For opening a website or jumping to a known URL, use operation=navigate with the URL in value. Do not refer to the browser address bar as a page textbox.
-4. The backend resolves iframe context automatically from the snapshot. Do not invent iframe selectors unless the user explicitly names a frame.
-5. Only use the code field for custom Playwright code when the action cannot be expressed as one atomic structured action.
-6. For irreversible operations such as submit, delete, pay, or authorize, set risk to high.
-7. For extraction tasks, use operation=extract_text, describe what data is being extracted, and include result_key as a short ASCII snake_case key such as latest_issue_title.
-8. Do not mark the task done just because the data is visible on the page.
-9. Execute the extraction step first and return the extracted value.
-10. For example, if the user asks to get or read a title, first run extract_text on the target element, set result_key to something like latest_issue_title, then summarize the extracted value in description.
+1. Prefer structured atomic actions with operation/target_hint over raw Playwright code.
+2. Only include collection_hint or ordinal when the user explicitly refers to list position, such as first, last, nth, list item, row, card, or result.
+3. For single controls such as one search box, omit collection_hint and ordinal.
+4. For opening a website or jumping to a known URL, use operation=navigate with the URL in value. Do not refer to the browser address bar as a page textbox.
+5. The backend resolves iframe context automatically from the snapshot. Do not invent iframe selectors unless the user explicitly names a frame.
+6. Only use the code field for custom Playwright code when the action cannot be expressed as one atomic structured action.
+7. For irreversible operations such as submit, delete, pay, or authorize, set risk to high.
+8. For extraction tasks, use operation=extract_text, describe what data is being extracted, and include result_key as a short ASCII snake_case key such as latest_issue_title.
+9. Do not mark the task done just because the data is visible on the page.
+10. Execute the extraction step first and return the extracted value.
+11. When a fill or click fails, retry the same operation with a narrower locator. Do not switch to unrelated actions such as Tab, browser chrome interaction, or custom code unless the user explicitly asked for that.
+12. For example, if the user asks to get or read a title, first run extract_text on the target element, set result_key to something like latest_issue_title, then summarize the extracted value in description.
 """
+
+
+def _build_retry_prompt(error: str) -> str:
+    return (
+        f"Execution error: {error}\n"
+        "Retry the same intended action with a narrower locator.\n"
+        "Do not change the action type unless the error explicitly says the action itself is unsupported.\n"
+        "Do not introduce collection_hint or ordinal unless the user explicitly requested a list position."
+    )
+
+
+def _build_retry_notice(error: str) -> str:
+    return f"\n\nExecution failed: {error}\nRetrying with a narrower locator strategy.\n\n"
 
 
 
@@ -830,15 +846,17 @@ class RPAAssistant:
 
         retry_messages = messages + [
             {"role": "assistant", "content": full_response},
-            {"role": "user", "content": f"Execution error: {result['error']}\nPlease fix it and retry."},
+            {"role": "user", "content": _build_retry_prompt(result["error"])},
         ]
         retry_response = ""
         async for chunk_text in self._stream_llm(retry_messages, model_config):
             retry_response += chunk_text
 
+        retry_notice = _build_retry_notice(result["error"])
+
         current_page = page_provider() if page_provider else page
         if current_page is None:
-            return {"success": False, "error": "No active page available", "output": ""}, retry_response, None, None, "\n\nExecution failed. Retrying.\n\n"
+            return {"success": False, "error": "No active page available", "output": ""}, retry_response, None, None, retry_notice
 
         retry_snapshot = await build_page_snapshot(current_page, build_frame_path_from_frame)
         try:
@@ -847,9 +865,9 @@ class RPAAssistant:
                 retry_snapshot,
                 retry_response,
             )
-            return retry_result, retry_response, retry_code, retry_resolution, "\n\nExecution failed. Retrying.\n\n"
+            return retry_result, retry_response, retry_code, retry_resolution, retry_notice
         except Exception as exc:
-            return {"success": False, "error": str(exc), "output": ""}, retry_response, None, None, "\n\nExecution failed. Retrying.\n\n"
+            return {"success": False, "error": str(exc), "output": ""}, retry_response, None, None, retry_notice
 
     async def _execute_single_response(
         self,
@@ -894,11 +912,13 @@ class RPAAssistant:
 
         retry_messages = messages + [
             {"role": "assistant", "content": full_response},
-            {"role": "user", "content": f"Execution error: {result['error']}\nPlease fix it and retry."},
+            {"role": "user", "content": _build_retry_prompt(result["error"])},
         ]
         retry_response = ""
         async for chunk_text in self._stream_llm(retry_messages, model_config):
             retry_response += chunk_text
+
+        retry_notice = _build_retry_notice(result["error"])
 
         retry_snapshot = await snapshot_provider()
         try:
@@ -907,14 +927,14 @@ class RPAAssistant:
                 retry_response,
                 intent_executor,
             )
-            return retry_result, retry_response, retry_resolution, "\n\nExecution failed. Retrying.\n\n"
+            return retry_result, retry_response, retry_resolution, retry_notice
         except Exception as exc:
             retry_error = str(exc)
             if initial_error and retry_error != initial_error:
                 combined_error = f"Initial execution failed: {initial_error}\nRetry failed: {retry_error}"
             else:
                 combined_error = retry_error
-            return {"success": False, "error": combined_error, "output": ""}, retry_response, None, "\n\nExecution failed. Retrying.\n\n"
+            return {"success": False, "error": combined_error, "output": ""}, retry_response, None, retry_notice
 
     async def _execute_single_engine_response(
         self,

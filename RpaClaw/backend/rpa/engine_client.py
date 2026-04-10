@@ -39,7 +39,7 @@ class RPAEngineClient:
         if response.status_code == 404:
             return None
         if response.status_code != 200:
-            raise RuntimeError("rpa engine session request failed")
+            raise RuntimeError(self._build_session_error_message(response))
         return EngineSessionEnvelope.model_validate(response.json()).model_dump()
 
     async def start_session(self, user_id: str, sandbox_session_id: str) -> dict:
@@ -113,6 +113,11 @@ class RPAEngineClient:
             raise RuntimeError(not_found_message)
         if response.status_code == 200:
             return
+        message = RPAEngineClient._build_session_error_message(response)
+        raise RuntimeError(message)
+
+    @staticmethod
+    def _build_session_error_message(response) -> str:
         message = "rpa engine session request failed"
         try:
             payload = response.json()
@@ -122,7 +127,7 @@ class RPAEngineClient:
             detail = payload.get("message") or payload.get("detail") or payload.get("error")
             if detail:
                 message = f"{message}: {detail}"
-        raise RuntimeError(message)
+        return message
 
     async def generate_script(self, session_id: str, actions: list[dict], params: dict) -> dict:
         async with httpx.AsyncClient(timeout=30.0) as client:

@@ -505,7 +505,12 @@ const ASSISTANT_SNAPSHOT_SCRIPT = String.raw`(() => {
     const href = el.getAttribute('href') || '';
     const value = el.value || '';
     const type = el.getAttribute('type') || '';
-    const key = tag + role + name + placeholder + href;
+    const id = el.getAttribute('id') || '';
+    const nameAttr = el.getAttribute('name') || '';
+    const testId = el.getAttribute('data-testid') || el.getAttribute('data-test-id') || '';
+    const idUnique = id ? selectorIsUnique('#' + cssEsc(id)) : false;
+    const placeholderUnique = placeholder ? selectorIsUnique('[placeholder="' + cssEsc(placeholder) + '"]') : false;
+    const key = tag + role + name + placeholder + href + id + nameAttr + testId;
     if (seen.has(key)) continue;
     seen.add(key);
     const info = { index, tag };
@@ -515,6 +520,11 @@ const ASSISTANT_SNAPSHOT_SCRIPT = String.raw`(() => {
     if (href) info.href = href.substring(0, 120);
     if (value && tag !== 'input') info.value = value.substring(0, 80);
     if (type) info.type = type;
+    if (id) info.id = id;
+    if (id) info.id_unique = idUnique;
+    if (nameAttr) info.name_attr = nameAttr;
+    if (testId) info.test_id = testId;
+    if (placeholder) info.placeholder_unique = placeholderUnique;
     const collection = findCollectionContext(el);
     if (collection) {
       info.collection_container_selector = collection.container_selector;
@@ -1481,6 +1491,9 @@ function buildLocatorFromPayload(
     const name = String(payload.name ?? '').trim();
     return name ? scope.getByRole(role, { name }) : scope.getByRole(role);
   }
+  if (method === 'testId' || method === 'testid') {
+    return scope.getByTestId(String(payload.value ?? ''));
+  }
   if (method === 'text') {
     return scope.getByText(String(payload.value ?? ''));
   }
@@ -1532,23 +1545,6 @@ function detectAssistantCollections(
       items: items.slice(0, 25),
     });
   }
-
-  const links = elements.filter(element => {
-    const role = String(element.role ?? '');
-    const tag = String(element.tag ?? '');
-    return role === 'link' || tag === 'a';
-  });
-  if (links.length >= 2) {
-    collections.push({
-      kind: 'search_results',
-      frame_path: [...framePath],
-      container_hint: { role: 'list' },
-      item_hint: { role: 'link' },
-      item_count: links.length,
-      items: links.slice(0, 10),
-    });
-  }
-
   return collections;
 }
 

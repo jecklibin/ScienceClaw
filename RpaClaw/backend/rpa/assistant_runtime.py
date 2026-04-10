@@ -114,8 +114,13 @@ EXTRACT_ELEMENTS_JS = r"""() => {
         const href = el.getAttribute('href') || '';
         const value = el.value || '';
         const type = el.getAttribute('type') || '';
+        const id = el.getAttribute('id') || '';
+        const nameAttr = el.getAttribute('name') || '';
+        const testId = el.getAttribute('data-testid') || el.getAttribute('data-test-id') || '';
+        const idUnique = id ? selectorIsUnique('#' + cssEsc(id)) : false;
+        const placeholderUnique = placeholder ? selectorIsUnique('[placeholder="' + cssEsc(placeholder) + '"]') : false;
 
-        const key = tag + role + name + placeholder + href;
+        const key = tag + role + name + placeholder + href + id + nameAttr + testId;
         if (seen.has(key)) continue;
         seen.add(key);
 
@@ -126,6 +131,11 @@ EXTRACT_ELEMENTS_JS = r"""() => {
         if (href) info.href = href.substring(0, 120);
         if (value && tag !== 'input') info.value = value.substring(0, 80);
         if (type) info.type = type;
+        if (id) info.id = id;
+        if (id) info.id_unique = idUnique;
+        if (nameAttr) info.name_attr = nameAttr;
+        if (testId) info.test_id = testId;
+        if (placeholder) info.placeholder_unique = placeholderUnique;
         const collection = findCollectionContext(el);
         if (collection) {
             info.collection_container_selector = collection.container_selector;
@@ -177,19 +187,6 @@ def _detect_collections(elements: List[Dict[str, Any]], frame_path: List[str]) -
                 "item_hint": item_hint,
                 "item_count": len(items),
                 "items": items[:25],
-            }
-        )
-
-    links = [el for el in elements if el.get("role") == "link" or el.get("tag") == "a"]
-    if len(links) >= 2:
-        collections.append(
-            {
-                "kind": "search_results",
-                "frame_path": list(frame_path),
-                "container_hint": {"role": "list"},
-                "item_hint": {"role": "link"},
-                "item_count": len(links),
-                "items": links[:10],
             }
         )
     return collections
@@ -329,55 +326,91 @@ def _build_locator_candidates_for_element(element: Dict[str, Any]) -> List[Dict[
     title = element.get("title")
     placeholder = element.get("placeholder")
     href = element.get("href")
+    test_id = element.get("test_id")
+    element_id = element.get("id")
+    id_unique = bool(element.get("id_unique"))
+    placeholder_unique = bool(element.get("placeholder_unique"))
+    name_attr = element.get("name_attr")
     semantic_name = name or text or value
+
     if role and semantic_name:
         candidates.append(
             {
                 "kind": "role",
-                "selected": True,
                 "locator": {"method": "role", "role": role, "name": semantic_name},
             }
         )
-    elif placeholder:
+    if test_id:
+        candidates.append(
+            {
+                "kind": "testId",
+                "locator": {"method": "testId", "value": test_id},
+            }
+        )
+    if element_id and id_unique:
+        candidates.append(
+            {
+                "kind": "css",
+                "locator": {"method": "css", "value": f"#{element_id}"},
+            }
+        )
+    if placeholder and placeholder_unique:
         candidates.append(
             {
                 "kind": "placeholder",
-                "selected": True,
                 "locator": {"method": "placeholder", "value": placeholder},
             }
         )
-    elif name:
+    if element_id:
+        candidates.append(
+            {
+                "kind": "css",
+                "locator": {"method": "css", "value": f"#{element_id}"},
+            }
+        )
+    if placeholder:
+        candidates.append(
+            {
+                "kind": "placeholder",
+                "locator": {"method": "placeholder", "value": placeholder},
+            }
+        )
+    if name_attr:
+        candidates.append(
+            {
+                "kind": "css",
+                "locator": {"method": "css", "value": f"{element.get('tag', '*')}[name=\"{name_attr}\"]"},
+            }
+        )
+    if name:
         candidates.append(
             {
                 "kind": "text",
-                "selected": True,
                 "locator": {"method": "text", "value": name},
             }
         )
-    elif title:
+    if title:
         candidates.append(
             {
                 "kind": "title",
-                "selected": True,
                 "locator": {"method": "title", "value": title},
             }
         )
-    elif href:
+    if href:
         candidates.append(
             {
                 "kind": "css",
-                "selected": True,
                 "locator": {"method": "css", "value": f"a[href*='{href}']"},
             }
         )
-    else:
+    if not candidates:
         candidates.append(
             {
                 "kind": "css",
-                "selected": True,
                 "locator": {"method": "css", "value": element.get("tag", "*")},
             }
         )
+    candidates[0]["selected"] = True
     return candidates
 
 
@@ -386,6 +419,25 @@ def _candidate_locator_payload(candidates: List[Dict[str, Any]]) -> Dict[str, An
         if candidate.get("selected"):
             return candidate["locator"]
     return candidates[0]["locator"]
+
+
+def _locator_priority(candidate: Dict[str, Any]) -> int:
+    locator = candidate.get("locator", {}) or {}
+    method = _normalize_hint(locator.get("method"))
+    value = str(locator.get("value") or "")
+    if method == "role":
+        return 100
+    if method == "testid":
+        return 95
+    if method == "css" and value.startswith("#"):
+        return 90
+    if method == "placeholder":
+        return 80
+    if method == "text":
+        return 70
+    if method == "title":
+        return 60
+    return 10
 
 
 def _normalize_hint(value: Optional[str]) -> str:
@@ -643,14 +695,22 @@ def resolve_structured_intent(snapshot: Dict[str, Any], intent: Dict[str, Any]) 
     best_match: Optional[Dict[str, Any]] = None
     best_frame_path: List[str] = []
     best_score = -1
+    best_locator_score = -1
     for frame in snapshot.get("frames", []):
         for element in frame.get("elements", []):
             score = _score_direct_target_match(element, expected_role, expected_name)
-            if score < 0 or score <= best_score:
+            if score < 0:
+                continue
+            locator_candidates = _build_locator_candidates_for_element(element)
+            locator_score = _locator_priority(locator_candidates[0])
+            if score < best_score:
+                continue
+            if score == best_score and locator_score <= best_locator_score:
                 continue
             best_match = element
             best_frame_path = frame.get("frame_path", [])
             best_score = score
+            best_locator_score = locator_score
 
     if not best_match:
         raise ValueError("No frame-aware target matched the structured intent")
@@ -676,6 +736,8 @@ def _locator_from_payload(scope, payload):
     if method == "role":
         kwargs = {"name": payload.get("name")} if payload.get("name") else {}
         return scope.get_by_role(payload["role"], **kwargs)
+    if method == "testId":
+        return scope.get_by_test_id(payload["value"])
     if method == "text":
         return scope.get_by_text(payload["value"])
     if method == "placeholder":

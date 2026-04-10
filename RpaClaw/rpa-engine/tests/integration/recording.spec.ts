@@ -877,6 +877,87 @@ describe('PlaywrightSessionRuntimeController integration', () => {
     }
   });
 
+  it('assistant snapshot exposes unique ids for controls that share a placeholder', async () => {
+    const site = createServer((_, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html>
+        <html>
+          <body style="margin:0;display:flex;align-items:center;justify-content:center;height:100vh;gap:24px">
+            <input id="s" placeholder="Search" style="width:240px;height:48px;font-size:24px" />
+            <input placeholder="Search" style="width:240px;height:48px;font-size:24px" />
+          </body>
+        </html>`);
+    });
+    await new Promise<void>(resolve => site.listen(0, '127.0.0.1', resolve));
+    const address = site.address() as AddressInfo;
+    const targetUrl = `http://127.0.0.1:${address.port}`;
+
+    const controller = new PlaywrightSessionRuntimeController();
+    const session: RuntimeSession = createRuntimeSession({ userId: 'u1', sandboxSessionId: 'sandbox-1' });
+
+    try {
+      await controller.startSession(session);
+      await controller.navigate(session, targetUrl, 'page');
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      const snapshot = await controller.captureSnapshot(session);
+      const frames = snapshot.frames as Array<Record<string, unknown>>;
+      const mainFrame = frames[0];
+      const elements = mainFrame.elements as Array<Record<string, unknown>>;
+      const searchInputs = elements.filter(element => String(element.placeholder ?? '') === 'Search');
+
+      expect(searchInputs).toHaveLength(2);
+      expect(searchInputs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: 's',
+            id_unique: true,
+            placeholder_unique: false,
+          }),
+        ]),
+      );
+    } finally {
+      await controller.stopSession(session.id);
+      await new Promise(resolve => site.close(resolve));
+    }
+  });
+
+  it('assistant snapshot does not invent search_results for generic link groups', async () => {
+    const site = createServer((_, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(`<!doctype html>
+        <html>
+          <body style="margin:0;padding:32px;display:flex;gap:24px">
+            <a href="/docs">Docs</a>
+            <a href="/blog">Blog</a>
+            <a href="/pricing">Pricing</a>
+          </body>
+        </html>`);
+    });
+    await new Promise<void>(resolve => site.listen(0, '127.0.0.1', resolve));
+    const address = site.address() as AddressInfo;
+    const targetUrl = `http://127.0.0.1:${address.port}`;
+
+    const controller = new PlaywrightSessionRuntimeController();
+    const session: RuntimeSession = createRuntimeSession({ userId: 'u1', sandboxSessionId: 'sandbox-1' });
+
+    try {
+      await controller.startSession(session);
+      await controller.navigate(session, targetUrl, 'page');
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      const snapshot = await controller.captureSnapshot(session);
+      const frames = snapshot.frames as Array<Record<string, unknown>>;
+      const mainFrame = frames[0];
+      const collections = mainFrame.collections as Array<Record<string, unknown>>;
+
+      expect(collections).toEqual([]);
+    } finally {
+      await controller.stopSession(session.id);
+      await new Promise(resolve => site.close(resolve));
+    }
+  });
+
   it('tracks popup tabs opened during live recording clicks', async () => {
     const site = createServer((_, response) => {
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });

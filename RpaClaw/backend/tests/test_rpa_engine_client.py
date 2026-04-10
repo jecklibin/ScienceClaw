@@ -113,6 +113,20 @@ def test_get_session_returns_none_on_404(monkeypatch):
     ]
 
 
+def test_get_session_includes_engine_error_message_on_500(monkeypatch):
+    fake_client = _FakeAsyncClient(
+        _FakeResponse(
+            status_code=500,
+            payload={"message": "session cache unavailable"},
+        )
+    )
+    monkeypatch.setattr("backend.rpa.engine_client.httpx.AsyncClient", lambda *args, **kwargs: fake_client)
+    client = RPAEngineClient(base_url="http://127.0.0.1:3310", auth_token="")
+
+    with pytest.raises(RuntimeError, match="session cache unavailable"):
+        asyncio.run(client.get_session("session-1"))
+
+
 def test_session_control_calls_post_expected_payloads(monkeypatch):
     payload = {
         "session": {
