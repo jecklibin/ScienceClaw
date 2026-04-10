@@ -5,6 +5,7 @@ import { Camera, Terminal, CheckCircle, Radio, Send, Wand2, Bot, Code, X, House,
 import { apiClient } from '@/api/client';
 import { getBackendWsUrl } from '@/utils/sandbox';
 import { createReconnectableScreencast, type ScreencastStatusEvent } from '@/utils/reconnectableScreencast';
+import { mapPointerToImageSpace } from '@/utils/canvasPointer';
 
 const router = useRouter();
 const route = useRoute();
@@ -336,10 +337,12 @@ const sendInputEvent = (e: Event) => {
     }
 
     const rect = canvas.getBoundingClientRect();
-    // rect.width/height 是 css 显示尺寸，canvas.width/height 是实际缓冲区（图片）尺寸
-    // 归一化坐标应基于 CSS 视口比例
-    const x = (e.clientX - rect.left) / rect.width;
-    const y = (e.clientY - rect.top) / rect.height;
+    const point = mapPointerToImageSpace(
+      { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+      { clientX: e.clientX, clientY: e.clientY },
+      { width: canvas.width, height: canvas.height },
+    );
+    if (!point.withinImage) return;
     const actionMap: Record<string, string> = {
       mousedown: 'mousePressed',
       mouseup: 'mouseReleased',
@@ -351,20 +354,24 @@ const sendInputEvent = (e: Event) => {
     screencastConnection.send(JSON.stringify({
       type: 'mouse',
       action,
-      x,
-      y,
+      x: point.x,
+      y: point.y,
       button: buttonMap[e.button] || 'left',
       clickCount: e.type === 'mousedown' ? 1 : 0,
       modifiers: getModifiers(e),
     }));
   } else if (e instanceof WheelEvent) {
     const rect = canvas.getBoundingClientRect();
-    const x = (e.clientX - rect.left) / rect.width;
-    const y = (e.clientY - rect.top) / rect.height;
+    const point = mapPointerToImageSpace(
+      { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+      { clientX: e.clientX, clientY: e.clientY },
+      { width: canvas.width, height: canvas.height },
+    );
+    if (!point.withinImage) return;
     screencastConnection.send(JSON.stringify({
       type: 'wheel',
-      x,
-      y,
+      x: point.x,
+      y: point.y,
       deltaX: e.deltaX,
       deltaY: e.deltaY,
       modifiers: getModifiers(e),
