@@ -78,7 +78,11 @@ class SessionScreencastController:
         if not force and payload == self._tabs_snapshot_json:
             return
         self._tabs_snapshot_json = payload
-        await self._ws.send_json({"type": "tabs_snapshot", "tabs": tabs})
+        try:
+            await self._ws.send_json({"type": "tabs_snapshot", "tabs": tabs})
+        except Exception as exc:
+            logger.info("[Screencast] tabs snapshot send failed: %r", exc)
+            self._running = False
 
     async def _switch_page_if_needed(self, force: bool = False) -> None:
         next_page = self._page_provider()
@@ -162,7 +166,8 @@ class SessionScreencastController:
         self._last_preview_error = message
         try:
             await self._ws.send_json({"type": "preview_error", "message": message})
-        except Exception:
+        except Exception as exc:
+            logger.info("[Screencast] preview error send failed: %r", exc)
             self._running = False
 
     async def _recv_loop(self) -> None:
@@ -172,7 +177,8 @@ class SessionScreencastController:
             except asyncio.TimeoutError:
                 try:
                     await self._ws.send_json({"type": "ping", "ts": time.time()})
-                except Exception:
+                except Exception as exc:
+                    logger.info("[Screencast] ping send failed: %r", exc)
                     break
                 continue
 
@@ -228,7 +234,8 @@ class SessionScreencastController:
                     self._viewport_height,
                 )
             self._last_preview_error = ""
-        except Exception:
+        except Exception as exc:
+            logger.info("[Screencast] frame send failed: %r", exc)
             self._running = False
 
     async def _dispatch_mouse(self, event: Dict[str, Any]) -> None:

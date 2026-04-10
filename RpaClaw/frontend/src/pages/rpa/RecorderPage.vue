@@ -4,6 +4,7 @@ import { useRouter, useRoute } from 'vue-router';
 import { Camera, Terminal, CheckCircle, Radio, Send, Wand2, Bot, Code, X, House, FolderOpen, Globe } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
 import { getBackendWsUrl } from '@/utils/sandbox';
+import { createReconnectableScreencast, type ScreencastStatusEvent } from '@/utils/reconnectableScreencast';
 
 const router = useRouter();
 const route = useRoute();
@@ -17,7 +18,7 @@ const loading = ref(true);
 const error = ref<string | null>(null);
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
-let screencastWs: WebSocket | null = null;
+let screencastConnection: ReturnType<typeof createReconnectableScreencast> | null = null;
 let lastMoveTime = 0;
 interface BrowserTab {
   tab_id: string;
@@ -203,10 +204,8 @@ onMounted(() => {
 onBeforeUnmount(() => {
   if (timerInterval.value) clearInterval(timerInterval.value);
   if (pollInterval) clearInterval(pollInterval);
-  if (screencastWs) {
-    screencastWs.close();
-    screencastWs = null;
-  }
+  screencastConnection?.stop();
+  screencastConnection = null;
 });
 
 const getModifiers = (e: MouseEvent | KeyboardEvent | WheelEvent): number => {
@@ -235,48 +234,50 @@ const drawFrame = (base64Data: string, _metadata: { width: number; height: numbe
 };
 
 const connectScreencast = (sid: string) => {
-  if (screencastWs) {
-    screencastWs.close();
-    screencastWs = null;
-  }
-  const wsUrl = getBackendWsUrl(`/rpa/screencast/${sid}`);
-  console.log('[RecorderPage] Connecting screencast:', wsUrl);
-  screencastWs = new WebSocket(wsUrl);
-
-  screencastWs.onopen = () => {
-    console.log('[RecorderPage] Screencast connected');
-    error.value = null;
+  screencastConnection?.stop();
+  const updateScreencastStatus = (event: ScreencastStatusEvent) => {
+    if (event.phase === 'open') {
+      error.value = null;
+      return;
+    }
+    if (event.phase === 'reconnecting') {
+      error.value = `录制画面流已断开，正在重连（第 ${event.attempt} 次）...`;
+      return;
+    }
+    if (event.phase === 'failed') {
+      const code = event.close?.code ?? 1006;
+      const reason = event.close?.reason ? `, reason=${event.close.reason}` : '';
+      error.value = `录制画面流重连失败（code=${code}${reason}）`;
+    }
   };
 
-  screencastWs.onmessage = (ev) => {
-    try {
-      const msg = JSON.parse(ev.data);
-      console.log('[RecorderPage] Screencast message:', msg.type, msg.message || '');
-      if (msg.type === 'frame') {
-        error.value = null;
-        drawFrame(msg.data, msg.metadata);
-      } else if (msg.type === 'tabs_snapshot') {
-        syncTabs(msg.tabs || []);
-      } else if (msg.type === 'preview_error') {
-        error.value = msg.message || '预览切换失败';
+  screencastConnection = createReconnectableScreencast({
+    debugLabel: 'RecorderPage',
+    getUrl: () => getBackendWsUrl(`/rpa/screencast/${sid}`),
+    onStatusChange: updateScreencastStatus,
+    onError: () => {
+      error.value = '录制画面流连接异常，正在尝试恢复...';
+    },
+    onMessage: (ev) => {
+      try {
+        const msg = JSON.parse(ev.data);
+        console.log('[RecorderPage] Screencast message:', msg.type, msg.message || '');
+        if (msg.type === 'frame') {
+          error.value = null;
+          drawFrame(msg.data, msg.metadata);
+        } else if (msg.type === 'tabs_snapshot') {
+          syncTabs(msg.tabs || []);
+        } else if (msg.type === 'preview_error') {
+          error.value = msg.message || '预览切换失败';
+        } else if (msg.type === 'ping') {
+          return;
+        }
+      } catch (parseError) {
+        console.error('[RecorderPage] Screencast parse error:', parseError);
       }
-    } catch (parseError) {
-      console.error('[RecorderPage] Screencast parse error:', parseError);
-    }
-  };
-
-  screencastWs.onclose = (ev) => {
-    console.warn('[RecorderPage] Screencast closed:', ev.code, ev.reason);
-    if (!error.value) {
-      error.value = `录制画面流已断开（code=${ev.code}${ev.reason ? `, reason=${ev.reason}` : ''}）`;
-    }
-    screencastWs = null;
-  };
-
-  screencastWs.onerror = (ev) => {
-    console.error('[RecorderPage] Screencast error:', ev);
-    error.value = '无法连接录制画面流，请检查后端 screencast WebSocket/代理配置。';
-  };
+    },
+  });
+  screencastConnection.connect();
 };
 
 const activateTab = async (tabId: string) => {
@@ -323,7 +324,7 @@ const focusCanvas = () => {
 };
 
 const sendInputEvent = (e: Event) => {
-  if (!screencastWs || screencastWs.readyState !== WebSocket.OPEN) return;
+  if (!screencastConnection?.isOpen()) return;
   const canvas = canvasRef.value;
   if (!canvas) return;
 
@@ -347,7 +348,7 @@ const sendInputEvent = (e: Event) => {
     const action = actionMap[e.type];
     if (!action) return;
     const buttonMap = ['left', 'middle', 'right'];
-    screencastWs.send(JSON.stringify({
+    screencastConnection.send(JSON.stringify({
       type: 'mouse',
       action,
       x,
@@ -360,7 +361,7 @@ const sendInputEvent = (e: Event) => {
     const rect = canvas.getBoundingClientRect();
     const x = (e.clientX - rect.left) / rect.width;
     const y = (e.clientY - rect.top) / rect.height;
-    screencastWs.send(JSON.stringify({
+    screencastConnection.send(JSON.stringify({
       type: 'wheel',
       x,
       y,
@@ -370,7 +371,7 @@ const sendInputEvent = (e: Event) => {
     }));
   } else if (e instanceof KeyboardEvent) {
     const action = e.type === 'keydown' ? 'keyDown' : 'keyUp';
-    screencastWs.send(JSON.stringify({
+    screencastConnection.send(JSON.stringify({
       type: 'keyboard',
       action,
       key: e.key,

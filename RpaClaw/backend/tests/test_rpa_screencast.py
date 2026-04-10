@@ -13,6 +13,11 @@ class _FakeWebSocket:
         self.messages.append(payload)
 
 
+class _FailingWebSocket:
+    async def send_json(self, payload):
+        raise RuntimeError("socket send failed")
+
+
 class _FakeCDPSession:
     def __init__(self):
         self.handlers = {}
@@ -80,6 +85,31 @@ class SessionScreencastControllerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(context.calls, 2)
         self.assertEqual(ws.messages[-1]["type"], "preview_error")
+
+    async def test_emit_tabs_snapshot_stops_controller_when_socket_send_fails(self):
+        controller = SCREencAST_MODULE.SessionScreencastController(
+            page_provider=lambda: None,
+            tabs_provider=lambda: [{"tab_id": "tab-1"}],
+        )
+        controller._ws = _FailingWebSocket()
+        controller._running = True
+
+        await controller._emit_tabs_snapshot(force=True)
+
+        self.assertFalse(controller._running)
+
+    async def test_frame_send_failure_stops_controller(self):
+        controller = SCREencAST_MODULE.SessionScreencastController(
+            page_provider=lambda: None,
+            tabs_provider=lambda: [],
+        )
+        controller._ws = _FailingWebSocket()
+        controller._cdp = _FakeCDPSession()
+        controller._running = True
+
+        await controller._on_frame({"data": "abc", "metadata": {"deviceWidth": 800, "deviceHeight": 600}})
+
+        self.assertFalse(controller._running)
 
 
 if __name__ == "__main__":

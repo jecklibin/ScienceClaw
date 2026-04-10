@@ -91,8 +91,9 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to cleanup runtimes on shutdown: {e}")
     try:
-        from backend.rpa.cdp_connector import cdp_connector
+        from backend.rpa.cdp_connector import cdp_connector, local_cdp_connector
         await cdp_connector.close()
+        await local_cdp_connector.close()
     except Exception as e:
         logger.error(f"Failed to close CDP connector: {e}")
     await close_storage()

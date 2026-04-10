@@ -4,6 +4,7 @@ import { useRouter, useRoute } from 'vue-router';
 import { Play, Save, CheckCircle, XCircle, Loader2, Terminal, Code, ArrowLeft, RotateCcw, House, FolderOpen, Globe } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
 import { getBackendWsUrl } from '@/utils/sandbox';
+import { createReconnectableScreencast, type ScreencastStatusEvent } from '@/utils/reconnectableScreencast';
 
 const router = useRouter();
 const route = useRoute();
@@ -20,7 +21,7 @@ const params = computed(() => {
 });
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
-let screencastWs: WebSocket | null = null;
+let screencastConnection: ReturnType<typeof createReconnectableScreencast> | null = null;
 interface BrowserTab {
   tab_id: string;
   title: string;
@@ -106,45 +107,52 @@ const drawFrame = (base64Data: string, _metadata: { width: number; height: numbe
 };
 
 const connectScreencast = (sid: string) => {
-  const wsUrl = getBackendWsUrl(`/rpa/screencast/${sid}`);
-  console.log('[TestPage] Connecting screencast:', wsUrl);
-  screencastWs = new WebSocket(wsUrl);
-
-  screencastWs.onopen = () => {
-    console.log('[TestPage] Screencast connected');
+  screencastConnection?.stop();
+  const updateScreencastStatus = (event: ScreencastStatusEvent) => {
+    if (event.phase === 'open') {
+      error.value = null;
+      return;
+    }
+    if (event.phase === 'reconnecting') {
+      error.value = `测试画面流已断开，正在重连（第 ${event.attempt} 次）...`;
+      return;
+    }
+    if (event.phase === 'failed') {
+      const code = event.close?.code ?? 1006;
+      const reason = event.close?.reason ? `, reason=${event.close.reason}` : '';
+      error.value = `测试画面流重连失败（code=${code}${reason}）`;
+    }
   };
 
-  screencastWs.onmessage = (ev) => {
-    try {
-      const msg = JSON.parse(ev.data);
-      console.log('[TestPage] Screencast message:', msg.type);
-      if (msg.type === 'frame') {
-        error.value = null;
-        drawFrame(msg.data, msg.metadata);
-      } else if (msg.type === 'tabs_snapshot') {
-        tabs.value = msg.tabs || [];
-        const active = tabs.value.find((tab) => tab.active);
-        activeTabId.value = active?.tab_id || null;
-      } else if (msg.type === 'preview_error') {
-        error.value = msg.message || 'Preview switch failed';
+  screencastConnection = createReconnectableScreencast({
+    debugLabel: 'TestPage',
+    getUrl: () => getBackendWsUrl(`/rpa/screencast/${sid}`),
+    onStatusChange: updateScreencastStatus,
+    onError: () => {
+      error.value = '测试画面流连接异常，正在尝试恢复...';
+    },
+    onMessage: (ev) => {
+      try {
+        const msg = JSON.parse(ev.data);
+        console.log('[TestPage] Screencast message:', msg.type);
+        if (msg.type === 'frame') {
+          error.value = null;
+          drawFrame(msg.data, msg.metadata);
+        } else if (msg.type === 'tabs_snapshot') {
+          tabs.value = msg.tabs || [];
+          const active = tabs.value.find((tab) => tab.active);
+          activeTabId.value = active?.tab_id || null;
+        } else if (msg.type === 'preview_error') {
+          error.value = msg.message || 'Preview switch failed';
+        } else if (msg.type === 'ping') {
+          return;
+        }
+      } catch (e) {
+        console.error('[TestPage] Parse error:', e);
       }
-    } catch (e) {
-      console.error('[TestPage] Parse error:', e);
-    }
-  };
-
-  screencastWs.onerror = (e) => {
-    console.error('[TestPage] Screencast error:', e);
-    error.value = '无法连接测试画面流，请检查后端 screencast WebSocket/代理配置。';
-  };
-
-  screencastWs.onclose = (e) => {
-    console.log('[TestPage] Screencast closed:', e.code, e.reason);
-    if (!error.value) {
-      error.value = `测试画面流已断开（code=${e.code}${e.reason ? `, reason=${e.reason}` : ''}）`;
-    }
-    screencastWs = null;
-  };
+    },
+  });
+  screencastConnection.connect();
 };
 
 const activateTab = async (tabId: string) => {
@@ -244,10 +252,8 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
-  if (screencastWs) {
-    screencastWs.close();
-    screencastWs = null;
-  }
+  screencastConnection?.stop();
+  screencastConnection = null;
 });
 </script>
 
