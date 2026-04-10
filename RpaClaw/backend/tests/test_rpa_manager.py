@@ -301,10 +301,20 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("setTimeout(function()", MANAGER_MODULE.CAPTURE_JS)
         self.assertNotIn("}, 1500);", MANAGER_MODULE.CAPTURE_JS)
 
-    def test_capture_js_tracks_active_target_state_for_fill_and_press(self):
-        self.assertIn("focusin", MANAGER_MODULE.CAPTURE_JS)
-        self.assertIn("resolveActiveTarget", MANAGER_MODULE.CAPTURE_JS)
-        self.assertIn("rememberActiveTarget", MANAGER_MODULE.CAPTURE_JS)
+    def test_capture_js_keydown_resolves_from_remembered_active_target(self):
+        js = MANAGER_MODULE.CAPTURE_JS
+        keydown_block = js.split("document.addEventListener('keydown'", 1)[1]
+        self.assertIn("var el = resolveActiveTarget();", keydown_block)
+        self.assertNotIn("var el = resolveActiveTarget(e.target);", keydown_block)
+        self.assertNotIn("var el = e.target;", keydown_block)
+
+    def test_capture_js_input_updates_remembered_active_target(self):
+        js = MANAGER_MODULE.CAPTURE_JS
+        input_block = js.split("document.addEventListener('input'", 1)[1].split(
+            "document.addEventListener('change'", 1
+        )[0]
+        self.assertIn("var el = rememberActiveTarget(e.target);", input_block)
+        self.assertNotIn("resolveActiveTarget(e.target)", input_block)
 
     async def test_register_page_bootstraps_context_recorder_once(self):
         context = _FakeContext()

@@ -638,8 +638,7 @@ CAPTURE_JS = r"""
         return _activeTarget;
     }
 
-    function resolveActiveTarget(fallbackEl) {
-        if (fallbackEl) return rememberActiveTarget(fallbackEl);
+    function resolveActiveTarget() {
         if (_activeTarget && _activeTarget.isConnected) return _activeTarget;
         if (document.activeElement && document.activeElement !== document.body) {
             return rememberActiveTarget(document.activeElement);
@@ -695,7 +694,7 @@ CAPTURE_JS = r"""
     document.addEventListener('input', function(e) {
         if (!e.isTrusted) return;
         if (window.__rpa_paused) return;
-        var el = resolveActiveTarget(e.target);
+        var el = rememberActiveTarget(e.target);
         if (!el) return;
         var isPassword = (el.tagName === 'INPUT' && el.type === 'password');
         var rawValue = (typeof el.value === 'string') ? el.value : (el.textContent || '');
@@ -727,7 +726,7 @@ CAPTURE_JS = r"""
         if (!e.isTrusted) return;
         if (window.__rpa_paused) return;
         if (e.key === 'Enter') {
-            var el = resolveActiveTarget(e.target);
+            var el = resolveActiveTarget();
             if (!el) return;
             var locatorBundle = buildLocatorBundle(el);
             emit({action:'press', locator:locatorBundle.primary,
