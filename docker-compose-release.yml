@@ -63,6 +63,9 @@ services:
       MONGODB_USER: scienceone
       MONGODB_PASSWORD: Yp51Bi1eEjC77sAt
       TASK_SERVICE_API_KEY: ${TASK_SERVICE_API_KEY:-}
+      RPA_ENGINE_MODE: ${RPA_ENGINE_MODE:-legacy}
+      RPA_ENGINE_BASE_URL: ${RPA_ENGINE_BASE_URL:-http://host.docker.internal:3310}
+      RPA_ENGINE_AUTH_TOKEN: ${RPA_ENGINE_AUTH_TOKEN:-}
     ports:
     - 12001:8000
     command: 'python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload

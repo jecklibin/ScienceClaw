@@ -216,6 +216,29 @@ http://localhost:5173
 - 沙箱容器必须运行
 - 可访问 `SANDBOX_MCP_URL`
 
+#### Node RPA Engine 妯″紡
+
+褰撻渶瑕佽褰曞埗銆佸洖鏀惧拰浠ｇ爜鐢熸垚閮界敱浠撳簱鍐呯殑 Node `rpa-engine` 鎺ユ墜鏃讹紝璇疯缃?`RPA_ENGINE_MODE=node`锛岃€屼笉鏄户缁娇鐢ㄦ棫鐨?Python 褰曞埗/鎵ц閾捐矾銆?
+
+鏈湴寮€鍙戝缓璁厛鍚姩 `rpa-engine`锛?
+
+```bash
+cd RpaClaw/rpa-engine
+npm install
+npm run dev
+```
+
+鐒跺悗鍦ㄥ悗绔幆澧冧腑鎸囧悜瀹冿細
+
+```bash
+RPA_ENGINE_MODE=node
+RPA_ENGINE_BASE_URL=http://127.0.0.1:3310
+```
+
+瀵逛簬 Docker 寮€鍙戞垨 release compose锛屽悗绔粯璁や細浣跨敤 `http://host.docker.internal:3310` 浣滀负 Node-engine 鍩哄湴鍧€锛岃繖鏍峰彲浠ヨ `rpa-engine` 杩愯鍦ㄥ涓绘満涓婏紝鑰屽悗绔繚鎸佸湪瀹瑰櫒鍐呫€?
+
+浜戠妯″紡涓嬶紝璇峰皢 `rpa-engine` 鐙珛閮ㄧ讲锛屽苟鎶?`RPA_ENGINE_BASE_URL` 鎸囧悜鍙揪鐨勬湇鍔″湴鍧€銆傚鏋滈渶瑕佸唴缃綉鍏冲仛璁よ瘉锛屽彲浠ュ悓鏃堕厤缃?`RPA_ENGINE_AUTH_TOKEN`銆?
+
 ---
 
 <a id="tools-skills"></a>

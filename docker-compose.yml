@@ -71,6 +71,9 @@ services:
       MONGODB_USER: scienceone
       MONGODB_PASSWORD: Yp51Bi1eEjC77sAt
       TASK_SERVICE_API_KEY: ${TASK_SERVICE_API_KEY:-}
+      RPA_ENGINE_MODE: ${RPA_ENGINE_MODE:-legacy}
+      RPA_ENGINE_BASE_URL: ${RPA_ENGINE_BASE_URL:-http://host.docker.internal:3310}
+      RPA_ENGINE_AUTH_TOKEN: ${RPA_ENGINE_AUTH_TOKEN:-}
       # 诊断模式：记录每步 LLM 调用的完整上下文，用于质量分析（设为空或删除此行关闭）
       DIAGNOSTIC_MODE: "1"
     ports:

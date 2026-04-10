@@ -216,6 +216,29 @@ Set `STORAGE_BACKEND=docker` in `.env`. Requires sandbox container running. RPA 
 - Sandbox container must be running
 - Access to `SANDBOX_MCP_URL`
 
+#### Node RPA Engine Mode
+
+Set `RPA_ENGINE_MODE=node` when you want recording, replay, and code generation to come from the in-repo Node `rpa-engine` instead of the legacy Python recorder/runtime.
+
+For local development:
+
+```bash
+cd RpaClaw/rpa-engine
+npm install
+npm run dev
+```
+
+Then point the backend at it:
+
+```bash
+RPA_ENGINE_MODE=node
+RPA_ENGINE_BASE_URL=http://127.0.0.1:3310
+```
+
+For Docker backend development or release compose, the default Node-engine base URL is `http://host.docker.internal:3310`, so you can keep the engine on the host machine while the backend stays in the container.
+
+For cloud mode, deploy `rpa-engine` as a separate service and set `RPA_ENGINE_BASE_URL` to its reachable URL. `RPA_ENGINE_AUTH_TOKEN` can be used when the engine is behind an internal auth gateway.
+
 ---
 
 <a id="tools-skills"></a>
