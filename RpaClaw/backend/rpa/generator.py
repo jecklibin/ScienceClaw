@@ -241,14 +241,20 @@ if __name__ == "__main__":
                 continue
 
             if action == "navigate_click":
-                # TTI-like layered waiting: commit → domcontentloaded → networkidle (best-effort)
-                lines.append(f"    async with current_page.expect_navigation(wait_until='commit', timeout={RPA_NAVIGATION_TIMEOUT_MS}):")
-                lines.append(f"        await {locator}.click()")
+                # TTI-like layered waiting with navigation verification.
+                # NOTE: avoid expect_navigation — it can capture spurious navigation events
+                # (e.g. iframe reloads, pushState) and never resolve for the real one.
+                lines.append(f"    _nav_before_url = current_page.url")
+                lines.append(f"    await {locator}.click()")
                 lines.append(f"    await current_page.wait_for_load_state('domcontentloaded', timeout={RPA_NAVIGATION_TIMEOUT_MS // 2})")
                 lines.append("    try:")
                 lines.append(f"        await current_page.wait_for_load_state('networkidle', timeout=15000)")
                 lines.append("    except Exception:")
                 lines.append("        pass  # best-effort TTI: some pages never reach networkidle")
+                # Verify navigation actually happened; retry once if URL unchanged
+                lines.append("    if current_page.url == _nav_before_url:")
+                lines.append(f"        await {locator}.click()")
+                lines.append(f"        await current_page.wait_for_load_state('domcontentloaded', timeout={RPA_NAVIGATION_TIMEOUT_MS // 2})")
             elif action == "click":
                 lines.append(f"    await {locator}.click()")
                 # After non-navigation click, wait briefly for UI changes
