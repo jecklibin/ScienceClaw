@@ -100,6 +100,19 @@ def test_get_session_returns_payload(monkeypatch):
     ]
 
 
+def test_get_session_returns_none_on_404(monkeypatch):
+    fake_client = _FakeAsyncClient(_FakeResponse(status_code=404, payload={"message": "unknown session session-1"}))
+    monkeypatch.setattr("backend.rpa.engine_client.httpx.AsyncClient", lambda *args, **kwargs: fake_client)
+    client = RPAEngineClient(base_url="http://127.0.0.1:3310", auth_token="")
+
+    response = asyncio.run(client.get_session("session-1"))
+
+    assert response is None
+    assert fake_client.calls == [
+        ("http://127.0.0.1:3310/sessions/session-1", {})
+    ]
+
+
 def test_session_control_calls_post_expected_payloads(monkeypatch):
     payload = {
         "session": {

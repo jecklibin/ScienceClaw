@@ -30,12 +30,14 @@ class RPAEngineClient:
             raise RuntimeError("rpa engine health check failed")
         return EngineHealthResponse.model_validate(response.json())
 
-    async def get_session(self, session_id: str) -> dict:
+    async def get_session(self, session_id: str) -> dict | None:
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(
                 f"{self._base_url}/sessions/{session_id}",
                 headers=self._headers,
             )
+        if response.status_code == 404:
+            return None
         if response.status_code != 200:
             raise RuntimeError("rpa engine session request failed")
         return EngineSessionEnvelope.model_validate(response.json()).model_dump()

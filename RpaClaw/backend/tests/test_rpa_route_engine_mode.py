@@ -174,6 +174,25 @@ def test_tabs_route_uses_engine_compat_mapping(monkeypatch):
     ]
 
 
+def test_get_session_route_returns_404_when_engine_session_is_missing(monkeypatch):
+    manager = RPASessionManager()
+
+    class _MissingGateway:
+        async def get_session(self, session_id: str):
+            assert session_id == "session-1"
+            return None
+
+    monkeypatch.setattr(rpa_route, "rpa_manager", manager)
+    monkeypatch.setattr(rpa_route.settings, "rpa_engine_mode", "node")
+    monkeypatch.setattr(manager, "_gateway", _MissingGateway())
+
+    client = _build_client()
+    response = client.get("/api/v1/rpa/session/session-1")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Session not found"
+
+
 def test_promote_locator_route_uses_engine_compat_step(monkeypatch):
     manager = RPASessionManager()
     gateway = _FakeGateway()

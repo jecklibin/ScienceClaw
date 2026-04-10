@@ -35,7 +35,7 @@ class RPASessionGateway:
             await self._supervisor.ensure_running()
         return await self._client.health()
 
-    async def get_session(self, session_id: str) -> dict:
+    async def get_session(self, session_id: str) -> dict | None:
         await self.ensure_engine_ready()
         return await self._client.get_session(session_id)
 
