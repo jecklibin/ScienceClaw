@@ -13,6 +13,87 @@ PlaywrightGenerator = GENERATOR_MODULE.PlaywrightGenerator
 
 
 class PlaywrightGeneratorTests(unittest.TestCase):
+    def test_generate_script_prefers_unique_nested_candidate_when_primary_locator_is_ambiguous(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "click",
+                "target": json.dumps({"method": "title", "value": ".dockerignore"}),
+                "validation": {"status": "fallback", "details": "strict matches = 2"},
+                "locator_candidates": [
+                    {
+                        "kind": "title",
+                        "score": 7,
+                        "strict_match_count": 2,
+                        "visible_match_count": 2,
+                        "selected": True,
+                        "reason": "strict matches = 2",
+                        "locator": {"method": "title", "value": ".dockerignore"},
+                    },
+                    {
+                        "kind": "nested",
+                        "score": 20,
+                        "strict_match_count": 1,
+                        "visible_match_count": 1,
+                        "selected": False,
+                        "reason": "strict unique match",
+                        "locator": {
+                            "method": "nested",
+                            "parent": {"method": "css", "value": "div[role='row']"},
+                            "child": {"method": "title", "value": ".dockerignore"},
+                        },
+                    },
+                ],
+                "description": "点击 .dockerignore 文件",
+                "tag": "A",
+                "url": "https://github.com/example/repo",
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn('locator("div[role=\'row\']").get_by_title(".dockerignore", exact=True).click()', script)
+        self.assertNotIn('await current_page.get_by_title(".dockerignore", exact=True).click()', script)
+        self.assertNotIn('.first.click()', script)
+
+    def test_generate_script_uses_first_fallback_only_when_all_candidates_are_ambiguous(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "click",
+                "target": json.dumps({"method": "title", "value": ".dockerignore"}),
+                "validation": {"status": "fallback", "details": "strict matches = 2"},
+                "locator_candidates": [
+                    {
+                        "kind": "text",
+                        "score": 6,
+                        "strict_match_count": 2,
+                        "visible_match_count": 2,
+                        "selected": False,
+                        "reason": "strict matches = 2",
+                        "locator": {"method": "text", "value": ".dockerignore"},
+                    },
+                    {
+                        "kind": "title",
+                        "score": 7,
+                        "strict_match_count": 2,
+                        "visible_match_count": 2,
+                        "selected": True,
+                        "reason": "strict matches = 2",
+                        "locator": {"method": "title", "value": ".dockerignore"},
+                    },
+                ],
+                "description": "点击 .dockerignore 文件",
+                "tag": "A",
+                "url": "https://github.com/example/repo",
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn('# Fallback: recorder candidates were ambiguous, using first matching locator', script)
+        self.assertIn('get_by_text(".dockerignore", exact=True).first.click()', script)
+
     def test_build_locator_nested_role_chains_get_by_role(self):
         generator = PlaywrightGenerator()
         target = json.dumps(

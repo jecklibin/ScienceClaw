@@ -220,8 +220,12 @@ if __name__ == "__main__":
             # Prefer adaptive collection locators for AI steps like "click the first item".
             locator = self._build_adaptive_locator_for_step(step, scope_var)
             if not locator:
-                # Parse the locator object from target (stored as JSON string)
-                locator = self._build_locator_for_page(target, scope_var)
+                locator_meta = self._resolve_replay_locator(step)
+                if locator_meta["used_first_fallback"]:
+                    lines.append("    # Fallback: recorder candidates were ambiguous, using first matching locator")
+                locator = self._build_locator_for_page(locator_meta["payload"], scope_var)
+                if locator_meta["used_first_fallback"]:
+                    locator = f"{locator}.first"
 
             if action == "open_tab_click":
                 target_tab_id = step.get("target_tab_id") or step.get("tab_id") or "tab-new"
@@ -462,6 +466,77 @@ if __name__ == "__main__":
         # css (default)
         val = self._escape(loc.get("value", "body"))
         return f'page.locator("{val}")'
+
+    def _parse_locator_payload(self, target: Any) -> Dict[str, Any]:
+        try:
+            payload = json.loads(target) if isinstance(target, str) else target
+        except (json.JSONDecodeError, TypeError):
+            payload = {"method": "css", "value": str(target or "body")}
+        if not isinstance(payload, dict):
+            return {"method": "css", "value": str(target or "body")}
+        return payload
+
+    def _resolve_replay_locator(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        primary_payload = self._parse_locator_payload(step.get("target", ""))
+        validation = step.get("validation") or {}
+        candidates = step.get("locator_candidates") or []
+
+        if validation.get("status") == "ok":
+            return {"payload": primary_payload, "used_first_fallback": False}
+
+        unique_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.get("strict_match_count") == 1 and isinstance(candidate.get("locator"), dict)
+        ]
+        if unique_candidates:
+            return {
+                "payload": self._choose_best_replay_candidate(unique_candidates).get("locator", primary_payload),
+                "used_first_fallback": False,
+            }
+
+        structured_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.get("kind") == "nested" and isinstance(candidate.get("locator"), dict)
+        ]
+        if structured_candidates:
+            return {
+                "payload": self._choose_best_replay_candidate(structured_candidates).get("locator", primary_payload),
+                "used_first_fallback": False,
+            }
+
+        ambiguous_candidates = [
+            candidate for candidate in candidates if isinstance(candidate.get("locator"), dict)
+        ]
+        if ambiguous_candidates:
+            return {
+                "payload": self._choose_best_replay_candidate(ambiguous_candidates).get("locator", primary_payload),
+                "used_first_fallback": True,
+            }
+
+        return {"payload": primary_payload, "used_first_fallback": False}
+
+    @staticmethod
+    def _choose_best_replay_candidate(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+        priority = {
+            "nested": 0,
+            "role": 1,
+            "testid": 2,
+            "label": 3,
+            "placeholder": 4,
+            "alt": 5,
+            "text": 6,
+            "title": 7,
+            "css": 8,
+        }
+        return sorted(
+            candidates,
+            key=lambda candidate: (
+                priority.get(candidate.get("kind", ""), 99),
+                candidate.get("score", 999),
+            ),
+        )[0]
 
     def _build_locator_for_page(self, target: str, page_var: str) -> str:
         locator = self._build_locator(target)
