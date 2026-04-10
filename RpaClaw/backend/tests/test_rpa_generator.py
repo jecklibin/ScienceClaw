@@ -13,6 +13,87 @@ PlaywrightGenerator = GENERATOR_MODULE.PlaywrightGenerator
 
 
 class PlaywrightGeneratorTests(unittest.TestCase):
+    def test_generate_script_prefers_unique_nested_candidate_when_primary_locator_is_ambiguous(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "click",
+                "target": json.dumps({"method": "title", "value": ".dockerignore"}),
+                "validation": {"status": "fallback", "details": "strict matches = 2"},
+                "locator_candidates": [
+                    {
+                        "kind": "title",
+                        "score": 7,
+                        "strict_match_count": 2,
+                        "visible_match_count": 2,
+                        "selected": True,
+                        "reason": "strict matches = 2",
+                        "locator": {"method": "title", "value": ".dockerignore"},
+                    },
+                    {
+                        "kind": "nested",
+                        "score": 20,
+                        "strict_match_count": 1,
+                        "visible_match_count": 1,
+                        "selected": False,
+                        "reason": "strict unique match",
+                        "locator": {
+                            "method": "nested",
+                            "parent": {"method": "css", "value": "div[role='row']"},
+                            "child": {"method": "title", "value": ".dockerignore"},
+                        },
+                    },
+                ],
+                "description": "点击 .dockerignore 文件",
+                "tag": "A",
+                "url": "https://github.com/example/repo",
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn('locator("div[role=\'row\']").get_by_title(".dockerignore", exact=True).click()', script)
+        self.assertNotIn('await current_page.get_by_title(".dockerignore", exact=True).click()', script)
+        self.assertNotIn('.first.click()', script)
+
+    def test_generate_script_uses_first_fallback_only_when_all_candidates_are_ambiguous(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "click",
+                "target": json.dumps({"method": "title", "value": ".dockerignore"}),
+                "validation": {"status": "fallback", "details": "strict matches = 2"},
+                "locator_candidates": [
+                    {
+                        "kind": "text",
+                        "score": 6,
+                        "strict_match_count": 2,
+                        "visible_match_count": 2,
+                        "selected": False,
+                        "reason": "strict matches = 2",
+                        "locator": {"method": "text", "value": ".dockerignore"},
+                    },
+                    {
+                        "kind": "title",
+                        "score": 7,
+                        "strict_match_count": 2,
+                        "visible_match_count": 2,
+                        "selected": True,
+                        "reason": "strict matches = 2",
+                        "locator": {"method": "title", "value": ".dockerignore"},
+                    },
+                ],
+                "description": "点击 .dockerignore 文件",
+                "tag": "A",
+                "url": "https://github.com/example/repo",
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn('# Fallback: recorder candidates were ambiguous, using first matching locator', script)
+        self.assertIn('get_by_text(".dockerignore", exact=True).first.click()', script)
+
     def test_build_locator_nested_role_chains_get_by_role(self):
         generator = PlaywrightGenerator()
         target = json.dumps(
@@ -141,7 +222,7 @@ class PlaywrightGeneratorTests(unittest.TestCase):
         self.assertIn("await current_page.wait_for_timeout(500)", script)
         self.assertNotIn("expect_navigation", script)
 
-    def test_generate_script_uses_expect_navigation_for_navigate_click(self):
+    def test_generate_script_waits_for_navigation_without_expect_navigation(self):
         generator = PlaywrightGenerator()
         steps = [
             {
@@ -155,8 +236,79 @@ class PlaywrightGeneratorTests(unittest.TestCase):
 
         script = generator.generate_script(steps, is_local=True)
 
-        self.assertIn("async with current_page.expect_navigation", script)
+        self.assertIn("_nav_before_url = current_page.url", script)
+        self.assertIn("await current_page.wait_for_load_state('domcontentloaded', timeout=30000)", script)
+        self.assertIn("await current_page.wait_for_load_state('networkidle', timeout=15000)", script)
         self.assertIn('await current_page.get_by_role("link", name="Search", exact=True).click()', script)
+        self.assertNotIn("expect_navigation", script)
+        compile(script, "<generated>", "exec")
+
+    def test_generate_script_waits_for_locator_visibility_before_clicking(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "click",
+                "target": json.dumps({"method": "role", "role": "link", "name": "README.md"}),
+                "description": "点击 README 文件",
+                "tag": "A",
+                "url": "https://example.com/files",
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn('await current_page.get_by_role("link", name="README.md", exact=True).wait_for(state="visible", timeout=30000)', script)
+        self.assertIn('await current_page.get_by_role("link", name="README.md", exact=True).scroll_into_view_if_needed()', script)
+        self.assertIn('await current_page.get_by_role("link", name="README.md", exact=True).click()', script)
+
+    def test_generate_script_inferrs_navigation_click_from_next_step_url_on_same_tab(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "click",
+                "target": json.dumps({"method": "role", "role": "link", "name": "README.md"}),
+                "description": "点击 README 文件",
+                "tag": "A",
+                "url": "https://example.com/files?ref=master",
+                "tab_id": "tab-1",
+            },
+            {
+                "action": "click",
+                "target": json.dumps({"method": "role", "role": "button", "name": "Raw"}),
+                "description": "点击 Raw 按钮",
+                "tag": "BUTTON",
+                "url": "https://example.com/blob/master/README.md",
+                "tab_id": "tab-1",
+            },
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn('await current_page.wait_for_url("https://example.com/blob/master/README.md", timeout=30000)', script)
+        self.assertIn('if current_page.url == _nav_before_url:', script)
+
+    def test_generate_script_uses_anchor_href_as_navigation_expectation_for_plain_click(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "click",
+                "target": json.dumps({"method": "role", "role": "link", "name": "README.md"}),
+                "description": "点击 README 文件",
+                "tag": "A",
+                "url": "https://example.com/files?ref=master",
+                "tab_id": "tab-1",
+                "element_snapshot": {
+                    "tag": "a",
+                    "href": "https://example.com/blob/master/README.md",
+                    "target_attr": "",
+                },
+            },
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn('await current_page.wait_for_url("https://example.com/blob/master/README.md", timeout=30000)', script)
+        self.assertIn('raise RuntimeError("Click did not reach expected URL: https://example.com/blob/master/README.md")', script)
 
     def test_generate_script_infers_open_tab_click_from_tab_id_change(self):
         generator = PlaywrightGenerator()

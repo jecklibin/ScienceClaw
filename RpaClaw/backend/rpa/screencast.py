@@ -10,6 +10,8 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 logger = logging.getLogger(__name__)
 
+SCREENCAST_FATAL_CLOSE_CODE = 1011
+
 
 class SessionScreencastController:
     """Streams the currently active tab and switches targets when active tab changes."""
@@ -31,6 +33,7 @@ class SessionScreencastController:
         self._last_preview_error = ""
         self._frames_sent = 0
         self._started_at = time.time()
+        self._close_sent = False
 
     async def start(self, websocket: WebSocket) -> None:
         self._ws = websocket
@@ -60,6 +63,16 @@ class SessionScreencastController:
         )
         await self._detach_current_page()
 
+    async def _fail_and_close(self, reason: str, *, code: int = SCREENCAST_FATAL_CLOSE_CODE) -> None:
+        self._running = False
+        if not self._ws or self._close_sent:
+            return
+        self._close_sent = True
+        try:
+            await self._ws.close(code=code, reason=reason[:120])
+        except Exception as exc:
+            logger.info("[Screencast] websocket close failed: %r", exc)
+
     async def _monitor_loop(self) -> None:
         while self._running:
             await self._emit_tabs_snapshot()
@@ -78,7 +91,11 @@ class SessionScreencastController:
         if not force and payload == self._tabs_snapshot_json:
             return
         self._tabs_snapshot_json = payload
-        await self._ws.send_json({"type": "tabs_snapshot", "tabs": tabs})
+        try:
+            await self._ws.send_json({"type": "tabs_snapshot", "tabs": tabs})
+        except Exception as exc:
+            logger.info("[Screencast] tabs snapshot send failed: %r", exc)
+            await self._fail_and_close("tabs snapshot send failed")
 
     async def _switch_page_if_needed(self, force: bool = False) -> None:
         next_page = self._page_provider()
@@ -162,8 +179,9 @@ class SessionScreencastController:
         self._last_preview_error = message
         try:
             await self._ws.send_json({"type": "preview_error", "message": message})
-        except Exception:
-            self._running = False
+        except Exception as exc:
+            logger.info("[Screencast] preview error send failed: %r", exc)
+            await self._fail_and_close("preview error send failed")
 
     async def _recv_loop(self) -> None:
         while self._running:
@@ -172,7 +190,8 @@ class SessionScreencastController:
             except asyncio.TimeoutError:
                 try:
                     await self._ws.send_json({"type": "ping", "ts": time.time()})
-                except Exception:
+                except Exception as exc:
+                    logger.info("[Screencast] ping send failed: %r", exc)
                     break
                 continue
 
@@ -228,8 +247,9 @@ class SessionScreencastController:
                     self._viewport_height,
                 )
             self._last_preview_error = ""
-        except Exception:
-            self._running = False
+        except Exception as exc:
+            logger.info("[Screencast] frame send failed: %r", exc)
+            await self._fail_and_close("frame send failed")
 
     async def _dispatch_mouse(self, event: Dict[str, Any]) -> None:
         if not self._cdp:

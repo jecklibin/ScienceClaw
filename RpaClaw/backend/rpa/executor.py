@@ -32,7 +32,9 @@ class ScriptExecutor:
         Playwright coroutines are scheduled on the dedicated Playwright event loop
         to avoid "Future attached to a different loop" on Windows.
         """
-        namespace: Dict[str, Any] = {}
+        namespace: Dict[str, Any] = {
+            "__rpa_log__": on_log or (lambda message: logger.info("[RPA Script] %s", message)),
+        }
         exec(compile(script, "<rpa_script>", "exec"), namespace)
 
         if "execute_skill" not in namespace:

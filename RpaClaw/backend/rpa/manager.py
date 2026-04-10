@@ -419,6 +419,8 @@ CAPTURE_JS = r"""
             role: getRole(el) || '',
             name: accessibleName(el) || '',
             text: text.substring(0, 120),
+            href: el.getAttribute('href') || '',
+            target_attr: el.getAttribute('target') || '',
             id: el.id || '',
             classes: (typeof el.className === 'string' ? el.className.trim().split(/\s+/).filter(Boolean) : []).slice(0, 6),
             type: el.getAttribute('type') || '',
