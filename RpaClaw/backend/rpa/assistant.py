@@ -878,6 +878,7 @@ class RPAAssistant:
         messages: List[Dict[str, str]],
         model_config: Optional[Dict[str, Any]],
     ) -> tuple[Dict[str, Any], str, Optional[Dict[str, Any]], str]:
+        initial_error: str | None = None
         try:
             result, resolution = await self._execute_single_engine_response(
                 snapshot,
@@ -887,7 +888,8 @@ class RPAAssistant:
             if result["success"]:
                 return result, full_response, resolution, ""
         except Exception as exc:
-            result = {"success": False, "error": str(exc), "output": ""}
+            initial_error = str(exc)
+            result = {"success": False, "error": initial_error, "output": ""}
             resolution = None
 
         retry_messages = messages + [
@@ -907,7 +909,12 @@ class RPAAssistant:
             )
             return retry_result, retry_response, retry_resolution, "\n\nExecution failed. Retrying.\n\n"
         except Exception as exc:
-            return {"success": False, "error": str(exc), "output": ""}, retry_response, None, "\n\nExecution failed. Retrying.\n\n"
+            retry_error = str(exc)
+            if initial_error and retry_error != initial_error:
+                combined_error = f"Initial execution failed: {initial_error}\nRetry failed: {retry_error}"
+            else:
+                combined_error = retry_error
+            return {"success": False, "error": combined_error, "output": ""}, retry_response, None, "\n\nExecution failed. Retrying.\n\n"
 
     async def _execute_single_engine_response(
         self,

@@ -94,10 +94,7 @@ class RPAEngineClient:
                 f"{self._base_url}/sessions/{session_id}/assistant/snapshot",
                 headers=self._headers,
             )
-        if response.status_code == 404:
-            raise RuntimeError("rpa engine session not found")
-        if response.status_code != 200:
-            raise RuntimeError("rpa engine session request failed")
+        self._raise_for_session_error(response, not_found_message="rpa engine session not found")
         return EngineAssistantSnapshotResponse.model_validate(response.json()).model_dump()
 
     async def execute_assistant_intent(self, session_id: str, intent: dict) -> dict:
@@ -107,11 +104,25 @@ class RPAEngineClient:
                 headers=self._headers,
                 json=EngineAssistantExecuteRequest(intent=intent).model_dump(),
             )
-        if response.status_code == 404:
-            raise RuntimeError("rpa engine session not found")
-        if response.status_code != 200:
-            raise RuntimeError("rpa engine session request failed")
+        self._raise_for_session_error(response, not_found_message="rpa engine session not found")
         return EngineAssistantExecuteResponse.model_validate(response.json()).model_dump()
+
+    @staticmethod
+    def _raise_for_session_error(response, *, not_found_message: str) -> None:
+        if response.status_code == 404:
+            raise RuntimeError(not_found_message)
+        if response.status_code == 200:
+            return
+        message = "rpa engine session request failed"
+        try:
+            payload = response.json()
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            detail = payload.get("message") or payload.get("detail") or payload.get("error")
+            if detail:
+                message = f"{message}: {detail}"
+        raise RuntimeError(message)
 
     async def generate_script(self, session_id: str, actions: list[dict], params: dict) -> dict:
         async with httpx.AsyncClient(timeout=30.0) as client:

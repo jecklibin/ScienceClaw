@@ -217,3 +217,17 @@ def test_execute_assistant_intent_raises_session_not_found_on_404(monkeypatch):
 
     with pytest.raises(RuntimeError, match="rpa engine session not found"):
         asyncio.run(client.execute_assistant_intent("session-1", {"action": "click"}))
+
+
+def test_execute_assistant_intent_includes_engine_error_message_on_500(monkeypatch):
+    fake_client = _FakeAsyncClient(
+        _FakeResponse(
+            status_code=500,
+            payload={"message": "locator.fill: Error: strict mode violation"},
+        )
+    )
+    monkeypatch.setattr("backend.rpa.engine_client.httpx.AsyncClient", lambda *args, **kwargs: fake_client)
+    client = RPAEngineClient(base_url="http://127.0.0.1:3310", auth_token="")
+
+    with pytest.raises(RuntimeError, match="strict mode violation"):
+        asyncio.run(client.execute_assistant_intent("session-1", {"action": "fill"}))

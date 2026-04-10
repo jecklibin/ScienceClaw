@@ -559,6 +559,45 @@ class RPAAssistantFrameAwareSnapshotTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RPAAssistantStructuredExecutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_execute_engine_with_retry_preserves_initial_and_retry_errors(self):
+        assistant = ASSISTANT_MODULE.RPAAssistant()
+        snapshot = {"url": "https://example.com", "title": "Example", "frames": []}
+        responses = iter([
+            json.dumps({"action": "fill", "target_hint": {"role": "textbox", "name": "搜索"}, "value": "中文"}, ensure_ascii=False),
+            json.dumps({"action": "fill", "target_hint": {"role": "textbox", "name": "搜索"}, "value": "中文"}, ensure_ascii=False),
+        ])
+
+        async def fake_stream(_messages, _model_config=None):
+            yield next(responses)
+
+        failures = iter([
+            RuntimeError("locator.fill: Error: strict mode violation"),
+            RuntimeError("rpa engine session request failed"),
+        ])
+
+        async def fake_single_engine_response(_snapshot, _full_response, _intent_executor):
+            raise next(failures)
+
+        async def snapshot_provider():
+            return snapshot
+
+        assistant._stream_llm = fake_stream
+        assistant._execute_single_engine_response = fake_single_engine_response
+
+        result, _final_response, _resolution, retry_notice = await assistant._execute_engine_with_retry(
+            snapshot_provider=snapshot_provider,
+            intent_executor=lambda _intent: None,
+            snapshot=snapshot,
+            full_response=json.dumps({"action": "fill"}, ensure_ascii=False),
+            messages=[],
+            model_config=None,
+        )
+
+        self.assertFalse(result["success"])
+        self.assertIn("strict mode violation", result["error"])
+        self.assertIn("rpa engine session request failed", result["error"])
+        self.assertEqual(retry_notice, "\n\nExecution failed. Retrying.\n\n")
+
     async def test_execute_structured_click_uses_frame_locator_chain(self):
         page = _FakeActionPage()
         intent = {
