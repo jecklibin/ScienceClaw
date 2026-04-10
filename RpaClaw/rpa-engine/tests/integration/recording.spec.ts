@@ -608,6 +608,19 @@ describe('PlaywrightSessionRuntimeController integration', () => {
       );
       expect(session.pages).toHaveLength(2);
       expect(session.activePageAlias).not.toBe('page');
+      expect(session.actions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'click',
+            pageAlias: 'page',
+            signals: expect.objectContaining({
+              popup: expect.objectContaining({
+                targetPageAlias: expect.any(String),
+              }),
+            }),
+          }),
+        ]),
+      );
     } finally {
       await controller.stopSession(session.id);
       await new Promise(resolve => site.close(resolve));

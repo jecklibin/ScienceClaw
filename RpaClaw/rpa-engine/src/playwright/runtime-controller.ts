@@ -647,6 +647,7 @@ export class PlaywrightSessionRuntimeController implements SessionRuntimeControl
       const openerAlias = runtime.activePageAlias ?? session.activePageAlias ?? 'page';
       const nextAlias = this.#allocatePageAlias(runtime);
       runtime.pages.set(nextAlias, page);
+      this.#annotatePopupTrigger(session, openerAlias, nextAlias);
       runtime.activePageAlias = nextAlias;
       session.activePageAlias = nextAlias;
 
@@ -659,6 +660,23 @@ export class PlaywrightSessionRuntimeController implements SessionRuntimeControl
         await this.#syncPageState(session, nextAlias, page, openerAlias);
       })();
     });
+  }
+
+  #annotatePopupTrigger(session: RuntimeSession, openerAlias: string, targetAlias: string): void {
+    for (let index = session.actions.length - 1; index >= 0; index -= 1) {
+      const action = session.actions[index] as RecordedAction;
+      if (!action || action.kind !== 'click' || action.pageAlias !== openerAlias) {
+        continue;
+      }
+      if (action.signals?.popup) {
+        return;
+      }
+      action.signals = {
+        ...action.signals,
+        popup: { targetPageAlias: targetAlias },
+      };
+      return;
+    }
   }
 
   #allocatePageAlias(runtime: RuntimeHandles): string {
