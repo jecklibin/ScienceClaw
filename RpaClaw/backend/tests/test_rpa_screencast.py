@@ -134,6 +134,30 @@ class ScreencastServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["nativeVirtualKeyCode"], 8)
         self.assertNotIn("text", payload)
 
+    async def test_dispatch_key_shifted_digit_uses_physical_key_code(self):
+        cdp = _FakeCDPSession()
+        service = SCREencAST_MODULE.ScreencastService(cdp)
+
+        await service._dispatch_key(
+            {
+                "action": "keyDown",
+                "key": "!",
+                "code": "Digit1",
+                "text": "!",
+                "modifiers": 8,
+            }
+        )
+
+        self.assertEqual(len(cdp.sent), 1)
+        method, payload = cdp.sent[0]
+        self.assertEqual(method, "Input.dispatchKeyEvent")
+        self.assertEqual(payload["type"], "keyDown")
+        self.assertEqual(payload["key"], "!")
+        self.assertEqual(payload["code"], "Digit1")
+        self.assertEqual(payload["windowsVirtualKeyCode"], 49)
+        self.assertEqual(payload["nativeVirtualKeyCode"], 49)
+        self.assertEqual(payload["text"], "!")
+
 
 if __name__ == "__main__":
     unittest.main()

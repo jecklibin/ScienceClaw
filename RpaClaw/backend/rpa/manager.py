@@ -1805,7 +1805,7 @@ class RPASessionManager:
                     insert_at = index
                     break
 
-        if step.action == "fill":
+        if step.action == "fill" and step.source == "record":
             previous_step = session.steps[insert_at - 1] if insert_at > 0 else None
             if self._is_same_fill_target(previous_step, step):
                 self._merge_fill_step(previous_step, step)
@@ -1827,6 +1827,7 @@ class RPASessionManager:
             return False
         return (
             existing_step.action == "fill"
+            and existing_step.source == incoming_step.source
             and existing_step.target == incoming_step.target
             and existing_step.frame_path == incoming_step.frame_path
             and existing_step.tab_id == incoming_step.tab_id

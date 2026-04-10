@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 _KEY_TO_VIRTUAL_KEY_CODE: Dict[str, int] = {
     "Backspace": 8,
+    "Space": 32,
     "Tab": 9,
     "Enter": 13,
     "Escape": 27,
@@ -22,16 +23,33 @@ _KEY_TO_VIRTUAL_KEY_CODE: Dict[str, int] = {
     "Delete": 46,
 }
 
+_CODE_TO_VIRTUAL_KEY_CODE: Dict[str, int] = {
+    "Space": 32,
+    "Backquote": 192,
+    "Minus": 189,
+    "Equal": 187,
+    "BracketLeft": 219,
+    "BracketRight": 221,
+    "Backslash": 220,
+    "Semicolon": 186,
+    "Quote": 222,
+    "Comma": 188,
+    "Period": 190,
+    "Slash": 191,
+}
+
 
 def _infer_virtual_key_code(key: str, code: str) -> int:
-    if key in _KEY_TO_VIRTUAL_KEY_CODE:
-        return _KEY_TO_VIRTUAL_KEY_CODE[key]
-    if len(key) == 1:
-        return ord(key.upper())
     if code.startswith("Key") and len(code) == 4:
         return ord(code[-1].upper())
     if code.startswith("Digit") and len(code) == 6 and code[-1].isdigit():
         return ord(code[-1])
+    if code in _CODE_TO_VIRTUAL_KEY_CODE:
+        return _CODE_TO_VIRTUAL_KEY_CODE[code]
+    if key in _KEY_TO_VIRTUAL_KEY_CODE:
+        return _KEY_TO_VIRTUAL_KEY_CODE[key]
+    if len(key) == 1:
+        return ord(key.upper())
     return 0
 
 

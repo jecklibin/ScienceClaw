@@ -897,6 +897,66 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.session.steps[0].value, "test")
         self.assertEqual(self.session.steps[0].frame_path, frame_path)
         self.assertEqual(self.session.steps[0].tab_id, tab_id)
+        self.assertEqual(self.session.steps[0].sequence, 44)
+        self.assertEqual(self.session.steps[0].event_timestamp_ms, 3004)
+
+    async def test_consecutive_ai_fill_steps_do_not_collapse(self):
+        step_one = await self.manager.add_step(
+            self.session.id,
+            {
+                "action": "fill",
+                "source": "ai",
+                "target": json.dumps({"method": "css", "value": "input[name='q']"}),
+                "frame_path": [],
+                "value": "te",
+                "tab_id": "tab-1",
+            },
+        )
+        step_two = await self.manager.add_step(
+            self.session.id,
+            {
+                "action": "fill",
+                "source": "ai",
+                "target": json.dumps({"method": "css", "value": "input[name='q']"}),
+                "frame_path": [],
+                "value": "test",
+                "tab_id": "tab-1",
+            },
+        )
+
+        self.assertEqual(len(self.session.steps), 2)
+        self.assertEqual([step.id for step in self.session.steps], [step_one.id, step_two.id])
+        self.assertEqual([step.value for step in self.session.steps], ["te", "test"])
+
+    async def test_record_fill_does_not_collapse_into_adjacent_ai_fill(self):
+        await self.manager.add_step(
+            self.session.id,
+            {
+                "action": "fill",
+                "source": "ai",
+                "target": json.dumps({"method": "css", "value": "input[name='q']"}),
+                "frame_path": [],
+                "value": "assistant",
+                "tab_id": "tab-1",
+            },
+        )
+
+        await self.manager._handle_event(
+            self.session.id,
+            {
+                "action": "fill",
+                "tab_id": "tab-1",
+                "tag": "INPUT",
+                "timestamp": 4001,
+                "sequence": 51,
+                "value": "user",
+                "locator": {"method": "css", "value": "input[name='q']"},
+            },
+        )
+
+        self.assertEqual(len(self.session.steps), 2)
+        self.assertEqual([step.source for step in self.session.steps], ["ai", "record"])
+        self.assertEqual([step.value for step in self.session.steps], ["assistant", "user"])
 
     async def test_register_context_page_upgrades_recent_click_to_open_tab_click(self):
         source_page = _FakePage("https://example.com", "Example")
