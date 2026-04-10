@@ -33,7 +33,10 @@ from deepagents.backends import CompositeBackend, FilesystemBackend
 from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT, DEFAULT_SUBAGENT_PROMPT
 from backend.deepagent.engine import get_llm_model
 from backend.deepagent.local_preview_backend import LocalPreviewShellBackend
-from backend.deepagent.windows_local_path_backend import WindowsLocalPathBackend
+from backend.deepagent.local_path_mode import (
+    adapt_local_backend_for_platform,
+    local_mode_uses_windows_paths,
+)
 from backend.deepagent.tools import propose_skill_save, propose_tool_save, eval_skill, grade_eval
 from backend.deepagent.full_sandbox_backend import FullSandboxBackend
 from backend.deepagent.mongo_skill_backend import MongoSkillBackend
@@ -397,12 +400,13 @@ async def deep_agent(
 
     # 1. 实例化后端：local 模式用 LocalShellBackend，云端用 FullSandboxBackend
     is_local = settings.storage_backend == "local"
+    local_windows_paths = local_mode_uses_windows_paths(settings.storage_backend)
 
     sandbox_info = None
     if is_local:
         local_workspace = os.path.join(_WORKSPACE_DIR, session_id)
         os.makedirs(local_workspace, exist_ok=True)
-        sandbox = WindowsLocalPathBackend(
+        sandbox = adapt_local_backend_for_platform(
             LocalPreviewShellBackend(
                 session_id=session_id,
                 root_dir=local_workspace,
@@ -410,7 +414,8 @@ async def deep_agent(
                 timeout=ts.sandbox_exec_timeout,
                 inherit_env=True,
                 user_id=user_id or "",
-            )
+            ),
+            storage_backend=settings.storage_backend,
         )
         sandbox_workspace = local_workspace.replace("\\", "/")
     else:
@@ -579,7 +584,7 @@ Always use `write_file` to workspace then `propose_skill_save` / `propose_tool_s
 """
     GENERAL_PURPOSE_SUBAGENT["system_prompt"] = DEFAULT_SUBAGENT_PROMPT + _subagent_policy
 
-    agent = create_rpaclaw_deep_agent(local_windows_paths=is_local, **agent_kwargs)
+    agent = create_rpaclaw_deep_agent(local_windows_paths=local_windows_paths, **agent_kwargs)
 
     GENERAL_PURPOSE_SUBAGENT["system_prompt"] = DEFAULT_SUBAGENT_PROMPT
 
@@ -622,12 +627,13 @@ async def deep_agent_eval(
     )
 
     is_local = settings.storage_backend == "local"
+    local_windows_paths = local_mode_uses_windows_paths(settings.storage_backend)
 
     sandbox_info = None
     if is_local:
         local_workspace = os.path.join(_WORKSPACE_DIR, session_id)
         os.makedirs(local_workspace, exist_ok=True)
-        sandbox = WindowsLocalPathBackend(
+        sandbox = adapt_local_backend_for_platform(
             LocalPreviewShellBackend(
                 session_id=session_id,
                 root_dir=local_workspace,
@@ -635,7 +641,8 @@ async def deep_agent_eval(
                 timeout=ts.sandbox_exec_timeout,
                 inherit_env=True,
                 user_id="eval_runner",
-            )
+            ),
+            storage_backend=settings.storage_backend,
         )
         sandbox_workspace = local_workspace.replace("\\", "/")
     else:
@@ -707,6 +714,6 @@ async def deep_agent_eval(
     if resolved_sources:
         agent_kwargs["skills"] = resolved_sources
 
-    agent = create_rpaclaw_deep_agent(local_windows_paths=is_local, **agent_kwargs)
+    agent = create_rpaclaw_deep_agent(local_windows_paths=local_windows_paths, **agent_kwargs)
     logger.info(f"[EvalAgent] session={session_id}, workspace={sandbox_workspace}, skills={resolved_sources}")
     return agent, middleware
