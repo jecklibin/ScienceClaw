@@ -1,4 +1,8 @@
+import { once } from 'node:events';
+import { AddressInfo } from 'node:net';
+import { WebSocket } from 'ws';
 import { describe, expect, it } from 'vitest';
+import { buildApp } from '../../src/app.js';
 import type { RuntimeSession } from '../../src/contracts.js';
 import { PlaywrightSessionRuntimeController } from '../../src/playwright/runtime-controller.js';
 import { createRuntimeSession } from '../../src/playwright/runtime-session.js';
@@ -78,6 +82,34 @@ class FakePage extends FakeLocator {
   private currentUrl: string;
   private currentTitle: string;
   private popupPage: FakePage | null;
+  mouse = {
+    move: async (x: number, y: number) => {
+      this.interactions.push(`mouse:move:${Math.round(x)},${Math.round(y)}`);
+    },
+    down: async (options?: { button?: string; clickCount?: number }) => {
+      this.interactions.push(`mouse:down:${options?.button ?? 'left'}:${options?.clickCount ?? 0}`);
+    },
+    up: async (options?: { button?: string; clickCount?: number }) => {
+      this.interactions.push(`mouse:up:${options?.button ?? 'left'}:${options?.clickCount ?? 0}`);
+    },
+    wheel: async (deltaX: number, deltaY: number) => {
+      this.interactions.push(`mouse:wheel:${deltaX},${deltaY}`);
+    },
+  };
+  keyboard = {
+    down: async (key: string) => {
+      this.interactions.push(`keyboard:down:${key}`);
+    },
+    up: async (key: string) => {
+      this.interactions.push(`keyboard:up:${key}`);
+    },
+    press: async (key: string) => {
+      this.interactions.push(`keyboard:press:${key}`);
+    },
+    insertText: async (text: string) => {
+      this.interactions.push(`keyboard:text:${text}`);
+    },
+  };
 
   constructor(interactions: string[], title: string, url = 'about:blank', popupPage: FakePage | null = null) {
     super(interactions);
@@ -112,6 +144,15 @@ class FakePage extends FakeLocator {
       return this.popupPage;
     }
     throw new Error(`unexpected event ${eventName}`);
+  }
+
+  async screenshot() {
+    return Buffer.from('fake-jpeg-frame');
+  }
+
+  async evaluate<T>(pageFunction: () => T) {
+    void pageFunction;
+    return { width: 1280, height: 720 } as T;
   }
 }
 
@@ -151,6 +192,36 @@ function createControllerHarness() {
     },
   });
   return { controller, interactions };
+}
+
+async function connectJsonWebSocket(url: string) {
+  const ws = new WebSocket(url);
+  const queue: unknown[] = [];
+  const waiters: Array<(message: unknown) => void> = [];
+
+  ws.on('message', payload => {
+    const message = JSON.parse(String(payload));
+    const next = waiters.shift();
+    if (next) {
+      next(message);
+      return;
+    }
+    queue.push(message);
+  });
+
+  await once(ws, 'open');
+
+  const nextMessage = async () => {
+    const queued = queue.shift();
+    if (queued !== undefined) {
+      return queued;
+    }
+    return await new Promise(resolve => {
+      waiters.push(resolve);
+    });
+  };
+
+  return { ws, nextMessage };
 }
 
 describe('PlaywrightSessionRuntimeController integration', () => {
@@ -194,5 +265,62 @@ describe('PlaywrightSessionRuntimeController integration', () => {
         expect.objectContaining({ alias: 'popup1', openerPageAlias: 'page', url: 'https://example.com/popup' }),
       ]),
     );
+  });
+
+  it('streams screencast frames and forwards input events over the engine websocket', async () => {
+    const { controller, interactions } = createControllerHarness();
+    const app = buildApp(
+      { NODE_ENV: 'test', RPA_ENGINE_HOST: '127.0.0.1', RPA_ENGINE_PORT: 0 },
+      { runtimeController: controller },
+    );
+
+    await app.listen({ host: '127.0.0.1', port: 0 });
+    const address = app.server.address() as AddressInfo;
+
+    try {
+      const createResponse = await app.inject({
+        method: 'POST',
+        url: '/sessions',
+        payload: { userId: 'u1', sandboxSessionId: 'sandbox-1' },
+      });
+      const sessionId = createResponse.json().session.id as string;
+
+      const { ws, nextMessage } = await connectJsonWebSocket(
+        `ws://127.0.0.1:${address.port}/sessions/${sessionId}/screencast`,
+      );
+
+      try {
+        const openingMessages = [
+          await nextMessage(),
+          await nextMessage(),
+          await nextMessage(),
+        ];
+        const messageTypes = openingMessages.map(message => message.type);
+
+        expect(messageTypes).toContain('tabs_snapshot');
+        expect(messageTypes).toContain('frame');
+
+        ws.send(
+          JSON.stringify({
+            type: 'mouse',
+            action: 'mousePressed',
+            x: 0.5,
+            y: 0.25,
+            button: 'left',
+            clickCount: 1,
+            modifiers: 0,
+          }),
+        );
+
+        await new Promise(resolve => setTimeout(resolve, 25));
+        expect(interactions).toContain('mouse:move:640,180');
+        expect(interactions).toContain('mouse:down:left:1');
+      } finally {
+        ws.close();
+        await once(ws, 'close');
+      }
+    } finally {
+      await app.close();
+    }
   });
 });

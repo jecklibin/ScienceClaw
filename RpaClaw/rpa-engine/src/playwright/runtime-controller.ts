@@ -21,6 +21,20 @@ type PageLike = {
   getByTitle(value: string, options?: Record<string, unknown>): LocatorLike;
   getByText(value: string, options?: Record<string, unknown>): LocatorLike;
   frameLocator(selector: string): FrameScopeLike;
+  screenshot?(options?: Record<string, unknown>): Promise<Uint8Array>;
+  evaluate?<T>(pageFunction: () => T): Promise<T>;
+  mouse?: {
+    move(x: number, y: number): Promise<unknown>;
+    down(options?: Record<string, unknown>): Promise<unknown>;
+    up(options?: Record<string, unknown>): Promise<unknown>;
+    wheel(deltaX: number, deltaY: number): Promise<unknown>;
+  };
+  keyboard?: {
+    down(key: string): Promise<unknown>;
+    up(key: string): Promise<unknown>;
+    press(key: string): Promise<unknown>;
+    insertText(text: string): Promise<unknown>;
+  };
 };
 
 type LocatorLike = {
@@ -159,6 +173,47 @@ export class PlaywrightSessionRuntimeController implements SessionRuntimeControl
     this.#runtimes.delete(sessionId);
     await runtime.context.close();
     await runtime.browser.close();
+  }
+
+  async captureFrame(session: RuntimeSession): Promise<{ data: string; metadata: { width: number; height: number } }> {
+    const runtime = this.#requireRuntime(session.id);
+    const alias = runtime.activePageAlias ?? session.activePageAlias ?? 'page';
+    const page = await this.#ensurePage(session, runtime, alias);
+    await this.#syncPageState(session, alias, page, null);
+
+    if (!page.screenshot) {
+      throw new Error('active page does not support screenshots');
+    }
+
+    const metadata = await this.#readViewport(page);
+    const screenshot = await page.screenshot({ type: 'jpeg', quality: 40 });
+    return {
+      data: Buffer.from(screenshot).toString('base64'),
+      metadata,
+    };
+  }
+
+  async dispatchInput(session: RuntimeSession, payload: Record<string, unknown>): Promise<void> {
+    const runtime = this.#requireRuntime(session.id);
+    const alias = runtime.activePageAlias ?? session.activePageAlias ?? 'page';
+    const page = await this.#ensurePage(session, runtime, alias);
+    const inputType = String(payload.type ?? '');
+
+    switch (inputType) {
+      case 'mouse':
+        await this.#dispatchMouse(page, payload);
+        break;
+      case 'wheel':
+        await this.#dispatchWheel(page, payload);
+        break;
+      case 'keyboard':
+        await this.#dispatchKeyboard(page, payload);
+        break;
+      default:
+        break;
+    }
+
+    await this.#syncPageState(session, alias, page, null);
   }
 
   async #executeAction(
@@ -321,6 +376,92 @@ export class PlaywrightSessionRuntimeController implements SessionRuntimeControl
   #buildLocator(scope: PageLike | FrameScopeLike, action: RecordedAction): LocatorLike {
     return buildLocator(scope, action.locator.locatorAst, action.locator.selector);
   }
+
+  async #dispatchMouse(page: PageLike, payload: Record<string, unknown>): Promise<void> {
+    if (!page.mouse) {
+      throw new Error('active page does not support mouse input');
+    }
+
+    const { width, height } = await this.#readViewport(page);
+    const x = clampUnitInterval(payload.x) * width;
+    const y = clampUnitInterval(payload.y) * height;
+    const action = String(payload.action ?? '');
+
+    await page.mouse.move(x, y);
+
+    if (action === 'mousePressed') {
+      await page.mouse.down({
+        button: String(payload.button ?? 'left'),
+        clickCount: Number(payload.clickCount ?? 1),
+      });
+    } else if (action === 'mouseReleased') {
+      await page.mouse.up({
+        button: String(payload.button ?? 'left'),
+        clickCount: Number(payload.clickCount ?? 1),
+      });
+    }
+  }
+
+  async #dispatchWheel(page: PageLike, payload: Record<string, unknown>): Promise<void> {
+    if (!page.mouse) {
+      throw new Error('active page does not support wheel input');
+    }
+
+    const { width, height } = await this.#readViewport(page);
+    const x = clampUnitInterval(payload.x) * width;
+    const y = clampUnitInterval(payload.y) * height;
+    await page.mouse.move(x, y);
+    await page.mouse.wheel(Number(payload.deltaX ?? 0), Number(payload.deltaY ?? 0));
+  }
+
+  async #dispatchKeyboard(page: PageLike, payload: Record<string, unknown>): Promise<void> {
+    if (!page.keyboard) {
+      throw new Error('active page does not support keyboard input');
+    }
+
+    const action = String(payload.action ?? '');
+    const key = String(payload.key ?? payload.code ?? '');
+    const text = String(payload.text ?? '');
+
+    if (action === 'keyDown') {
+      if (text) {
+        await page.keyboard.insertText(text);
+      } else {
+        await page.keyboard.down(key);
+      }
+      return;
+    }
+
+    if (action === 'keyUp') {
+      await page.keyboard.up(key);
+      return;
+    }
+
+    if (action === 'press') {
+      await page.keyboard.press(key);
+    }
+  }
+
+  async #readViewport(page: PageLike): Promise<{ width: number; height: number }> {
+    if (!page.evaluate) {
+      return { width: 1280, height: 720 };
+    }
+
+    try {
+      const viewport = await page.evaluate(() => ({
+        width: window.innerWidth || document.documentElement.clientWidth || 1280,
+        height: window.innerHeight || document.documentElement.clientHeight || 720,
+      }));
+      const width = Number(viewport?.width ?? 1280);
+      const height = Number(viewport?.height ?? 720);
+      return {
+        width: Number.isFinite(width) && width > 0 ? width : 1280,
+        height: Number.isFinite(height) && height > 0 ? height : 720,
+      };
+    } catch {
+      return { width: 1280, height: 720 };
+    }
+  }
 }
 
 function buildLocator(
@@ -422,4 +563,12 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     return value as Record<string, unknown>;
   }
   return null;
+}
+
+function clampUnitInterval(value: unknown): number {
+  const numeric = Number(value ?? 0);
+  if (!Number.isFinite(numeric)) {
+    return 0;
+  }
+  return Math.min(1, Math.max(0, numeric));
 }
