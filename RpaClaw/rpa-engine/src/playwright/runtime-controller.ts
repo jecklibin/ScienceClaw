@@ -391,6 +391,24 @@ export class PlaywrightSessionRuntimeController implements SessionRuntimeControl
     await page.goto(normalizedUrl);
     await page.waitForLoadState('domcontentloaded');
     await this.#syncPageState(session, alias, page, null);
+    this.#upsertRecordedAction(session, {
+      id: `${session.id}-action-${session.actions.length + 1}`,
+      sessionId: session.id,
+      seq: session.actions.length + 1,
+      kind: 'navigate',
+      pageAlias: alias,
+      framePath: [],
+      locator: {
+        selector: '',
+        locatorAst: { kind: 'url' },
+      },
+      locatorAlternatives: [],
+      signals: {},
+      input: { url: normalizedUrl },
+      timing: { timestamp: Date.now() },
+      snapshot: { url: normalizedUrl },
+      status: 'recorded',
+    });
   }
 
   async replay(

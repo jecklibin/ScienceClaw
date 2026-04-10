@@ -418,4 +418,25 @@ describe('PlaywrightSessionRuntimeController integration', () => {
       status: 'recorded',
     });
   });
+
+  it('records explicit session navigations as actions for backend compatibility polling', async () => {
+    const { controller } = createControllerHarness();
+    const session: RuntimeSession = createRuntimeSession({ userId: 'u1', sandboxSessionId: 'sandbox-1' });
+
+    await controller.startSession(session);
+    await controller.navigate(session, 'https://docs.example.com', 'page');
+
+    expect(session.actions).toHaveLength(1);
+    expect(session.actions[0]).toMatchObject({
+      kind: 'navigate',
+      pageAlias: 'page',
+      input: {
+        url: 'https://docs.example.com',
+      },
+      snapshot: {
+        url: 'https://docs.example.com',
+      },
+      status: 'recorded',
+    });
+  });
 });
