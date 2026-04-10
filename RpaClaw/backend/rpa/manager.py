@@ -1543,6 +1543,14 @@ class RPASessionManager:
             validation = evt.get("validation")
             status = validation.get("status") if isinstance(validation, dict) else None
             should_promote = selected_strict_count != 1 or status in {"fallback", "ambiguous", "warning", "broken"}
+            if not should_promote and isinstance(selected_candidate, dict):
+                selected_score = cls._candidate_score(selected_candidate)
+                best_score = cls._candidate_score(best_candidate)
+                selected_is_nth = cls._candidate_is_nth(selected_candidate)
+                best_is_nth = cls._candidate_is_nth(best_candidate, locator=best_locator)
+                should_promote = best_score < selected_score or (
+                    best_score == selected_score and selected_is_nth and not best_is_nth
+                )
         else:
             validation = evt.get("validation")
             status = validation.get("status") if isinstance(validation, dict) else None

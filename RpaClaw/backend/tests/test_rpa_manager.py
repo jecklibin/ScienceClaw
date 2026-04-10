@@ -299,6 +299,54 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(step.validation["status"], "ok")
         self.assertEqual(step.validation["details"], "strict unique css match")
 
+    async def test_handle_event_normalizes_stale_selected_nth_even_when_validation_ok(self):
+        page = _FakePage("https://example.com", "Example")
+        tab_id = await self.manager.register_page(self.session.id, page, make_active=True)
+
+        await self.manager._handle_event(
+            self.session.id,
+            {
+                "action": "click",
+                "tab_id": tab_id,
+                "tag": "BUTTON",
+                "timestamp": 1234567891,
+                "locator": {
+                    "method": "nth",
+                    "locator": {"method": "role", "role": "button", "name": "Save"},
+                    "index": 1,
+                },
+                "locator_candidates": [
+                    {
+                        "kind": "nth",
+                        "score": 10100,
+                        "strict_match_count": 1,
+                        "visible_match_count": 1,
+                        "selected": True,
+                        "locator": {"method": "role", "role": "button", "name": "Save"},
+                        "nth": 1,
+                        "reason": "strict nth match for current target",
+                    },
+                    {
+                        "kind": "css",
+                        "score": 520,
+                        "strict_match_count": 1,
+                        "visible_match_count": 1,
+                        "selected": False,
+                        "locator": {"method": "css", "value": "button.save"},
+                        "reason": "strict unique css match",
+                    },
+                ],
+                "validation": {"status": "ok", "details": "stale selection from older client"},
+            },
+        )
+
+        step = self.session.steps[-1]
+        self.assertEqual(json.loads(step.target), {"method": "css", "value": "button.save"})
+        self.assertFalse(step.locator_candidates[0]["selected"])
+        self.assertTrue(step.locator_candidates[1]["selected"])
+        self.assertEqual(step.validation["status"], "ok")
+        self.assertEqual(step.validation["details"], "strict unique css match")
+
     async def test_select_step_locator_candidate_promotes_target_and_selection(self):
         await self.manager.add_step(
             self.session.id,
