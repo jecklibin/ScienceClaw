@@ -59,6 +59,11 @@ type FrameScopeLike = LocatorLike;
 
 type ContextLike = {
   newPage(): Promise<PageLike>;
+  exposeBinding?(
+    name: string,
+    callback: (source: { page?: PageLike; frame?: unknown }, payload: string) => Promise<void>,
+  ): Promise<unknown>;
+  addInitScript?(script: string): Promise<unknown>;
   close(): Promise<unknown>;
 };
 
@@ -88,6 +93,259 @@ class PlaywrightDriver implements RuntimeDriver {
   }
 }
 
+const RECORDER_INIT_SCRIPT = String.raw`
+(() => {
+  if (window.__rpa_engine_recorder_installed) return;
+  window.__rpa_engine_recorder_installed = true;
+
+  const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
+  const cssEscape = value => {
+    try {
+      return CSS.escape(String(value));
+    } catch {
+      return String(value).replace(/([\\"'\\[\\](){}|^$.*+?])/g, '\\$1');
+    }
+  };
+  const roleMap = {
+    BUTTON: 'button',
+    A: 'link',
+    SELECT: 'combobox',
+    TEXTAREA: 'textbox',
+    IMG: 'img',
+  };
+
+  const getRole = element => {
+    const explicit = element.getAttribute('role');
+    if (explicit) return explicit;
+    if (element.tagName === 'INPUT') {
+      const type = (element.getAttribute('type') || 'text').toLowerCase();
+      if (type === 'checkbox') return 'checkbox';
+      if (type === 'radio') return 'radio';
+      if (type === 'submit' || type === 'button' || type === 'reset') return 'button';
+      return 'textbox';
+    }
+    return roleMap[element.tagName] || null;
+  };
+
+  const accessibleName = element => {
+    const aria = normalize(element.getAttribute('aria-label'));
+    if (aria) return aria;
+
+    const labelledBy = normalize(element.getAttribute('aria-labelledby'));
+    if (labelledBy) {
+      const labels = labelledBy
+        .split(/\s+/)
+        .map(id => document.getElementById(id))
+        .filter(Boolean)
+        .map(node => normalize(node.textContent))
+        .filter(Boolean);
+      if (labels.length) return labels.join(' ').slice(0, 80);
+    }
+
+    if (['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName)) {
+      if (element.id) {
+        const label = document.querySelector('label[for="' + cssEscape(element.id) + '"]');
+        if (label) return normalize(label.textContent).slice(0, 80);
+      }
+      const parentLabel = element.closest('label');
+      if (parentLabel) return normalize(parentLabel.textContent).slice(0, 80);
+    }
+
+    return normalize(element.textContent).slice(0, 80);
+  };
+
+  const retarget = element => {
+    if (!(element instanceof Element)) return null;
+    let current = element;
+    while (current && current !== document.body) {
+      if (['BUTTON', 'A', 'INPUT', 'TEXTAREA', 'SELECT', 'OPTION', 'LABEL'].includes(current.tagName)) {
+        return current;
+      }
+      const role = current.getAttribute('role');
+      if (role && ['button', 'link', 'checkbox', 'radio', 'tab', 'menuitem', 'option', 'switch', 'combobox'].includes(role)) {
+        return current;
+      }
+      current = current.parentElement;
+    }
+    return element;
+  };
+
+  const locatorFromElement = element => {
+    const role = getRole(element);
+    const name = accessibleName(element);
+    if (role && name) {
+      return {
+        method: 'role',
+        role,
+        name,
+        selector: 'internal:role=' + role + '[name="' + name.replace(/"/g, '\\"') + '"]',
+      };
+    }
+
+    const testId = element.getAttribute('data-testid') || element.getAttribute('data-test-id');
+    if (testId) {
+      return {
+        method: 'testId',
+        value: testId,
+        selector: '[data-testid="' + cssEscape(testId) + '"]',
+      };
+    }
+
+    const placeholder = normalize(element.getAttribute('placeholder'));
+    if (placeholder) {
+      return {
+        method: 'placeholder',
+        value: placeholder,
+        selector: '[placeholder="' + cssEscape(placeholder) + '"]',
+      };
+    }
+
+    if (element.id) {
+      return {
+        method: 'css',
+        value: '#' + cssEscape(element.id),
+        selector: '#' + cssEscape(element.id),
+      };
+    }
+
+    const nameAttr = normalize(element.getAttribute('name'));
+    if (nameAttr) {
+      const selector = element.tagName.toLowerCase() + '[name="' + cssEscape(nameAttr) + '"]';
+      return {
+        method: 'css',
+        value: selector,
+        selector,
+      };
+    }
+
+    const selector = element.tagName.toLowerCase();
+    return {
+      method: 'css',
+      value: selector,
+      selector,
+    };
+  };
+
+  const buildCandidates = locator => [{
+    kind: locator.method,
+    score: 100,
+    strict_match_count: 1,
+    visible_match_count: 1,
+    selected: true,
+    locator,
+    reason: 'selected generated locator',
+  }];
+
+  const snapshotFromElement = element => ({
+    tag: element.tagName.toLowerCase(),
+    role: getRole(element) || '',
+    name: accessibleName(element),
+    text: normalize(element.textContent).slice(0, 120),
+    id: element.id || '',
+    title: normalize(element.getAttribute('title')),
+    placeholder: normalize(element.getAttribute('placeholder')),
+    url: location.href,
+  });
+
+  const emit = payload => {
+    try {
+      window.__rpa_emit(JSON.stringify(payload));
+    } catch {
+      // ignore recorder transport failures inside the page
+    }
+  };
+
+  document.addEventListener('click', event => {
+    const target = retarget(event.target);
+    if (!target) return;
+    const locator = locatorFromElement(target);
+    emit({
+      action: 'click',
+      locator,
+      locator_candidates: buildCandidates(locator),
+      validation: { status: 'ok' },
+      frame_path: [],
+      signals: {},
+      element_snapshot: snapshotFromElement(target),
+      timestamp: Date.now(),
+    });
+  }, true);
+
+  document.addEventListener('input', event => {
+    const target = retarget(event.target);
+    if (!target) return;
+    if (!('value' in target)) return;
+    const locator = locatorFromElement(target);
+    emit({
+      action: 'fill',
+      locator,
+      locator_candidates: buildCandidates(locator),
+      validation: { status: 'ok' },
+      frame_path: [],
+      signals: {},
+      element_snapshot: snapshotFromElement(target),
+      value: target.value,
+      timestamp: Date.now(),
+    });
+  }, true);
+
+  document.addEventListener('change', event => {
+    const target = retarget(event.target);
+    if (!target) return;
+    const locator = locatorFromElement(target);
+
+    if (target instanceof HTMLSelectElement) {
+      emit({
+        action: 'selectOption',
+        locator,
+        locator_candidates: buildCandidates(locator),
+        validation: { status: 'ok' },
+        frame_path: [],
+        signals: {},
+        element_snapshot: snapshotFromElement(target),
+        value: target.value,
+        timestamp: Date.now(),
+      });
+      return;
+    }
+
+    if (target instanceof HTMLInputElement && (target.type === 'checkbox' || target.type === 'radio')) {
+      emit({
+        action: target.checked ? 'check' : 'uncheck',
+        locator,
+        locator_candidates: buildCandidates(locator),
+        validation: { status: 'ok' },
+        frame_path: [],
+        signals: {},
+        element_snapshot: snapshotFromElement(target),
+        value: String(target.checked),
+        timestamp: Date.now(),
+      });
+    }
+  }, true);
+
+  document.addEventListener('keydown', event => {
+    if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      return;
+    }
+    const target = retarget(event.target);
+    if (!target) return;
+    const locator = locatorFromElement(target);
+    emit({
+      action: 'press',
+      locator,
+      locator_candidates: buildCandidates(locator),
+      validation: { status: 'ok' },
+      frame_path: [],
+      signals: {},
+      element_snapshot: snapshotFromElement(target),
+      value: event.key,
+      timestamp: Date.now(),
+    });
+  }, true);
+})();
+`;
+
 export class PlaywrightSessionRuntimeController implements SessionRuntimeController {
   #driver: RuntimeDriver;
   #runtimes = new Map<string, RuntimeHandles>();
@@ -100,13 +358,15 @@ export class PlaywrightSessionRuntimeController implements SessionRuntimeControl
     await this.stopSession(session.id);
     const browser = await this.#driver.launchBrowser();
     const context = await browser.newContext({ noViewport: true, acceptDownloads: true });
-    const page = await context.newPage();
     const runtime: RuntimeHandles = {
       browser,
       context,
-      pages: new Map([['page', page]]),
+      pages: new Map(),
       activePageAlias: 'page',
     };
+    await this.#configureRecorder(session, runtime);
+    const page = await context.newPage();
+    runtime.pages.set('page', page);
     this.#runtimes.set(session.id, runtime);
     session.activePageAlias = 'page';
     await this.#syncPageState(session, 'page', page, null);
@@ -462,6 +722,258 @@ export class PlaywrightSessionRuntimeController implements SessionRuntimeControl
       return { width: 1280, height: 720 };
     }
   }
+
+  async #configureRecorder(session: RuntimeSession, runtime: RuntimeHandles): Promise<void> {
+    if (!runtime.context.exposeBinding || !runtime.context.addInitScript) {
+      return;
+    }
+
+    await runtime.context.exposeBinding('__rpa_emit', async (source, payload) => {
+      let event: Record<string, unknown>;
+      try {
+        event = JSON.parse(payload) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+
+      const sourcePage = source.page;
+      const pageAlias = this.#resolvePageAlias(runtime, sourcePage) ?? runtime.activePageAlias ?? 'page';
+      if (sourcePage && !runtime.pages.has(pageAlias)) {
+        runtime.pages.set(pageAlias, sourcePage);
+      }
+
+      const framePath = await this.#buildFramePath(source.frame);
+      const action = this.#eventToRecordedAction(session, event, pageAlias, framePath);
+      if (!action) {
+        return;
+      }
+
+      this.#upsertRecordedAction(session, action);
+    });
+
+    await runtime.context.addInitScript(RECORDER_INIT_SCRIPT);
+  }
+
+  #resolvePageAlias(runtime: RuntimeHandles, page: PageLike | undefined): string | null {
+    if (!page) {
+      return null;
+    }
+
+    for (const [alias, candidate] of runtime.pages.entries()) {
+      if (candidate === page) {
+        return alias;
+      }
+    }
+
+    return null;
+  }
+
+  async #buildFramePath(frame: unknown): Promise<string[]> {
+    if (!frame || typeof frame !== 'object') {
+      return [];
+    }
+
+    const path: string[] = [];
+    let currentFrame: any = frame;
+    while (currentFrame) {
+      let frameElement: any;
+      try {
+        frameElement = await currentFrame.frameElement?.();
+      } catch {
+        break;
+      }
+
+      if (!frameElement) {
+        break;
+      }
+
+      const selector = await this.#describeFrameSelector(frameElement);
+      if (!selector) {
+        break;
+      }
+
+      path.push(selector);
+      currentFrame = currentFrame.parentFrame?.();
+    }
+
+    path.reverse();
+    return path;
+  }
+
+  async #describeFrameSelector(frameElement: any): Promise<string | null> {
+    try {
+      const tagName = String(await frameElement.evaluate?.((element: Element) => element.tagName.toLowerCase()));
+      const name = await frameElement.getAttribute?.('name');
+      if (name) {
+        return `${tagName}[name="${escapeSelectorValue(name)}"]`;
+      }
+
+      const title = await frameElement.getAttribute?.('title');
+      if (title) {
+        return `${tagName}[title="${escapeSelectorValue(title)}"]`;
+      }
+
+      const id = await frameElement.getAttribute?.('id');
+      if (id) {
+        return `${tagName}#${escapeSelectorValue(id)}`;
+      }
+
+      return tagName;
+    } catch {
+      return null;
+    }
+  }
+
+  #eventToRecordedAction(
+    session: RuntimeSession,
+    event: Record<string, unknown>,
+    pageAlias: string,
+    framePath: string[],
+  ): RecordedAction | null {
+    const kind = mapEventActionToKind(event.action);
+    if (!kind) {
+      return null;
+    }
+
+    const locator = this.#coerceLocatorDescriptor(event.locator);
+    const locatorAlternatives = this.#coerceLocatorAlternatives(event.locator_candidates, locator);
+    const snapshot = asRecord(event.element_snapshot) ?? {};
+    const input = this.#buildActionInput(kind, event);
+
+    return {
+      id: `${session.id}-action-${session.actions.length + 1}`,
+      sessionId: session.id,
+      seq: session.actions.length + 1,
+      kind,
+      pageAlias,
+      framePath,
+      locator,
+      locatorAlternatives,
+      signals: asRecord(event.signals) ?? {},
+      input,
+      timing: {
+        timestamp: Number(event.timestamp ?? Date.now()),
+      },
+      snapshot,
+      status: 'recorded',
+    };
+  }
+
+  #coerceLocatorDescriptor(value: unknown): { selector: string; locatorAst: Record<string, unknown> } {
+    const locator = asRecord(value) ?? {};
+    const method = String(locator.method ?? locator.kind ?? 'css');
+    const selector = String(locator.selector ?? locator.value ?? '');
+
+    if (method === 'role') {
+      return {
+        selector,
+        locatorAst: {
+          kind: 'role',
+          role: locator.role ?? 'button',
+          name: locator.name ?? '',
+        },
+      };
+    }
+
+    if (method === 'testId' || method === 'testid') {
+      return {
+        selector,
+        locatorAst: {
+          kind: 'testId',
+          value: locator.value ?? '',
+        },
+      };
+    }
+
+    if (method === 'label' || method === 'placeholder' || method === 'alt' || method === 'title' || method === 'text') {
+      return {
+        selector,
+        locatorAst: {
+          kind: method,
+          value: locator.value ?? locator.name ?? '',
+        },
+      };
+    }
+
+    return {
+      selector,
+      locatorAst: {
+        kind: 'css',
+        value: locator.value ?? selector,
+      },
+    };
+  }
+
+  #coerceLocatorAlternatives(
+    value: unknown,
+    fallbackLocator: { selector: string; locatorAst: Record<string, unknown> },
+  ): Array<{
+    selector: string;
+    locatorAst: Record<string, unknown>;
+    score: number;
+    matchCount: number;
+    visibleMatchCount: number;
+    isSelected: boolean;
+    engine: 'playwright';
+    reason: string;
+  }> {
+    if (!Array.isArray(value) || value.length === 0) {
+      return [{
+        ...fallbackLocator,
+        score: 100,
+        matchCount: 1,
+        visibleMatchCount: 1,
+        isSelected: true,
+        engine: 'playwright',
+        reason: 'selected generated locator',
+      }];
+    }
+
+    return value.map(candidate => {
+      const payload = asRecord(candidate) ?? {};
+      const locator = this.#coerceLocatorDescriptor(payload.locator);
+      return {
+        selector: locator.selector,
+        locatorAst: locator.locatorAst,
+        score: Number(payload.score ?? 100),
+        matchCount: Number(payload.strict_match_count ?? 1),
+        visibleMatchCount: Number(payload.visible_match_count ?? 1),
+        isSelected: Boolean(payload.selected),
+        engine: 'playwright',
+        reason: String(payload.reason ?? ''),
+      };
+    });
+  }
+
+  #buildActionInput(kind: RecordedAction['kind'], event: Record<string, unknown>): Record<string, unknown> {
+    if (kind === 'fill' || kind === 'selectOption' || kind === 'press') {
+      return {
+        value: event.value ?? '',
+        ...(kind === 'press' ? { key: event.value ?? '' } : {}),
+      };
+    }
+
+    return {};
+  }
+
+  #upsertRecordedAction(session: RuntimeSession, action: RecordedAction): void {
+    const lastAction = session.actions.at(-1) as RecordedAction | undefined;
+    if (
+      lastAction
+      && action.kind === 'fill'
+      && lastAction.kind === 'fill'
+      && lastAction.pageAlias === action.pageAlias
+      && lastAction.locator.selector === action.locator.selector
+      && JSON.stringify(lastAction.framePath) === JSON.stringify(action.framePath)
+    ) {
+      lastAction.input = action.input;
+      lastAction.snapshot = action.snapshot;
+      lastAction.timing = action.timing;
+      return;
+    }
+
+    session.actions.push(action);
+  }
 }
 
 function buildLocator(
@@ -571,4 +1083,29 @@ function clampUnitInterval(value: unknown): number {
     return 0;
   }
   return Math.min(1, Math.max(0, numeric));
+}
+
+function mapEventActionToKind(value: unknown): RecordedAction['kind'] | null {
+  switch (String(value ?? '')) {
+    case 'click':
+      return 'click';
+    case 'fill':
+      return 'fill';
+    case 'press':
+      return 'press';
+    case 'selectOption':
+      return 'selectOption';
+    case 'check':
+      return 'check';
+    case 'uncheck':
+      return 'uncheck';
+    case 'navigate':
+      return 'navigate';
+    default:
+      return null;
+  }
+}
+
+function escapeSelectorValue(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }

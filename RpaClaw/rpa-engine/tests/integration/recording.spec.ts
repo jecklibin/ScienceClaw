@@ -157,6 +157,9 @@ class FakePage extends FakeLocator {
 }
 
 class FakeContext {
+  bindings = new Map<string, (source: unknown, payload: string) => Promise<void>>();
+  initScripts: string[] = [];
+
   constructor(private readonly pages: FakePage[]) {}
 
   async newPage() {
@@ -168,6 +171,26 @@ class FakeContext {
   }
 
   async close() {}
+
+  async exposeBinding(name: string, callback: (source: unknown, payload: string) => Promise<void>) {
+    this.bindings.set(name, callback);
+  }
+
+  async addInitScript(script: string) {
+    this.initScripts.push(script);
+  }
+
+  async emitBinding(
+    name: string,
+    source: { page: FakePage | null; frame: unknown | null },
+    payload: Record<string, unknown>,
+  ) {
+    const callback = this.bindings.get(name);
+    if (!callback) {
+      throw new Error(`binding ${name} not found`);
+    }
+    await callback(source, JSON.stringify(payload));
+  }
 }
 
 class FakeBrowser {
@@ -191,7 +214,7 @@ function createControllerHarness() {
       return browser;
     },
   });
-  return { controller, interactions };
+  return { controller, interactions, context, rootPage };
 }
 
 async function connectJsonWebSocket(url: string) {
@@ -322,5 +345,77 @@ describe('PlaywrightSessionRuntimeController integration', () => {
     } finally {
       await app.close();
     }
+  });
+
+  it('records browser events into session actions through the context recorder bridge', async () => {
+    const { controller, context, rootPage } = createControllerHarness();
+    const session: RuntimeSession = createRuntimeSession({ userId: 'u1', sandboxSessionId: 'sandbox-1' });
+
+    await controller.startSession(session);
+
+    await context.emitBinding(
+      '__rpa_emit',
+      { page: rootPage, frame: null },
+      {
+        action: 'click',
+        locator: {
+          method: 'role',
+          role: 'button',
+          name: 'Save',
+          selector: 'internal:role=button[name="Save"]',
+        },
+        locator_candidates: [
+          {
+            kind: 'role',
+            score: 100,
+            strict_match_count: 1,
+            visible_match_count: 1,
+            selected: true,
+            locator: {
+              method: 'role',
+              role: 'button',
+              name: 'Save',
+              selector: 'internal:role=button[name="Save"]',
+            },
+            reason: 'strict unique match',
+          },
+        ],
+        validation: { status: 'ok' },
+        frame_path: [],
+        signals: {},
+        element_snapshot: {
+          tag: 'button',
+          role: 'button',
+          name: 'Save',
+          text: 'Save',
+          url: 'https://example.com/editor',
+        },
+        value: '',
+        timestamp: 1000,
+      },
+    );
+
+    expect(session.actions).toHaveLength(1);
+    expect(session.actions[0]).toMatchObject({
+      kind: 'click',
+      pageAlias: 'page',
+      framePath: [],
+      locator: {
+        selector: 'internal:role=button[name="Save"]',
+      },
+      locatorAlternatives: [
+        expect.objectContaining({
+          selector: 'internal:role=button[name="Save"]',
+          isSelected: true,
+        }),
+      ],
+      snapshot: expect.objectContaining({
+        tag: 'button',
+        role: 'button',
+        name: 'Save',
+        url: 'https://example.com/editor',
+      }),
+      status: 'recorded',
+    });
   });
 });
