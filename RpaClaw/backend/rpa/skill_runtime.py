@@ -32,8 +32,8 @@ class SkillRuntime:
         model_config: Optional[Dict[str, Any]] = None,
         page_provider: Optional[Callable[[], Optional[Any]]] = None,
     ) -> Dict[str, Any]:
-        kind = str(step.get("kind") or "script").lower()
-        if kind == "agent":
+        step_type = str(step.get("type") or step.get("kind") or "script").lower()
+        if step_type == "agent":
             if not self._agent_executor:
                 raise ValueError("agent_executor is required for agent steps")
             return await self._agent_executor(step, page)

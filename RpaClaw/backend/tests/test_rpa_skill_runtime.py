@@ -35,7 +35,7 @@ class _AgentExecutor:
 
 class SkillRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_script_failure_triggers_recovery_and_retries_same_step(self):
-        step = {"kind": "script", "description": "Click submit"}
+        step = {"type": "script", "description": "Click submit"}
         page = object()
         script_executor = _StepExecutor(
             [
@@ -60,7 +60,7 @@ class SkillRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recovery_agent.calls[0]["failing_step"], step)
 
     async def test_validation_failure_runs_recovery_before_retry(self):
-        step = {"kind": "script", "description": "Click submit"}
+        step = {"type": "script", "description": "Click submit"}
         page = object()
         script_executor = _StepExecutor(
             [
@@ -88,7 +88,7 @@ class SkillRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recovery_agent.calls[0]["error"], "validation failed")
 
     async def test_agent_step_uses_agent_executor_without_recovery(self):
-        step = {"kind": "agent", "description": "Complete the task"}
+        step = {"type": "agent", "description": "Complete the task"}
         page = object()
         agent_executor = _AgentExecutor({"success": True, "step": {"action": "agent_done"}})
         recovery_agent = _RecoveryAgent({"success": True, "step": {"action": "recover"}})
@@ -102,6 +102,17 @@ class SkillRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["success"])
         self.assertEqual(agent_executor.calls, [(step, page)])
         self.assertEqual(recovery_agent.calls, [])
+
+    async def test_kind_falls_back_when_type_is_missing(self):
+        step = {"kind": "agent", "description": "Complete the task"}
+        page = object()
+        agent_executor = _AgentExecutor({"success": True, "step": {"action": "agent_done"}})
+        runtime = SkillRuntime(agent_executor=agent_executor)
+
+        result = await runtime.run_step(step=step, page=page, existing_steps=[])
+
+        self.assertTrue(result["success"])
+        self.assertEqual(agent_executor.calls, [(step, page)])
 
 
 if __name__ == "__main__":
