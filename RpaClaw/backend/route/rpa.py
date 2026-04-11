@@ -19,6 +19,7 @@ from backend.rpa.skill_exporter import SkillExporter
 from backend.rpa.assistant import RPAAssistant, RPAReActAgent, _active_agents
 from backend.rpa.cdp_connector import get_cdp_connector
 from backend.rpa.screencast import SessionScreencastController
+from backend.rpa.recording_orchestrator import RecordingOrchestrator
 from backend.user.dependencies import get_current_user, User
 from backend.config import settings
 from backend.storage import get_repository
@@ -34,6 +35,10 @@ generator = PlaywrightGenerator()
 executor = ScriptExecutor()
 exporter = SkillExporter()
 assistant = RPAAssistant()
+recording_orchestrator = RecordingOrchestrator(
+    assistant=assistant,
+    rpa_manager=rpa_manager,
+)
 
 
 class StartSessionRequest(BaseModel):
@@ -540,7 +545,7 @@ async def chat_with_assistant(
                     _active_agents.pop(session_id, None)
                     raise
             else:
-                async for event in assistant.chat(
+                async for event in recording_orchestrator.run(
                     session_id=session_id,
                     page=page,
                     message=request.message,
@@ -550,8 +555,6 @@ async def chat_with_assistant(
                 ):
                     evt_type = event.get("event", "message")
                     evt_data = event.get("data", {})
-                    if evt_type == "result" and evt_data.get("success") and evt_data.get("step"):
-                        await rpa_manager.add_step(session_id, evt_data["step"])
                     yield {
                         "event": evt_type,
                         "data": json.dumps(evt_data, ensure_ascii=False),
