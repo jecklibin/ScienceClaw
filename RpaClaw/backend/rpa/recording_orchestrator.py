@@ -15,6 +15,32 @@ class RecordingOrchestrator:
         self.rpa_manager = rpa_manager
         self.validator = validator or StepValidator()
 
+    def _build_fallback_step(
+        self,
+        *,
+        message: str,
+        result: Dict[str, Any],
+        code: Optional[str],
+        candidate: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        if not result.get("success"):
+            return None
+        if result.get("step"):
+            return result["step"]
+
+        executable_code = code or candidate.get("code")
+        if not executable_code:
+            return None
+
+        body = self.assistant._extract_function_body(executable_code)
+        return {
+            "action": "ai_script",
+            "source": "ai",
+            "value": body,
+            "description": message,
+            "prompt": message,
+        }
+
     async def run(
         self,
         session_id: str,
@@ -61,10 +87,18 @@ class RecordingOrchestrator:
         history.append({"role": "assistant", "content": raw_response})
         self.assistant._trim_history(session_id)
 
-        validation = self.validator.validate_recording_step(candidate, result)
-        step_data = result.get("step")
-        overall_success = bool(result.get("success") and validation["valid"])
-        result_error = result.get("error")
+        step_data = self._build_fallback_step(
+            message=message,
+            result=result,
+            code=code,
+            candidate=candidate,
+        )
+        normalized_result = dict(result)
+        normalized_result["step"] = step_data
+
+        validation = self.validator.validate_recording_step(candidate, normalized_result)
+        overall_success = bool(normalized_result.get("success") and validation["valid"])
+        result_error = normalized_result.get("error")
 
         if validation["valid"]:
             if overall_success and step_data:
@@ -80,7 +114,7 @@ class RecordingOrchestrator:
                 "success": overall_success,
                 "error": result_error,
                 "step": step_data if overall_success else None,
-                "output": result.get("output"),
+                "output": normalized_result.get("output"),
                 "validation": validation,
                 "code": code,
             },
