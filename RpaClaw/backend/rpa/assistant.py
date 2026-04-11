@@ -13,6 +13,7 @@ from backend.rpa.assistant_runtime import (
     resolve_structured_intent,
     resolve_collection_target,
 )
+from backend.rpa.step_classifier import classify_candidate_step
 
 # Active ReAct agent instances keyed by session_id
 _active_agents: Dict[str, "RPAReActAgent"] = {}
@@ -572,6 +573,44 @@ class RPAAssistant:
         max_msgs = max_rounds * 2
         if len(hist) > max_msgs:
             self._histories[session_id] = hist[-max_msgs:]
+
+    async def generate_candidate_step(
+        self,
+        session_id: str,
+        page: Page,
+        message: str,
+        steps: List[Dict[str, Any]],
+        model_config: Optional[Dict[str, Any]] = None,
+        page_provider: Optional[Callable[[], Optional[Page]]] = None,
+    ) -> Dict[str, Any]:
+        current_page = page_provider() if page_provider else page
+        if current_page is None:
+            raise ValueError("No active page available")
+
+        snapshot = await build_page_snapshot(current_page, build_frame_path_from_frame)
+        history = self._get_history(session_id)
+        messages = self._build_messages(message, steps, snapshot, history)
+
+        full_response = ""
+        async for chunk_text in self._stream_llm(messages, model_config):
+            full_response += chunk_text
+
+        structured_intent = self._extract_structured_intent(full_response)
+        code = self._extract_code(full_response) if not structured_intent else None
+        step_type = classify_candidate_step(
+            prompt=message,
+            structured_intent=structured_intent,
+            code=code,
+        )
+
+        return {
+            "raw_response": full_response,
+            "structured_intent": structured_intent,
+            "code": code,
+            "snapshot": snapshot,
+            "messages": messages,
+            "step_type": step_type,
+        }
 
     async def chat(
         self,
