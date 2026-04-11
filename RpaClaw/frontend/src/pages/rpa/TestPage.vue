@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
+  AlertTriangle,
   ArrowLeft,
   CheckCircle,
   Code,
@@ -68,6 +69,23 @@ const saving = ref(false);
 const saved = ref(false);
 const showScript = ref(false);
 const error = ref<string | null>(null);
+
+interface LocatorCandidate {
+  kind: string;
+  score: number;
+  strict_match_count: number;
+  visible_match_count: number;
+  selected: boolean;
+  locator: Record<string, any>;
+  playwright_locator?: string;
+  original_index?: number;
+}
+
+const failedStepIndex = ref<number | null>(null);
+const failedStepCandidates = ref<LocatorCandidate[]>([]);
+const failedStepError = ref('');
+const triedCandidateIndices = ref<Set<number>>(new Set());
+const retryingWithCandidate = ref(false);
 
 const parseLocator = (raw: unknown) => {
   if (!raw) return null;
@@ -229,6 +247,9 @@ const runTest = async () => {
   testSuccess.value = false;
   error.value = null;
   testLogs.value = ['正在生成并执行 Playwright 脚本...'];
+  failedStepIndex.value = null;
+  failedStepCandidates.value = [];
+  failedStepError.value = '';
 
   try {
     const testPromise = apiClient.post(
@@ -246,6 +267,13 @@ const runTest = async () => {
     testLogs.value = resp.data.logs || [];
     generatedScript.value = resp.data.script || '';
     testSuccess.value = result.success !== false;
+    const newFailedIndex = resp.data.failed_step_index ?? null;
+    if (newFailedIndex !== failedStepIndex.value) {
+      triedCandidateIndices.value = new Set();
+    }
+    failedStepIndex.value = newFailedIndex;
+    failedStepCandidates.value = resp.data.failed_step_candidates || [];
+    failedStepError.value = result.error || '';
     testDone.value = true;
   } catch (err: any) {
     testLogs.value.push(`错误: ${err.response?.data?.detail || err.message}`);
@@ -255,6 +283,41 @@ const runTest = async () => {
     testing.value = false;
   }
 };
+
+const retryWithCandidate = async (candidateIndex: number) => {
+  if (retryingWithCandidate.value || failedStepIndex.value === null) return;
+  retryingWithCandidate.value = true;
+
+  try {
+    const candidate = failedStepCandidates.value[candidateIndex];
+    const originalIndex = candidate.original_index ?? candidateIndex;
+    await apiClient.post(
+      `/rpa/session/${sessionId.value}/step/${failedStepIndex.value}/locator`,
+      { candidate_index: originalIndex },
+    );
+
+    triedCandidateIndices.value.add(candidateIndex);
+    await loadSessionDiagnostics();
+
+    failedStepIndex.value = null;
+    failedStepCandidates.value = [];
+    failedStepError.value = '';
+    await runTest();
+  } catch (err: any) {
+    error.value = `切换定位器失败: ${err.response?.data?.detail || err.message}`;
+  } finally {
+    retryingWithCandidate.value = false;
+  }
+};
+
+watch(failedStepIndex, (index) => {
+  if (index !== null) {
+    nextTick(() => {
+      const el = document.querySelector(`[data-step-index="${index}"]`);
+      el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+  }
+});
 
 const goBackToConfigure = () => {
   router.push(`/rpa/configure?sessionId=${sessionId.value}`);
@@ -361,7 +424,13 @@ onBeforeUnmount(() => {
           <div
             v-for="(step, index) in recordedSteps"
             :key="step.id || index"
-            class="rounded-xl border-l-4 border-gray-200 bg-white p-4 shadow-sm"
+            :data-step-index="index"
+            class="rounded-xl border-l-4 bg-white p-4 shadow-sm"
+            :class="[
+              failedStepIndex === index
+                ? 'border-red-500 ring-2 ring-red-100'
+                : 'border-gray-200'
+            ]"
           >
             <div class="mb-1 flex items-center justify-between gap-3">
               <span class="text-[10px] font-bold text-gray-400">
@@ -392,6 +461,65 @@ onBeforeUnmount(() => {
               <span class="font-semibold text-gray-600">Details:</span>
               <span class="ml-1">{{ step.validation.details }}</span>
             </p>
+
+            <div v-if="failedStepIndex === index" class="mt-3 space-y-3">
+              <div class="rounded-lg bg-red-50 p-2.5 text-[11px] text-red-700">
+                <p class="font-semibold flex items-center gap-1">
+                  <AlertTriangle :size="12" />
+                  执行失败
+                </p>
+                <p class="mt-1 break-all">{{ failedStepError }}</p>
+              </div>
+
+              <div v-if="failedStepCandidates.length > 0">
+                <p class="text-[11px] font-semibold text-gray-700">
+                  尝试其他定位器：
+                </p>
+                <div class="mt-2 space-y-1.5">
+                  <button
+                    v-for="(candidate, cIdx) in failedStepCandidates"
+                    :key="cIdx"
+                    class="w-full rounded-lg border p-2 text-left text-[11px] transition-colors"
+                    :class="[
+                      triedCandidateIndices.has(cIdx)
+                        ? 'border-gray-200 bg-gray-50 opacity-60'
+                        : 'border-purple-200 hover:bg-purple-50 hover:border-purple-400'
+                    ]"
+                    :disabled="retryingWithCandidate"
+                    @click="retryWithCandidate(cIdx)"
+                  >
+                    <div class="flex items-center justify-between">
+                      <span class="font-mono font-medium text-gray-900 truncate">
+                        {{ candidate.kind }}: {{ candidate.playwright_locator || formatLocator(candidate.locator) }}
+                      </span>
+                      <span
+                        v-if="cIdx === 0 && !triedCandidateIndices.has(cIdx)"
+                        class="flex-shrink-0 rounded-full bg-purple-100 px-1.5 py-0.5 text-[9px] font-bold text-purple-700"
+                      >
+                        推荐
+                      </span>
+                      <span
+                        v-if="triedCandidateIndices.has(cIdx)"
+                        class="flex-shrink-0 rounded-full bg-gray-200 px-1.5 py-0.5 text-[9px] font-bold text-gray-500"
+                      >
+                        已尝试
+                      </span>
+                    </div>
+                    <div class="mt-1 flex gap-3 text-gray-500">
+                      <span>score: {{ candidate.score }}</span>
+                      <span :class="candidate.strict_match_count === 1 ? 'text-green-600' : 'text-amber-600'">
+                        match: {{ candidate.strict_match_count }}
+                        {{ candidate.strict_match_count === 1 ? '\u2713' : '\u26A0' }}
+                      </span>
+                    </div>
+                  </button>
+                </div>
+              </div>
+
+              <div v-else class="rounded-lg bg-amber-50 p-2.5 text-[11px] text-amber-700">
+                此步骤无候选定位器可切换，建议返回重新录制。
+              </div>
+            </div>
           </div>
 
           <div
@@ -521,6 +649,12 @@ onBeforeUnmount(() => {
               class="text-xs leading-relaxed text-green-700"
             >
               脚本已成功执行，可以保存为技能或重新执行验证。
+            </p>
+            <p
+              v-if="testDone && !testSuccess && failedStepIndex !== null && failedStepCandidates.length > 0"
+              class="text-xs leading-relaxed text-red-700"
+            >
+              步骤 {{ (failedStepIndex ?? 0) + 1 }} 执行失败，左侧已展示候选定位器，请选择一个后自动重试。
             </p>
             <p
               v-else-if="testDone && !testSuccess"
