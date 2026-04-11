@@ -1197,11 +1197,16 @@ class RPASessionManager:
         if context_key in bridged_context_ids:
             return
 
+        def _binding_source_get(source: Any, key: str) -> Any:
+            if isinstance(source, dict):
+                return source.get(key)
+            return getattr(source, key, None)
+
         async def rpa_emit(source, event_json: str):
             try:
                 evt = json.loads(event_json)
-                source_page = getattr(source, "page", None)
-                source_frame = getattr(source, "frame", None)
+                source_page = _binding_source_get(source, "page")
+                source_frame = _binding_source_get(source, "frame")
                 resolved_tab_id = self._page_tab_ids.get(session_id, {}).get(id(source_page))
                 if not resolved_tab_id:
                     session = self.sessions.get(session_id)
