@@ -1,7 +1,20 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, computed } from 'vue';
-import { useRouter, useRoute } from 'vue-router';
-import { Play, Save, CheckCircle, XCircle, Loader2, Terminal, Code, ArrowLeft, RotateCcw, House, FolderOpen, Globe } from 'lucide-vue-next';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
+import {
+  ArrowLeft,
+  CheckCircle,
+  Code,
+  FolderOpen,
+  Globe,
+  House,
+  Loader2,
+  Play,
+  RotateCcw,
+  Save,
+  Terminal,
+  XCircle,
+} from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
 import { getBackendWsUrl } from '@/utils/sandbox';
 import {
@@ -25,6 +38,7 @@ const params = computed(() => {
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 let screencastWs: WebSocket | null = null;
+
 interface BrowserTab {
   tab_id: string;
   title: string;
@@ -33,6 +47,7 @@ interface BrowserTab {
   status: string;
   active: boolean;
 }
+
 const tabs = ref<BrowserTab[]>([]);
 const activeTabId = ref<string | null>(null);
 const previewUrl = computed(() => {
@@ -75,6 +90,11 @@ const formatLocator = (raw: unknown): string => {
   if (locator.method === 'nested') {
     return `${formatLocator(locator.parent)} >> ${formatLocator(locator.child)}`;
   }
+  if (locator.method === 'nth') {
+    const baseLocator = locator.locator || locator.base;
+    const prefix = baseLocator ? `${formatLocator(baseLocator)} >> ` : '';
+    return `${prefix}nth=${locator.index}`;
+  }
   if (locator.method === 'css') return locator.value || 'css';
   return `${locator.method || 'locator'}:${locator.value || locator.name || ''}`;
 };
@@ -82,6 +102,32 @@ const formatLocator = (raw: unknown): string => {
 const formatFramePath = (framePath?: string[]) => {
   if (!framePath?.length) return 'Main frame';
   return framePath.join(' -> ');
+};
+
+const VALIDATION_LABELS: Record<string, string> = {
+  ok: 'Strict match',
+  ambiguous: 'Ambiguous / not unique',
+  fallback: 'Fallback',
+  warning: 'Warning',
+  broken: 'Broken',
+};
+
+const VALIDATION_CLASS_MAP: Record<string, string> = {
+  ok: 'bg-emerald-100 text-emerald-700',
+  ambiguous: 'bg-amber-100 text-amber-700',
+  fallback: 'bg-amber-100 text-amber-700',
+  warning: 'bg-amber-100 text-amber-700',
+  broken: 'bg-rose-100 text-rose-700',
+};
+
+const getValidationLabel = (status?: string) => {
+  if (!status) return 'Unknown';
+  return VALIDATION_LABELS[status] || status.replace(/_/g, ' ');
+};
+
+const getValidationClass = (status?: string) => {
+  if (!status) return 'bg-gray-100 text-gray-700';
+  return VALIDATION_CLASS_MAP[status] || 'bg-gray-100 text-gray-700';
 };
 
 const loadSessionDiagnostics = async () => {
@@ -114,18 +160,23 @@ const drawFrame = (base64Data: string, metadata: ScreencastFrameMetadata) => {
 };
 
 const connectScreencast = (sid: string) => {
+  if (screencastWs) {
+    screencastWs.close();
+    screencastWs = null;
+  }
+
   const wsUrl = getBackendWsUrl(`/rpa/screencast/${sid}`);
   console.log('[TestPage] Connecting screencast:', wsUrl);
   screencastWs = new WebSocket(wsUrl);
 
   screencastWs.onopen = () => {
     console.log('[TestPage] Screencast connected');
+    error.value = null;
   };
 
   screencastWs.onmessage = (ev) => {
     try {
       const msg = JSON.parse(ev.data);
-      console.log('[TestPage] Screencast message:', msg.type);
       if (msg.type === 'frame') {
         error.value = null;
         drawFrame(msg.data, msg.metadata);
@@ -134,22 +185,22 @@ const connectScreencast = (sid: string) => {
         const active = tabs.value.find((tab) => tab.active);
         activeTabId.value = active?.tab_id || null;
       } else if (msg.type === 'preview_error') {
-        error.value = msg.message || 'Preview switch failed';
+        error.value = msg.message || '预览切换失败';
       }
-    } catch (e) {
-      console.error('[TestPage] Parse error:', e);
+    } catch (parseError) {
+      console.error('[TestPage] Parse error:', parseError);
     }
   };
 
-  screencastWs.onerror = (e) => {
-    console.error('[TestPage] Screencast error:', e);
-    error.value = '无法连接测试画面流，请检查后端 screencast WebSocket/代理配置。';
+  screencastWs.onerror = (event) => {
+    console.error('[TestPage] Screencast error:', event);
+    error.value = '无法连接测试画面流，请检查后端 screencast WebSocket 或代理配置。';
   };
 
-  screencastWs.onclose = (e) => {
-    console.log('[TestPage] Screencast closed:', e.code, e.reason);
+  screencastWs.onclose = (event) => {
+    console.log('[TestPage] Screencast closed:', event.code, event.reason);
     if (!error.value) {
-      error.value = `测试画面流已断开（code=${e.code}${e.reason ? `, reason=${e.reason}` : ''}）`;
+      error.value = `测试画面流已断开（code=${event.code}${event.reason ? `, reason=${event.reason}` : ''}）`;
     }
     screencastWs = null;
   };
@@ -172,24 +223,24 @@ const runTest = async () => {
     error.value = '缺少 sessionId';
     return;
   }
+
   testing.value = true;
   testDone.value = false;
+  testSuccess.value = false;
+  error.value = null;
   testLogs.value = ['正在生成并执行 Playwright 脚本...'];
 
   try {
-    // Start test execution (non-blocking)
-    const testPromise = apiClient.post(`/rpa/session/${sessionId.value}/test`, {
-      params: params.value,
-    }, {
-      timeout: TEST_REQUEST_TIMEOUT_MS,
-    });
+    const testPromise = apiClient.post(
+      `/rpa/session/${sessionId.value}/test`,
+      { params: params.value },
+      { timeout: TEST_REQUEST_TIMEOUT_MS },
+    );
 
-    // Connect screencast after a short delay to let backend create page
-    await new Promise(resolve => setTimeout(resolve, 500));
+    await new Promise((resolve) => setTimeout(resolve, 500));
     connectScreencast(sessionId.value);
 
     const resp = await testPromise;
-
     const result = resp.data.result || {};
     testOutput.value = result.output || '';
     testLogs.value = resp.data.logs || [];
@@ -240,7 +291,7 @@ const saveSkill = async () => {
       }, 2000);
     }
   } catch (err: any) {
-    error.value = '保存失败: ' + (err.response?.data?.detail || err.message);
+    error.value = `保存失败: ${err.response?.data?.detail || err.message}`;
   } finally {
     saving.value = false;
   }
@@ -260,214 +311,301 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="h-screen flex flex-col bg-[#f5f6f7] overflow-hidden">
-    <!-- Header -->
-    <header class="h-14 bg-white border-b border-gray-200 flex items-center px-6 gap-3 flex-shrink-0">
+  <div class="flex h-screen flex-col overflow-hidden bg-[#f5f6f7]">
+    <header class="flex h-14 flex-shrink-0 items-center gap-3 border-b border-gray-200 bg-white px-6">
       <button
+        class="flex items-center gap-1 text-gray-500 transition-colors hover:text-gray-700"
         @click="goBackToConfigure"
-        class="flex items-center gap-1 text-gray-500 hover:text-gray-700 transition-colors"
       >
         <ArrowLeft :size="18" />
       </button>
       <Play class="text-[#831bd7]" :size="22" />
-      <h1 class="text-gray-900 font-extrabold text-lg">测试技能</h1>
-      <span class="text-sm text-gray-500 truncate max-w-48">{{ skillName }}</span>
-      <div class="flex-1"></div>
+      <h1 class="text-lg font-extrabold text-gray-900">测试技能</h1>
+      <span class="max-w-48 truncate text-sm text-gray-500">{{ skillName }}</span>
+      <div class="flex-1" />
 
       <button
+        class="flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 transition-colors hover:bg-gray-50 hover:text-gray-900"
         @click="goToHome"
-        class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:text-gray-900 hover:bg-gray-50 transition-colors text-sm"
       >
         <House :size="15" />
         返回首页
       </button>
       <button
+        class="flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 transition-colors hover:bg-gray-50 hover:text-gray-900"
         @click="goToSkills"
-        class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:text-gray-900 hover:bg-gray-50 transition-colors text-sm"
       >
         <FolderOpen :size="15" />
         技能库
       </button>
 
-      <div v-if="saved" class="flex items-center gap-2 text-green-600 font-bold text-sm">
+      <div
+        v-if="saved"
+        class="flex items-center gap-2 text-sm font-bold text-green-600"
+      >
         <CheckCircle :size="18" />
         技能已保存，正在跳转...
       </div>
     </header>
 
-    <!-- Main content: VNC left + sidebar right -->
-    <div class="flex-1 flex min-h-0">
-      <!-- Left: VNC viewport (fills available space like RecorderPage) -->
-      <main class="flex-1 p-6 flex flex-col min-w-0">
-        <div class="flex-1 bg-[#1e1e1e] rounded-2xl shadow-2xl relative overflow-hidden flex flex-col border border-gray-800">
-          <div class="h-11 bg-[#cfd3d8] flex items-end px-3 gap-2 flex-shrink-0 overflow-x-auto">
+    <div class="flex min-h-0 flex-1">
+      <aside class="flex w-[300px] flex-col overflow-y-auto border-r border-gray-200 bg-[#eff1f2] p-5">
+        <div class="mb-6 flex items-center justify-between">
+          <h2 class="text-lg font-extrabold text-gray-900">录制步骤</h2>
+          <span class="rounded-md bg-[#c384ff]/20 px-2 py-1 text-[10px] font-bold text-[#831bd7]">
+            {{ recordedSteps.length }} 步
+          </span>
+        </div>
+
+        <div class="space-y-4">
+          <div
+            v-for="(step, index) in recordedSteps"
+            :key="step.id || index"
+            class="rounded-xl border-l-4 border-gray-200 bg-white p-4 shadow-sm"
+          >
+            <div class="mb-1 flex items-center justify-between gap-3">
+              <span class="text-[10px] font-bold text-gray-400">
+                步骤 {{ String(index + 1).padStart(2, '0') }}
+              </span>
+              <span
+                class="rounded-full px-1.5 py-0.5 text-[10px] font-semibold"
+                :class="getValidationClass(step.validation?.status)"
+              >
+                {{ getValidationLabel(step.validation?.status) }}
+              </span>
+            </div>
+            <h3 class="text-sm font-semibold text-gray-900">
+              {{ step.description || step.action }}
+            </h3>
+            <p class="mt-2 break-all text-[11px] text-gray-500">
+              <span class="font-semibold text-gray-600">Locator:</span>
+              <span class="ml-1 font-mono">{{ formatLocator(step.target) }}</span>
+            </p>
+            <p class="mt-1 break-all text-[11px] text-gray-500">
+              <span class="font-semibold text-gray-600">Frame:</span>
+              <span class="ml-1 font-mono">{{ formatFramePath(step.frame_path) }}</span>
+            </p>
+            <p
+              v-if="step.validation?.details"
+              class="mt-1 break-all text-[11px] text-gray-500"
+            >
+              <span class="font-semibold text-gray-600">Details:</span>
+              <span class="ml-1">{{ step.validation.details }}</span>
+            </p>
+          </div>
+
+          <div
+            v-if="!recordedSteps.length"
+            class="flex flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed border-gray-300 py-8 opacity-60"
+          >
+            <div class="animate-spin text-[#831bd7]">
+              <Loader2 :size="20" />
+            </div>
+            <p class="text-xs font-medium text-gray-500">等待录制步骤加载...</p>
+          </div>
+        </div>
+      </aside>
+
+      <main class="flex min-w-0 flex-1 flex-col bg-[#f5f6f7] px-5 py-4">
+        <div class="relative flex flex-1 flex-col overflow-hidden rounded-2xl border border-gray-800 bg-[#1e1e1e] shadow-2xl">
+          <div class="flex h-9 flex-shrink-0 items-end gap-2 overflow-x-auto bg-[#cfd3d8] px-3">
             <button
               v-for="tab in tabs"
               :key="tab.tab_id"
+              class="h-7 max-w-[220px] min-w-[120px] truncate rounded-t-xl border border-b-0 px-3 text-[11px] transition-colors"
+              :class="
+                tab.active
+                  ? 'border-gray-300 bg-[#f5f6f7] text-gray-900'
+                  : 'border-transparent bg-white/60 text-gray-600 hover:bg-white/80'
+              "
               type="button"
               @click="activateTab(tab.tab_id)"
-              class="max-w-[220px] min-w-[120px] h-8 px-3 rounded-t-xl text-[11px] border border-b-0 transition-colors truncate"
-              :class="tab.active ? 'bg-[#f5f6f7] text-gray-900 border-gray-300' : 'bg-white/60 text-gray-600 border-transparent hover:bg-white/80'"
             >
               {{ tab.title || tab.url || 'New Tab' }}
             </button>
           </div>
-          <div class="h-10 bg-[#dadddf] flex items-center px-4 gap-2 flex-shrink-0">
+
+          <div class="flex h-9 flex-shrink-0 items-center gap-2 border-t border-white/40 bg-[#dadddf] px-3">
             <div class="flex gap-1.5">
-              <div class="w-2.5 h-2.5 rounded-full bg-red-400"></div>
-              <div class="w-2.5 h-2.5 rounded-full bg-yellow-400"></div>
-              <div class="w-2.5 h-2.5 rounded-full bg-green-400"></div>
+              <div class="h-2.5 w-2.5 rounded-full bg-red-400" />
+              <div class="h-2.5 w-2.5 rounded-full bg-yellow-400" />
+              <div class="h-2.5 w-2.5 rounded-full bg-green-400" />
             </div>
-            <div class="flex-1 bg-white rounded-md h-6 mx-4 flex items-center px-2 shadow-inner border border-transparent">
-              <Globe class="text-gray-400 flex-shrink-0" :size="12" />
+            <div class="mx-3 flex h-5 flex-1 items-center rounded-md border border-transparent bg-white px-2 shadow-inner">
+              <Globe class="flex-shrink-0 text-gray-400" :size="12" />
               <input
                 :value="previewUrl"
-                class="flex-1 bg-transparent text-[10px] text-gray-700 ml-2 outline-none"
+                class="ml-2 flex-1 bg-transparent text-[10px] text-gray-700 outline-none"
                 readonly
-                type="text"
                 spellcheck="false"
+                type="text"
               />
             </div>
           </div>
-          <div class="flex-1 relative bg-black overflow-hidden">
+
+          <div class="relative flex-1 overflow-hidden bg-black">
             <canvas
               ref="canvasRef"
-              class="w-full h-full object-contain"
+              class="h-full w-full object-contain"
             />
-            <div v-if="error" class="absolute top-4 right-4 max-w-xs bg-red-500/90 text-white text-[11px] px-3 py-2 rounded-lg shadow-lg">
+
+            <div
+              v-if="error"
+              class="absolute right-4 top-4 max-w-xs rounded-lg bg-red-500/90 px-3 py-2 text-[11px] text-white shadow-lg"
+            >
               {{ error }}
+            </div>
+
+            <div
+              v-if="sessionId"
+              class="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-full border border-white/20 bg-white/10 px-3 py-1.5 backdrop-blur-md"
+            >
+              <Loader2
+                v-if="testing"
+                class="animate-spin text-[#831bd7]"
+                :size="14"
+              />
+              <Play
+                v-else
+                class="text-emerald-400"
+                :size="14"
+              />
+              <span class="text-[10px] font-bold uppercase tracking-wider text-white">
+                {{ testing ? '测试执行中' : '测试回放预览' }}
+              </span>
             </div>
           </div>
         </div>
       </main>
 
-      <!-- Right: Status & Logs sidebar -->
-      <aside class="w-[360px] flex-shrink-0 border-l border-gray-200 bg-white flex flex-col overflow-hidden">
-        <div class="flex-1 overflow-y-auto p-5 space-y-5">
-          <!-- Status card -->
-          <div class="rounded-xl p-5 border"
+      <aside class="flex w-[320px] flex-shrink-0 flex-col overflow-hidden border-l border-gray-200 bg-white shadow-[-10px_0_40px_-10px_rgba(0,0,0,0.03)]">
+        <div class="flex-1 space-y-4 overflow-y-auto p-4">
+          <div
+            class="rounded-xl border p-4"
             :class="[
-              testing ? 'bg-purple-50 border-purple-200' :
-              testDone && testSuccess ? 'bg-green-50 border-green-200' :
-              testDone && !testSuccess ? 'bg-red-50 border-red-200' :
-              'bg-gray-50 border-gray-200'
+              testing
+                ? 'border-purple-200 bg-purple-50'
+                : testDone && testSuccess
+                  ? 'border-green-200 bg-green-50'
+                  : testDone && !testSuccess
+                    ? 'border-red-200 bg-red-50'
+                    : 'border-gray-200 bg-gray-50',
             ]"
           >
-            <div class="flex items-center gap-3 mb-3">
-              <Loader2 v-if="testing" class="text-[#831bd7] animate-spin" :size="20" />
-              <CheckCircle v-else-if="testDone && testSuccess" class="text-green-500" :size="20" />
-              <XCircle v-else-if="testDone && !testSuccess" class="text-red-500" :size="20" />
-              <div class="w-5 h-5 rounded-full bg-gray-300" v-else></div>
-              <h2 class="text-gray-900 font-bold text-base">
+            <div class="mb-3 flex items-center gap-3">
+              <Loader2
+                v-if="testing"
+                class="animate-spin text-[#831bd7]"
+                :size="20"
+              />
+              <CheckCircle
+                v-else-if="testDone && testSuccess"
+                class="text-green-500"
+                :size="20"
+              />
+              <XCircle
+                v-else-if="testDone && !testSuccess"
+                class="text-red-500"
+                :size="20"
+              />
+              <div
+                v-else
+                class="h-5 w-5 rounded-full bg-gray-300"
+              />
+              <h2 class="text-base font-bold text-gray-900">
                 {{ testing ? '正在执行...' : testDone ? (testSuccess ? '执行成功' : '执行失败') : '准备测试' }}
               </h2>
             </div>
-            <p v-if="testDone && testSuccess" class="text-green-700 text-xs leading-relaxed">
+            <p
+              v-if="testDone && testSuccess"
+              class="text-xs leading-relaxed text-green-700"
+            >
               脚本已成功执行，可以保存为技能或重新执行验证。
             </p>
-            <p v-else-if="testDone && !testSuccess" class="text-red-700 text-xs leading-relaxed">
+            <p
+              v-else-if="testDone && !testSuccess"
+              class="text-xs leading-relaxed text-red-700"
+            >
               执行过程中出现错误，请查看日志后重新执行或返回修改。
             </p>
           </div>
 
-          <!-- Action buttons — always visible after test completes -->
-          <div v-if="testDone && !saved" class="flex flex-col gap-2.5">
+          <div
+            v-if="testDone && !saved"
+            class="flex flex-col gap-2.5"
+          >
             <button
-              @click="runTest"
+              class="flex w-full items-center justify-center gap-2 rounded-xl border border-gray-300 bg-white px-4 py-2.5 text-sm font-medium transition-colors hover:bg-gray-50 disabled:opacity-50"
               :disabled="testing"
-              class="flex items-center justify-center gap-2 w-full bg-white border border-gray-300 px-4 py-2.5 rounded-xl text-sm font-medium hover:bg-gray-50 transition-colors disabled:opacity-50"
+              @click="runTest"
             >
               <RotateCcw :size="15" />
               重新执行
             </button>
             <button
-              @click="saveSkill"
+              class="flex w-full items-center justify-center gap-2 rounded-xl bg-[#831bd7] px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-[#7018b8] disabled:opacity-50"
               :disabled="saving"
-              class="flex items-center justify-center gap-2 w-full bg-[#831bd7] text-white px-4 py-2.5 rounded-xl text-sm font-bold hover:bg-[#7018b8] transition-colors disabled:opacity-50"
+              @click="saveSkill"
             >
               <Save :size="15" />
               {{ saving ? '保存中...' : '保存技能' }}
             </button>
             <button
+              class="flex w-full items-center justify-center gap-2 py-1.5 text-xs font-medium text-gray-500 transition-colors hover:text-gray-700"
               @click="goBackToRecorder"
-              class="flex items-center justify-center gap-2 w-full text-gray-500 hover:text-gray-700 text-xs font-medium py-1.5 transition-colors"
             >
               重新录制
             </button>
           </div>
 
-          <!-- Error -->
-          <div v-if="error" class="bg-red-50 border border-red-200 rounded-xl p-3">
-            <p class="text-red-600 text-xs">{{ error }}</p>
+          <div
+            v-if="error"
+            class="rounded-xl border border-red-200 bg-red-50 p-3"
+          >
+            <p class="text-xs text-red-600">{{ error }}</p>
           </div>
 
-          <!-- Logs -->
           <div>
-            <h3 class="text-gray-900 font-bold text-sm mb-2 flex items-center gap-1.5">
-              <Terminal :size="14" class="text-gray-500" />
+            <h3 class="mb-2 flex items-center gap-1.5 text-sm font-bold text-gray-900">
+              <Terminal class="text-gray-500" :size="14" />
               执行日志
             </h3>
-            <div class="bg-gray-900 rounded-lg p-3 max-h-52 overflow-y-auto">
+            <div class="max-h-60 overflow-y-auto rounded-lg bg-gray-900 p-3">
               <div
                 v-for="(log, idx) in testLogs"
                 :key="idx"
-                class="text-[11px] font-mono text-green-400 leading-relaxed"
+                class="font-mono text-[11px] leading-relaxed text-green-400"
               >
-                <span class="text-gray-600 mr-1.5">{{ String(idx + 1).padStart(2, '0') }}</span>
+                <span class="mr-1.5 text-gray-600">{{ String(idx + 1).padStart(2, '0') }}</span>
                 {{ log }}
               </div>
-              <div v-if="testOutput" class="text-[11px] font-mono text-gray-400 mt-2 border-t border-gray-700 pt-2">
+              <div
+                v-if="testOutput"
+                class="mt-2 border-t border-gray-700 pt-2 font-mono text-[11px] text-gray-400"
+              >
                 {{ testOutput }}
               </div>
-              <div v-if="!testLogs.length && !testOutput" class="text-[11px] font-mono text-gray-600">
+              <div
+                v-if="!testLogs.length && !testOutput"
+                class="font-mono text-[11px] text-gray-600"
+              >
                 等待执行...
               </div>
             </div>
           </div>
 
-          <div v-if="recordedSteps.length">
-            <h3 class="text-gray-900 font-bold text-sm mb-2">录制诊断</h3>
-            <div class="space-y-2 max-h-64 overflow-y-auto pr-1">
-              <div
-                v-for="(step, index) in recordedSteps"
-                :key="step.id || index"
-                class="rounded-xl border border-gray-200 bg-gray-50 p-3"
-              >
-                <div class="flex items-center gap-2 flex-wrap">
-                  <span class="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Step {{ index + 1 }}</span>
-                  <span class="text-[10px] font-semibold px-2 py-0.5 rounded-full"
-                    :class="step.validation?.status === 'ok' ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'"
-                  >
-                    {{ step.validation?.status || 'unknown' }}
-                  </span>
-                </div>
-                <p class="mt-2 text-xs text-gray-700">{{ step.description || step.action }}</p>
-                <p class="mt-2 text-[11px] text-gray-500 break-all">
-                  <span class="font-semibold text-gray-600">Locator:</span>
-                  <span class="font-mono ml-1">{{ formatLocator(step.target) }}</span>
-                </p>
-                <p class="mt-1 text-[11px] text-gray-500 break-all">
-                  <span class="font-semibold text-gray-600">Frame:</span>
-                  <span class="font-mono ml-1">{{ formatFramePath(step.frame_path) }}</span>
-                </p>
-                <p v-if="step.validation?.details" class="mt-1 text-[11px] text-gray-500 break-all">
-                  <span class="font-semibold text-gray-600">Details:</span>
-                  <span class="ml-1">{{ step.validation.details }}</span>
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <!-- Generated Script (collapsible) -->
           <div v-if="generatedScript">
             <button
+              class="mb-2 flex items-center gap-1.5 text-sm font-bold text-gray-900 transition-colors hover:text-[#831bd7]"
               @click="showScript = !showScript"
-              class="text-gray-900 font-bold text-sm mb-2 flex items-center gap-1.5 hover:text-[#831bd7] transition-colors"
             >
-              <Code :size="14" class="text-gray-500" />
+              <Code class="text-gray-500" :size="14" />
               {{ showScript ? '收起脚本' : '查看脚本' }}
             </button>
-            <pre v-if="showScript" class="bg-gray-900 text-green-400 p-3 rounded-lg text-[11px] overflow-x-auto max-h-64 overflow-y-auto"><code>{{ generatedScript }}</code></pre>
+            <pre
+              v-if="showScript"
+              class="max-h-64 overflow-x-auto overflow-y-auto rounded-lg bg-gray-900 p-3 text-[11px] text-green-400"
+            ><code>{{ generatedScript }}</code></pre>
           </div>
         </div>
       </aside>
