@@ -110,7 +110,16 @@ if __name__ == "__main__":
     asyncio.run(main())
 '''
 
-    def generate_script(self, steps: List[Dict[str, Any]], params: Dict[str, Any] = None, is_local: bool = False) -> str:
+    TEST_MODE_PREAMBLE = '''\
+
+class StepExecutionError(Exception):
+    def __init__(self, step_index: int, original_error: str = ""):
+        self.step_index = step_index
+        self.original_error = original_error
+        super().__init__(f"Step {{step_index}} failed: {{original_error}}")
+'''
+
+    def generate_script(self, steps: List[Dict[str, Any]], params: Dict[str, Any] = None, is_local: bool = False, test_mode: bool = False) -> str:
         params = params or {}
         deduped = self._deduplicate_steps(steps)
         deduped = self._infer_missing_tab_transitions(deduped)
@@ -140,13 +149,15 @@ if __name__ == "__main__":
                 lines.append("")
                 prev_url = first_url
 
-        for step_index, step in enumerate(deduped, 1):
+        for step_index, step in enumerate(deduped):
             action = step.get("action", "")
             target = step.get("target", "")
             value = step.get("value", "")
             url = step.get("url", "")
             desc = step.get("description", "")
             frame_path = step.get("frame_path") or []
+
+            step_lines: List[str] = []
 
             if desc:
                 lines.append(f"    # {desc}")
@@ -159,23 +170,26 @@ if __name__ == "__main__":
                     converted = self._inject_result_capture(converted)
                     converted = self._strip_locator_result_capture(converted)
                     for code_line in converted.split("\n"):
-                        lines.append(f"    {code_line}" if code_line.strip() else "")
+                        step_lines.append(f"    {code_line}" if code_line.strip() else "")
+                lines.extend(self._wrap_step_lines(step_lines, step_index, test_mode))
                 lines.append("")
                 continue
 
             # Navigation
             if action == "navigate" or (action == "goto" and url):
-                lines.append(f'    await current_page.goto("{url}")')
-                lines.append('    await current_page.wait_for_load_state("domcontentloaded")')
+                step_lines.append(f'    await current_page.goto("{url}")')
+                step_lines.append('    await current_page.wait_for_load_state("domcontentloaded")')
                 prev_url = url
                 prev_action = "navigate"
+                lines.extend(self._wrap_step_lines(step_lines, step_index, test_mode))
                 lines.append("")
                 continue
 
             if action == "switch_tab":
                 target_tab_id = step.get("target_tab_id") or step.get("tab_id") or root_tab_id
-                lines.append(f'    current_page = tabs["{target_tab_id}"]')
-                lines.append("    await current_page.bring_to_front()")
+                step_lines.append(f'    current_page = tabs["{target_tab_id}"]')
+                step_lines.append("    await current_page.bring_to_front()")
+                lines.extend(self._wrap_step_lines(step_lines, step_index, test_mode))
                 lines.append("")
                 current_tab_id = target_tab_id
                 prev_action = action
@@ -185,17 +199,18 @@ if __name__ == "__main__":
                 closing_tab_id = step.get("tab_id") or step.get("source_tab_id")
                 fallback_tab_id = step.get("target_tab_id")
                 if closing_tab_id:
-                    lines.append(f'    closing_page = tabs.pop("{closing_tab_id}", current_page)')
+                    step_lines.append(f'    closing_page = tabs.pop("{closing_tab_id}", current_page)')
                 else:
-                    lines.append("    closing_page = current_page")
-                lines.append("    await closing_page.close()")
+                    step_lines.append("    closing_page = current_page")
+                step_lines.append("    await closing_page.close()")
                 if closing_tab_id == current_tab_id:
                     if fallback_tab_id:
-                        lines.append(f'    current_page = tabs["{fallback_tab_id}"]')
-                        lines.append("    await current_page.bring_to_front()")
+                        step_lines.append(f'    current_page = tabs["{fallback_tab_id}"]')
+                        step_lines.append("    await current_page.bring_to_front()")
                         current_tab_id = fallback_tab_id
                     else:
                         current_tab_id = closing_tab_id
+                lines.extend(self._wrap_step_lines(step_lines, step_index, test_mode))
                 lines.append("")
                 prev_action = action
                 continue
@@ -203,8 +218,9 @@ if __name__ == "__main__":
             # Standalone download step has no locator — handle before _build_locator
             if action == "download":
                 safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', (value or "file").split('.')[0]) or "file"
-                lines.append(f'    # NOTE: download of "{value}" was triggered by a previous action')
-                lines.append(f'    # If this step appears, manually wrap the triggering click with expect_download()')
+                step_lines.append(f'    # NOTE: download of "{value}" was triggered by a previous action')
+                step_lines.append(f'    # If this step appears, manually wrap the triggering click with expect_download()')
+                lines.extend(self._wrap_step_lines(step_lines, step_index, test_mode))
                 lines.append("")
                 continue
 
@@ -213,7 +229,7 @@ if __name__ == "__main__":
                 scope_var = "frame_scope"
                 frame_parent = "current_page"
                 for frame_selector in frame_path:
-                    lines.append(
+                    step_lines.append(
                         f'    frame_scope = {frame_parent}.frame_locator("{self._escape(frame_selector)}")'
                     )
                     frame_parent = "frame_scope"
@@ -226,95 +242,116 @@ if __name__ == "__main__":
 
             popup_signal = self._popup_signal(step)
             download_signal = self._download_signal(step)
-            if popup_signal and not self._should_materialize_popup(deduped, step_index - 1, popup_signal, download_signal):
+            if popup_signal and not self._should_materialize_popup(deduped, step_index, popup_signal, download_signal):
                 popup_signal = None
             if action in {"click", "press"} and (popup_signal or download_signal):
                 interaction = f'await {locator}.click()' if action == "click" else f'await {locator}.press("{value}")'
                 outer_indent = "    "
                 if download_signal:
-                    lines.append(f"{outer_indent}async with current_page.expect_download() as _dl_info:")
+                    step_lines.append(f"{outer_indent}async with current_page.expect_download() as _dl_info:")
                     outer_indent += "    "
                 if popup_signal:
-                    lines.append(f"{outer_indent}async with current_page.expect_popup() as popup_info:")
+                    step_lines.append(f"{outer_indent}async with current_page.expect_popup() as popup_info:")
                     outer_indent += "    "
-                lines.append(f"{outer_indent}{interaction}")
+                step_lines.append(f"{outer_indent}{interaction}")
 
                 if popup_signal:
                     popup_indent = "    " + ("    " if download_signal else "")
                     target_tab_id = popup_signal.get("target_tab_id") or step.get("target_tab_id") or "tab-new"
-                    lines.append(f"{popup_indent}new_page = await popup_info.value")
-                    lines.append(f'{popup_indent}tabs["{target_tab_id}"] = new_page')
-                    lines.append(f"{popup_indent}current_page = new_page")
+                    step_lines.append(f"{popup_indent}new_page = await popup_info.value")
+                    step_lines.append(f'{popup_indent}tabs["{target_tab_id}"] = new_page')
+                    step_lines.append(f"{popup_indent}current_page = new_page")
                     current_tab_id = target_tab_id
 
                 if download_signal:
                     download_name = download_signal.get("filename") or value or "file"
                     safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', str(download_name).split('.')[0]) or "file"
-                    lines.append("    _dl = await _dl_info.value")
-                    lines.append("    _dl_dir = kwargs.get('_downloads_dir', '.')")
-                    lines.append("    import os as _os; _os.makedirs(_dl_dir, exist_ok=True)")
-                    lines.append("    _dl_dest = _os.path.join(_dl_dir, _dl.suggested_filename)")
-                    lines.append("    await _dl.save_as(_dl_dest)")
-                    lines.append(f'    _results["download_{safe_name}"] = {{"filename": _dl.suggested_filename, "path": _dl_dest}}')
+                    step_lines.append("    _dl = await _dl_info.value")
+                    step_lines.append("    _dl_dir = kwargs.get('_downloads_dir', '.')")
+                    step_lines.append("    import os as _os; _os.makedirs(_dl_dir, exist_ok=True)")
+                    step_lines.append("    _dl_dest = _os.path.join(_dl_dir, _dl.suggested_filename)")
+                    step_lines.append("    await _dl.save_as(_dl_dest)")
+                    step_lines.append(f'    _results["download_{safe_name}"] = {{"filename": _dl.suggested_filename, "path": _dl_dest}}')
 
+                lines.extend(self._wrap_step_lines(step_lines, step_index, test_mode))
                 lines.append("")
                 prev_action = action
                 continue
 
             if action == "navigate_click":
-                lines.append(f"    async with current_page.expect_navigation(wait_until='domcontentloaded', timeout={RPA_NAVIGATION_TIMEOUT_MS}):")
-                lines.append(f"        await {locator}.click()")
+                step_lines.append(f"    async with current_page.expect_navigation(wait_until='domcontentloaded', timeout={RPA_NAVIGATION_TIMEOUT_MS}):")
+                step_lines.append(f"        await {locator}.click()")
             elif action == "navigate_press":
-                lines.append(f"    async with current_page.expect_navigation(wait_until='domcontentloaded', timeout={RPA_NAVIGATION_TIMEOUT_MS}):")
-                lines.append(f'        await {locator}.press("{value}")')
+                step_lines.append(f"    async with current_page.expect_navigation(wait_until='domcontentloaded', timeout={RPA_NAVIGATION_TIMEOUT_MS}):")
+                step_lines.append(f'        await {locator}.press("{value}")')
             elif action == "click":
-                lines.append(f"    await {locator}.click()")
+                step_lines.append(f"    await {locator}.click()")
                 # After non-navigation click, wait briefly for UI changes
-                lines.append("    await current_page.wait_for_timeout(500)")
+                step_lines.append("    await current_page.wait_for_timeout(500)")
             elif action == "download_click":
                 # Click that triggers a file download — wrap with expect_download
                 safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', (value or "file").split('.')[0]) or "file"
-                lines.append(f"    async with current_page.expect_download() as _dl_info:")
-                lines.append(f"        await {locator}.click()")
-                lines.append(f"    _dl = await _dl_info.value")
-                lines.append(f"    _dl_dir = kwargs.get('_downloads_dir', '.')")
-                lines.append(f"    import os as _os; _os.makedirs(_dl_dir, exist_ok=True)")
-                lines.append(f"    _dl_dest = _os.path.join(_dl_dir, _dl.suggested_filename)")
-                lines.append(f"    await _dl.save_as(_dl_dest)")
-                lines.append(f'    _results["download_{safe_name}"] = {{"filename": _dl.suggested_filename, "path": _dl_dest}}')
+                step_lines.append(f"    async with current_page.expect_download() as _dl_info:")
+                step_lines.append(f"        await {locator}.click()")
+                step_lines.append(f"    _dl = await _dl_info.value")
+                step_lines.append(f"    _dl_dir = kwargs.get('_downloads_dir', '.')")
+                step_lines.append(f"    import os as _os; _os.makedirs(_dl_dir, exist_ok=True)")
+                step_lines.append(f"    _dl_dest = _os.path.join(_dl_dir, _dl.suggested_filename)")
+                step_lines.append(f"    await _dl.save_as(_dl_dest)")
+                step_lines.append(f'    _results["download_{safe_name}"] = {{"filename": _dl.suggested_filename, "path": _dl_dest}}')
             elif action == "fill":
                 fill_value = self._maybe_parameterize(value, params)
-                lines.append(f"    await {locator}.fill({fill_value})")
+                step_lines.append(f"    await {locator}.fill({fill_value})")
             elif action == "check":
-                lines.append(f"    await {locator}.check()")
+                step_lines.append(f"    await {locator}.check()")
             elif action == "uncheck":
-                lines.append(f"    await {locator}.uncheck()")
+                step_lines.append(f"    await {locator}.uncheck()")
             elif action == "set_input_files":
                 input_files_value = self._build_input_files_value(step, value, params)
-                lines.append(f"    await {locator}.set_input_files({input_files_value})")
+                step_lines.append(f"    await {locator}.set_input_files({input_files_value})")
             elif action == "extract_text":
-                result_var = f"extract_text_value_{step_index}"
+                result_var = f"extract_text_value_{step_index + 1}"
                 result_key = self._build_extract_result_key(step, used_result_keys)
-                lines.append(f"    {result_var} = await {locator}.inner_text()")
-                lines.append(f'    _results["{result_key}"] = {result_var}')
+                step_lines.append(f"    {result_var} = await {locator}.inner_text()")
+                step_lines.append(f'    _results["{result_key}"] = {result_var}')
             elif action == "press":
-                lines.append(f'    await {locator}.press("{value}")')
+                step_lines.append(f'    await {locator}.press("{value}")')
             elif action == "select":
-                lines.append(f'    await {locator}.select_option("{value}")')
+                step_lines.append(f'    await {locator}.select_option("{value}")')
 
             prev_action = action
+            lines.extend(self._wrap_step_lines(step_lines, step_index, test_mode))
             lines.append("")
 
         lines.append("    return _results")
 
         # Wrap execute_skill function with the runner boilerplate
         execute_skill_func = "\n".join(lines)
+        if test_mode:
+            execute_skill_func = self.TEST_MODE_PREAMBLE + execute_skill_func
         template = self.RUNNER_TEMPLATE_LOCAL if is_local else self.RUNNER_TEMPLATE_DOCKER
         return template.format(
             execute_skill_func=execute_skill_func,
             default_timeout_ms=RPA_PLAYWRIGHT_TIMEOUT_MS,
             navigation_timeout_ms=RPA_NAVIGATION_TIMEOUT_MS,
         )
+
+    @staticmethod
+    def _wrap_step_lines(step_lines: List[str], step_index: int, test_mode: bool) -> List[str]:
+        """Optionally wrap step code lines in try/except for test mode error reporting."""
+        if not test_mode or not step_lines:
+            return step_lines
+        wrapped = ["    try:"]
+        for line in step_lines:
+            if line == "":
+                wrapped.append("")
+            else:
+                wrapped.append("    " + line)
+        wrapped.append("    except StepExecutionError:")
+        wrapped.append("        raise")
+        wrapped.append("    except Exception as _e:")
+        wrapped.append(f"        raise StepExecutionError(step_index={step_index}, original_error=str(_e))")
+        return wrapped
 
     def _build_extract_result_key(self, step: Dict[str, Any], used_result_keys: Dict[str, int]) -> str:
         key = self._normalize_result_key(step.get("result_key"))
