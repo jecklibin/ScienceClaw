@@ -133,63 +133,6 @@ class _BrokenFrame(_FakeFrame):
         return self._url
 
 
-class _FakeJSHandle:
-    def __init__(self, element=None):
-        self._element = element
-
-    def as_element(self):
-        return self._element
-
-    async def dispose(self):
-        return None
-
-
-class _FakeIframeTarget:
-    def __init__(self, child_frame=None, x=0, y=0, client_left=0, client_top=0):
-        self._child_frame = child_frame
-        self._box = {"x": x, "y": y}
-        self._client_left = client_left
-        self._client_top = client_top
-
-    async def content_frame(self):
-        return self._child_frame
-
-    async def bounding_box(self):
-        return dict(self._box)
-
-    async def evaluate(self, expression):
-        if "clientLeft" in expression:
-            return {"left": self._client_left, "top": self._client_top}
-        raise AssertionError(f"Unexpected evaluate expression: {expression}")
-
-
-class _FakePointFrame(_FakeFrame):
-    def __init__(
-        self,
-        page,
-        parent_frame=None,
-        attrs=None,
-        tag_name="iframe",
-        nth_of_type=1,
-        point_targets=None,
-        is_main_frame=False,
-    ):
-        super().__init__(page, parent_frame=parent_frame, attrs=attrs, tag_name=tag_name, nth_of_type=nth_of_type)
-        self._point_targets = point_targets or {}
-        self._is_main_frame = is_main_frame
-
-    async def frame_element(self):
-        if self._is_main_frame:
-            raise RuntimeError("main frame has no frame element")
-        return await super().frame_element()
-
-    async def evaluate_handle(self, expression, arg):
-        if "document.elementFromPoint" not in expression:
-            raise AssertionError(f"Unexpected evaluate_handle expression: {expression}")
-        key = (arg.get("x"), arg.get("y"))
-        return _FakeJSHandle(self._point_targets.get(key))
-
-
 class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.manager = MANAGER_MODULE.RPASessionManager()
@@ -652,7 +595,6 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         click_block = js.split("document.addEventListener('click'", 1)[1].split(
             "document.addEventListener('focusin'", 1
         )[0]
-        self.assertIn("position:{x:e.clientX,y:e.clientY}", click_block)
         self.assertNotIn("_lastClick", js)
         self.assertNotIn("now-_lastClick.time<1000", click_block)
         self.assertNotIn("Deduplicate rapid clicks on the same element", click_block)
@@ -694,6 +636,33 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
 
         await binding_callback(
             SimpleNamespace(page=page, frame=inner_frame),
+            json.dumps(
+                {
+                    "action": "click",
+                    "tag": "BUTTON",
+                    "timestamp": 1234567890,
+                    "locator": {"method": "role", "role": "button", "name": "Save"},
+                }
+            ),
+        )
+
+        self.assertEqual(self.session.steps[-1].tab_id, tab_id)
+        self.assertEqual(
+            self.session.steps[-1].frame_path,
+            ["iframe[name='workspace']", "iframe[title='editor']"],
+        )
+
+    async def test_context_binding_callback_supports_dict_binding_source(self):
+        context = _FakeContext()
+        page = _FakePage("https://example.com", "Example", context=context)
+        tab_id = await self.manager.register_page(self.session.id, page, make_active=True)
+
+        _, binding_callback, _ = context.exposed_bindings[0]
+        outer_frame = _FakeFrame(page, attrs={"name": "workspace"})
+        inner_frame = _FakeFrame(page, parent_frame=outer_frame, attrs={"title": "editor"})
+
+        await binding_callback(
+            {"page": page, "frame": inner_frame},
             json.dumps(
                 {
                     "action": "click",
@@ -763,51 +732,6 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
             self.session.steps[-1].signals.get("reported_frame_path"),
             ["iframe[title='editor']"],
         )
-
-    async def test_context_binding_callback_recovers_frame_path_from_click_position(self):
-        context = _FakeContext()
-        page = _FakePage("https://example.com", "Example", context=context)
-        main_frame = _FakePointFrame(page, point_targets={}, is_main_frame=True)
-        page.main_frame = main_frame
-        await self.manager.register_page(self.session.id, page, make_active=True)
-
-        outer_frame = _FakePointFrame(page, parent_frame=main_frame, attrs={"name": "workspace"}, point_targets={})
-        inner_frame = _FakePointFrame(page, parent_frame=outer_frame, attrs={"title": "editor"}, point_targets={})
-        main_frame._point_targets[(250, 160)] = _FakeIframeTarget(
-            child_frame=outer_frame,
-            x=100,
-            y=60,
-            client_left=2,
-            client_top=4,
-        )
-        outer_frame._point_targets[(148, 96)] = _FakeIframeTarget(
-            child_frame=inner_frame,
-            x=180,
-            y=120,
-            client_left=1,
-            client_top=1,
-        )
-        inner_frame._point_targets[(69, 39)] = _FakeIframeTarget(child_frame=None)
-
-        _, binding_callback, _ = context.exposed_bindings[0]
-        await binding_callback(
-            SimpleNamespace(page=page, frame=main_frame),
-            json.dumps(
-                {
-                    "action": "click",
-                    "tag": "BUTTON",
-                    "timestamp": 1234567890,
-                    "position": {"x": 250, "y": 160},
-                    "locator": {"method": "role", "role": "button", "name": "Save"},
-                }
-            ),
-        )
-
-        self.assertEqual(
-            self.session.steps[-1].frame_path,
-            ["iframe[name='workspace']", "iframe[title='editor']"],
-        )
-        self.assertEqual(self.session.steps[-1].signals.get("position"), {"x": 250, "y": 160})
 
     async def test_build_frame_path_falls_back_to_frame_name_when_frame_element_fails(self):
         page = _FakePage("https://example.com", "Example")

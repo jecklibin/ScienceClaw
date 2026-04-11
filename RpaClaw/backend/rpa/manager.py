@@ -809,7 +809,6 @@ CAPTURE_JS = r"""
         var locatorBundle = buildLocatorBundle(el);
         emit({
             action:'click',
-            position:{x:e.clientX,y:e.clientY},
             locator:locatorBundle.primary,
             locator_candidates:locatorBundle.candidates,
             validation:locatorBundle.validation,
@@ -1198,22 +1197,22 @@ class RPASessionManager:
         if context_key in bridged_context_ids:
             return
 
+        def _binding_source_get(source: Any, key: str) -> Any:
+            if isinstance(source, dict):
+                return source.get(key)
+            return getattr(source, key, None)
+
         async def rpa_emit(source, event_json: str):
             try:
                 evt = json.loads(event_json)
-                source_page = getattr(source, "page", None)
-                source_frame = getattr(source, "frame", None)
+                source_page = _binding_source_get(source, "page")
+                source_frame = _binding_source_get(source, "frame")
                 resolved_tab_id = self._page_tab_ids.get(session_id, {}).get(id(source_page))
                 if not resolved_tab_id:
                     session = self.sessions.get(session_id)
                     resolved_tab_id = session.active_tab_id if session else None
                 if resolved_tab_id:
                     evt.setdefault("tab_id", resolved_tab_id)
-                if source_page and self._should_recover_frame_from_position(source_page, evt, source_frame):
-                    recovered_frame = await self._resolve_click_frame_from_position(source_page, evt)
-                    if recovered_frame is not None:
-                        source_frame = recovered_frame
-                self._persist_pointer_position(evt)
                 if source_frame:
                     reported_frame_path = evt.get("frame_path", []) or []
                     if reported_frame_path:
@@ -1235,97 +1234,6 @@ class RPASessionManager:
 
     async def build_frame_path(self, frame) -> List[str]:
         return await self._build_frame_path(frame)
-
-    @staticmethod
-    def _frame_is_main_frame(page: Optional[Page], frame: Any) -> bool:
-        return page is not None and frame is not None and getattr(page, "main_frame", None) is frame
-
-    @staticmethod
-    def _extract_pointer_position(evt: Dict[str, Any]) -> Optional[Dict[str, float]]:
-        raw_position = evt.get("position")
-        if not isinstance(raw_position, dict):
-            signals = evt.get("signals")
-            if isinstance(signals, dict):
-                raw_position = signals.get("position")
-        if not isinstance(raw_position, dict):
-            return None
-        x = raw_position.get("x")
-        y = raw_position.get("y")
-        if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
-            return None
-        return {"x": float(x), "y": float(y)}
-
-    def _persist_pointer_position(self, evt: Dict[str, Any]) -> None:
-        position = self._extract_pointer_position(evt)
-        if position is None:
-            return
-        signals = evt.get("signals")
-        normalized_signals = dict(signals) if isinstance(signals, dict) else {}
-        normalized_signals["position"] = position
-        evt["signals"] = normalized_signals
-
-    def _should_recover_frame_from_position(self, page: Optional[Page], evt: Dict[str, Any], source_frame: Any) -> bool:
-        if evt.get("action") != "click":
-            return False
-        if self._extract_pointer_position(evt) is None:
-            return False
-        return source_frame is None or self._frame_is_main_frame(page, source_frame)
-
-    async def _resolve_click_frame_from_position(self, page: Page, evt: Dict[str, Any]):
-        position = self._extract_pointer_position(evt)
-        if position is None:
-            return None
-        main_frame = getattr(page, "main_frame", None)
-        if main_frame is None:
-            return None
-        return await self._resolve_deepest_frame_at_point(main_frame, position["x"], position["y"], 0.0, 0.0)
-
-    async def _resolve_deepest_frame_at_point(
-        self,
-        frame,
-        page_x: float,
-        page_y: float,
-        origin_x: float,
-        origin_y: float,
-    ):
-        handle = None
-        try:
-            handle = await frame.evaluate_handle(
-                "coords => document.elementFromPoint(coords.x, coords.y)",
-                {"x": page_x - origin_x, "y": page_y - origin_y},
-            )
-            if handle is None:
-                return frame
-            element = handle.as_element()
-            if element is None:
-                return frame
-            child_frame = await element.content_frame()
-            if child_frame is None:
-                return frame
-
-            box = await element.bounding_box()
-            if not isinstance(box, dict):
-                return child_frame
-            offsets = await element.evaluate("el => ({ left: el.clientLeft || 0, top: el.clientTop || 0 })")
-            left = offsets.get("left", 0) if isinstance(offsets, dict) else 0
-            top = offsets.get("top", 0) if isinstance(offsets, dict) else 0
-            child_origin_x = float(box.get("x", origin_x)) + float(left)
-            child_origin_y = float(box.get("y", origin_y)) + float(top)
-            return await self._resolve_deepest_frame_at_point(
-                child_frame,
-                page_x,
-                page_y,
-                child_origin_x,
-                child_origin_y,
-            )
-        except Exception:
-            return frame
-        finally:
-            if handle is not None:
-                try:
-                    await handle.dispose()
-                except Exception:
-                    pass
 
     async def _bind_page(self, session_id: str, tab_id: str, page: Page):
         last_url = {"value": ""}
