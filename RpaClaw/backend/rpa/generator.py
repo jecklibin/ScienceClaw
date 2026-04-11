@@ -116,7 +116,7 @@ class StepExecutionError(Exception):
     def __init__(self, step_index: int, original_error: str = ""):
         self.step_index = step_index
         self.original_error = original_error
-        super().__init__(f"Step {{step_index}} failed: {{original_error}}")
+        super().__init__(f"STEP_FAILED:{step_index}:{original_error}")
 '''
 
     def generate_script(self, steps: List[Dict[str, Any]], params: Dict[str, Any] = None, is_local: bool = False, test_mode: bool = False) -> str:

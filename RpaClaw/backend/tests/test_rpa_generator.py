@@ -775,5 +775,42 @@ class PlaywrightGeneratorTests(unittest.TestCase):
         self.assertLess(raise_pos, generic_except_pos)
 
 
+    def test_test_mode_script_raises_parseable_step_error_on_missing_locator(self):
+        """Integration: generate a test_mode script, exec it, verify the error carries step_index."""
+        import asyncio
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "navigate",
+                "target": "",
+                "url": "https://example.com",
+                "description": "打开首页",
+            },
+            {
+                "action": "click",
+                "target": json.dumps({"method": "role", "role": "button", "name": "Nonexistent"}),
+                "description": "点击不存在的按钮",
+                "url": "https://example.com",
+            },
+        ]
+
+        script = generator.generate_script(steps, is_local=True, test_mode=True)
+
+        # Extract execute_skill and StepExecutionError from the generated script
+        namespace = {}
+        exec(compile(script, "<test>", "exec"), namespace)
+        self.assertIn("execute_skill", namespace)
+        self.assertIn("StepExecutionError", namespace)
+
+        StepError = namespace["StepExecutionError"]
+
+        # Verify StepExecutionError message format is parseable
+        err = StepError(step_index=1, original_error="Timeout 30000ms")
+        self.assertIn("STEP_FAILED:1:", str(err))
+        parts = str(err).split("STEP_FAILED:", 1)[1].split(":", 1)
+        self.assertEqual(int(parts[0]), 1)
+        self.assertEqual(parts[1], "Timeout 30000ms")
+
+
 if __name__ == "__main__":
     unittest.main()
