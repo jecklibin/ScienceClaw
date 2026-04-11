@@ -410,7 +410,7 @@ async def test_script(
         raise HTTPException(status_code=404, detail="Session not found")
 
     steps = [step.model_dump() for step in session.steps]
-    script = generator.generate_script(steps, request.params, is_local=(settings.storage_backend == "local"))
+    script = generator.generate_script(steps, request.params, is_local=(settings.storage_backend == "local"), test_mode=True)
 
     logs = []
     browser = await get_cdp_connector().get_browser(
@@ -456,7 +456,38 @@ async def test_script(
             downloads_dir=downloads_dir,
         )
 
-    return {"status": "success", "result": result, "logs": logs, "script": script}
+    # Extract failed step candidates for locator retry
+    failed_step_index = result.get("failed_step_index")
+    failed_step_candidates = []
+    if failed_step_index is not None:
+        deduped = generator._deduplicate_steps(steps)
+        deduped = generator._infer_missing_tab_transitions(deduped)
+        deduped = generator._normalize_step_signals(deduped)
+        if 0 <= failed_step_index < len(deduped):
+            failed_step = deduped[failed_step_index]
+            candidates = failed_step.get("locator_candidates", [])
+            filtered = []
+            for orig_idx, c in enumerate(candidates):
+                if not c.get("selected"):
+                    entry = dict(c)
+                    entry["original_index"] = orig_idx
+                    filtered.append(entry)
+            failed_step_candidates = sorted(
+                filtered,
+                key=lambda c: (
+                    0 if c.get("strict_match_count") == 1 else 1,
+                    c.get("score", 999),
+                ),
+            )
+
+    return {
+        "status": "success" if result.get("success") else "failed",
+        "result": result,
+        "logs": logs,
+        "script": script,
+        "failed_step_index": failed_step_index,
+        "failed_step_candidates": failed_step_candidates,
+    }
 
 
 @router.post("/session/{session_id}/save")
