@@ -7,6 +7,7 @@ from typing import Dict, Any
 
 from backend.storage import get_repository
 from backend.config import settings
+from backend.rpa.skill_manifest import build_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,7 @@ class SkillExporter:
         description: str,
         script: str,
         params: Dict[str, Any],
+        steps: list[dict[str, Any]] | None = None,
     ) -> str:
         """Export skill to MongoDB or local filesystem based on storage_backend.
 
@@ -90,12 +92,22 @@ The skill is implemented in `skill.py` using Playwright for browser automation.
 """
 
         if settings.storage_backend == "local":
+            manifest = build_manifest(
+                skill_name=skill_name,
+                description=description,
+                params=params,
+                steps=steps or [],
+            )
+
             # Save to filesystem
             skill_dir = Path(settings.external_skills_dir) / skill_name
             skill_dir.mkdir(parents=True, exist_ok=True)
 
             (skill_dir / "SKILL.md").write_text(skill_md, encoding="utf-8")
             (skill_dir / "skill.py").write_text(script, encoding="utf-8")
+            (skill_dir / "manifest.json").write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
             # Save params config (includes credential_id for sensitive params)
             (skill_dir / "params.json").write_text(
                 json.dumps(params, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -103,6 +115,13 @@ The skill is implemented in `skill.py` using Playwright for browser automation.
 
             logger.info(f"Skill '{skill_name}' exported to {skill_dir}")
         else:
+            manifest = build_manifest(
+                skill_name=skill_name,
+                description=description,
+                params=params,
+                steps=steps or [],
+            )
+
             # Save to MongoDB
             now = datetime.now(timezone.utc)
             col = get_repository("skills")
@@ -113,6 +132,11 @@ The skill is implemented in `skill.py` using Playwright for browser automation.
                         "files": {
                             "SKILL.md": skill_md,
                             "skill.py": script,
+                            "manifest.json": json.dumps(
+                                manifest,
+                                ensure_ascii=False,
+                                indent=2,
+                            ),
                         },
                         "description": description,
                         "params": params,
