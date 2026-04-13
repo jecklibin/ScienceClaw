@@ -257,6 +257,24 @@ class PlaywrightGeneratorTests(unittest.TestCase):
         self.assertNotIn("expect_download", script)
         self.assertNotIn("expect_popup", script)
 
+    def test_generate_script_ai_command_omits_empty_bearer_header(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "ai_command",
+                "prompt": "读取当前页面标题",
+                "ai_mode": "data",
+                "output_variable": "page_title",
+                "description": "AI 命令",
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True, test_mode=True)
+
+        self.assertIn('_headers = {"Authorization": f"Bearer {token}"} if token else {}', script)
+        self.assertIn("headers=_headers", script)
+        self.assertNotIn('headers={"Authorization": f"Bearer {token}"}', script)
+
     def test_generate_script_switches_back_to_existing_tab(self):
         generator = PlaywrightGenerator()
         steps = [

@@ -950,6 +950,44 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.session.steps[-1].action, "navigate_click")
         self.assertEqual(self.session.steps[-1].url, "https://example.com/next")
 
+    async def test_navigation_event_emitted_while_paused_is_ignored_after_resume(self):
+        page = _FakePage("https://example.com", "Example")
+        tab_id = await self.manager.register_page(self.session.id, page, make_active=True)
+
+        self.manager.pause_recording(self.session.id)
+        self.manager.resume_recording(self.session.id)
+
+        await self.manager._handle_event(
+            self.session.id,
+            {
+                "action": "navigate",
+                "url": "https://example.com/next",
+                "timestamp": int(datetime.now().timestamp() * 1000),
+                "tab_id": tab_id,
+                "paused_at_source": True,
+            },
+        )
+
+        self.assertEqual(self.session.steps, [])
+
+    async def test_navigation_event_within_suppression_window_is_ignored(self):
+        page = _FakePage("https://example.com", "Example")
+        tab_id = await self.manager.register_page(self.session.id, page, make_active=True)
+
+        self.manager.suppress_navigation_events(self.session.id, tab_id, duration_ms=2000)
+
+        await self.manager._handle_event(
+            self.session.id,
+            {
+                "action": "navigate",
+                "url": "https://example.com/next",
+                "timestamp": int(datetime.now().timestamp() * 1000),
+                "tab_id": tab_id,
+            },
+        )
+
+        self.assertEqual(self.session.steps, [])
+
     def test_make_description_formats_nth_locator(self):
         description = self.manager._make_description(
             {

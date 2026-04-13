@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
-import { Camera, Terminal, CheckCircle, Radio, Send, Wand2, Bot, Code, X, House, FolderOpen, Globe } from 'lucide-vue-next';
+import { Camera, Terminal, CheckCircle, AlertCircle, LoaderCircle, Radio, Send, Wand2, Bot, Code, X, House, FolderOpen, Globe } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
 import { getBackendWsUrl } from '@/utils/sandbox';
 import {
@@ -22,6 +22,15 @@ const recordingTime = ref('00:00');
 const timerInterval = ref<any>(null);
 const loading = ref(true);
 const error = ref<string | null>(null);
+
+// AI Command dialog state
+const showAICommandDialog = ref(false);
+const aiCommandPrompt = ref('');
+const aiCommandOutputVar = ref('');
+const aiCommandLoading = ref(false);
+const aiCommandMode = ref<'execute' | 'data'>('data');
+const latestServerSteps = ref<any[]>([]);
+const pendingAISteps = ref<any[]>([]);
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 const screencastFrameSize = ref<ScreencastSize>({ width: 1280, height: 720 });
@@ -115,19 +124,57 @@ const getValidationClass = (status?: string) => {
 
 const mapServerSteps = (serverSteps: any[]) => ([
   { id: '0', title: '环境就绪', description: '已成功启动 Playwright 浏览器', status: 'completed' },
-  ...serverSteps.map((s: any, i: number) => ({
-    id: String(i + 1),
-    title: s.description || s.action,
-    description: s.source === 'ai' ? (s.prompt || s.description || 'AI 操作') : `${s.action} -> ${formatLocator(s.target || s.label || '')}`,
-    status: 'completed',
-    source: s.source || 'record',
-    sensitive: s.sensitive || false,
-    locatorSummary: formatLocator(s.target),
-    frameSummary: formatFramePath(s.frame_path),
-    validationStatus: s.validation?.status || '',
-    validationDetails: s.validation?.details || '',
-  }))
+  ...serverSteps.map((s: any, i: number) => {
+    const isAICommand = s.action === 'ai_command';
+    return {
+      id: String(i + 1),
+      title: s.description || (isAICommand ? 'AI 命令' : s.action),
+      description: isAICommand
+        ? (s.prompt || s.description || 'AI 命令')
+        : (s.source === 'ai' ? (s.prompt || s.description || 'AI 操作') : `${s.action} -> ${formatLocator(s.target || s.label || '')}`),
+      status: 'completed',
+      source: isAICommand ? 'ai' : (s.source || 'record'),
+      sensitive: s.sensitive || false,
+      locatorSummary: isAICommand ? undefined : formatLocator(s.target),
+      frameSummary: isAICommand ? undefined : formatFramePath(s.frame_path),
+      validationStatus: s.validation?.status || '',
+      validationDetails: s.validation?.details || '',
+      aiResponse: isAICommand ? s.value : undefined,
+      outputVariable: isAICommand ? s.output_variable : undefined,
+      aiMode: isAICommand ? (s.ai_mode || 'data') : undefined,
+    };
+  })
 ]);
+
+const syncDisplayedSteps = () => {
+  const mappedSteps = mapServerSteps(latestServerSteps.value);
+  steps.value = pendingAISteps.value.length
+    ? [...mappedSteps, ...pendingAISteps.value]
+    : mappedSteps;
+};
+
+const reconcilePendingAISteps = (serverSteps: any[]) => {
+  pendingAISteps.value = pendingAISteps.value.filter((pendingStep) => {
+    return !serverSteps.some((serverStep: any) => (
+      serverStep.action === 'ai_command' &&
+      (serverStep.prompt || serverStep.description || '') === pendingStep.description &&
+      (serverStep.ai_mode || 'data') === pendingStep.aiMode &&
+      ((serverStep.output_variable || '') === (pendingStep.outputVariable || ''))
+    ));
+  });
+};
+
+const createPendingAIStep = (prompt: string, aiMode: 'execute' | 'data', outputVariable: string) => ({
+  id: `AI${pendingAISteps.value.length + 1}`,
+  title: 'AI 命令（执行中）',
+  description: prompt,
+  status: 'active',
+  source: 'ai',
+  sensitive: false,
+  aiMode,
+  outputVariable: aiMode === 'data' ? outputVariable : undefined,
+  localOnly: true,
+});
 
 interface ChatMessage {
   role: 'user' | 'assistant';
@@ -199,9 +246,10 @@ const initSession = async () => {
 
     if (resp.data.status === 'success') {
       sessionId.value = resp.data.session.id;
-      steps.value = [
-        { id: '0', title: '环境就绪', description: '已成功启动 Playwright 浏览器，准备录制', status: 'completed' }
-      ];
+      latestServerSteps.value = [];
+      pendingAISteps.value = [];
+      syncDisplayedSteps();
+      steps.value[0] = { id: '0', title: '环境就绪', description: '已成功启动 Playwright 浏览器，准备录制', status: 'completed' };
       startTimer();
       startPollingSteps();
       await nextTick();
@@ -221,9 +269,9 @@ const startPollingSteps = () => {
     try {
       const resp = await apiClient.get(`/rpa/session/${sessionId.value}`);
       const serverSteps = resp.data.session?.steps || [];
-      if (serverSteps.length > 0) {
-        steps.value = mapServerSteps(serverSteps);
-      }
+      reconcilePendingAISteps(serverSteps);
+      latestServerSteps.value = serverSteps;
+      syncDisplayedSteps();
     } catch (err) {
       // Ignore polling errors
     }
@@ -534,9 +582,57 @@ const deleteStep = async (stepIndex: number) => {
     await apiClient.delete(`/rpa/session/${sessionId.value}/step/${stepIndex}`);
     const resp = await apiClient.get(`/rpa/session/${sessionId.value}`);
     const serverSteps = resp.data.session?.steps || [];
-    steps.value = mapServerSteps(serverSteps);
+    latestServerSteps.value = serverSteps;
+    syncDisplayedSteps();
   } catch (err) {
     console.error('Failed to delete step:', err);
+  }
+};
+
+const submitAICommand = async () => {
+  if (!sessionId.value || !aiCommandPrompt.value.trim()) return;
+  const prompt = aiCommandPrompt.value.trim();
+  const outputVariable = aiCommandMode.value === 'data' ? aiCommandOutputVar.value.trim() : '';
+  const mode = aiCommandMode.value;
+  const pendingStep = createPendingAIStep(prompt, mode, outputVariable);
+  pendingAISteps.value.push(pendingStep);
+  showAICommandDialog.value = false;
+  aiCommandPrompt.value = '';
+  aiCommandOutputVar.value = '';
+  aiCommandMode.value = 'data';
+  syncDisplayedSteps();
+  aiCommandLoading.value = true;
+  try {
+    const resp = await apiClient.post(`/rpa/session/${sessionId.value}/ai-command`, {
+      prompt,
+      output_variable: outputVariable,
+      ai_mode: mode,
+    }, {
+      timeout: 0,
+    });
+    pendingAISteps.value = pendingAISteps.value.filter((step) => step !== pendingStep);
+    // Show execute error if any
+    if (resp.data?.execute_error) {
+      alert(`AI 命令执行出错: ${resp.data.execute_error}`);
+    }
+    // Refresh steps to include the new AI command step
+    const stepsResp = await apiClient.get(`/rpa/session/${sessionId.value}`);
+    const serverSteps = stepsResp.data.session?.steps || [];
+    reconcilePendingAISteps(serverSteps);
+    latestServerSteps.value = serverSteps;
+    syncDisplayedSteps();
+  } catch (err) {
+    console.error('Failed to execute AI command:', err);
+    const errorMessage =
+      (err as any)?.details?.detail ||
+      (err as any)?.message ||
+      '未知错误';
+    pendingStep.title = 'AI 命令执行失败';
+    pendingStep.description = `${prompt}\n${errorMessage}`;
+    pendingStep.status = 'error';
+    alert(`AI 命令执行失败: ${errorMessage}`);
+  } finally {
+    aiCommandLoading.value = false;
   }
 };
 
@@ -742,7 +838,11 @@ const sendMessage = async () => {
             :key="step.id"
             class="bg-white p-4 rounded-xl shadow-sm border-l-4 transition-all group relative"
             :class="[
-              step.source === 'ai' ? 'border-[#ac0089]' : (step.status === 'active' ? 'border-[#831bd7]' : 'border-gray-200 opacity-70')
+              step.status === 'error'
+                ? 'border-rose-400'
+                : step.source === 'ai'
+                  ? 'border-[#ac0089]'
+                  : (step.status === 'active' ? 'border-[#831bd7]' : 'border-gray-200 opacity-70')
             ]"
           >
             <div class="flex justify-between items-start mb-1">
@@ -754,18 +854,34 @@ const sendMessage = async () => {
               </div>
               <div class="flex items-center gap-1">
                 <button
-                  v-if="index > 0"
+                  v-if="index > 0 && !step.localOnly"
                   @click="deleteStep(index - 1)"
                   class="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-red-50 rounded"
                   title="删除步骤"
                 >
                   <X class="text-red-500" :size="14" />
                 </button>
+                <LoaderCircle v-if="step.status === 'active'" class="text-[#831bd7] animate-spin" :size="14" />
                 <CheckCircle v-if="step.status === 'completed'" class="text-green-500" :size="14" />
+                <AlertCircle v-if="step.status === 'error'" class="text-rose-500" :size="14" />
               </div>
             </div>
             <h3 class="text-gray-900 font-semibold text-sm">{{ step.title }}</h3>
             <p class="text-gray-500 text-[11px] mt-2 leading-relaxed">{{ step.description }}</p>
+            <!-- AI command: mode badge -->
+            <span v-if="step.aiMode" class="inline-block mt-1.5 px-1.5 py-0.5 rounded text-[10px] font-semibold"
+              :class="step.aiMode === 'execute' ? 'bg-orange-100 text-orange-700' : 'bg-blue-100 text-blue-700'"
+            >{{ step.aiMode === 'execute' ? '执行操作' : '提取数据' }}</span>
+            <!-- AI command response display -->
+            <div v-if="step.aiResponse" class="mt-2 p-2 bg-purple-50 rounded-lg text-[10px]">
+              <p class="font-semibold text-purple-700 mb-1">{{ step.aiMode === 'execute' ? '生成的代码:' : 'AI 响应:' }}</p>
+              <pre v-if="step.aiMode === 'execute'" class="text-gray-700 whitespace-pre-wrap break-all font-mono">{{ step.aiResponse }}</pre>
+              <p v-else class="text-gray-700 whitespace-pre-wrap break-all">{{ step.aiResponse }}</p>
+            </div>
+            <p v-if="step.outputVariable" class="mt-1.5 text-[10px] text-purple-600">
+              <span class="font-semibold">变量:</span>
+              <span class="font-mono ml-1">{{ step.outputVariable }}</span>
+            </p>
             <div v-if="step.locatorSummary || step.frameSummary || step.validationStatus" class="mt-3 space-y-1.5 text-[10px] text-gray-500">
               <p v-if="step.locatorSummary" class="break-all">
                 <span class="font-semibold text-gray-600">Locator:</span>
@@ -793,6 +909,79 @@ const sendMessage = async () => {
               <Wand2 :size="20" />
             </div>
             <p class="text-xs text-gray-500 font-medium">检测新操作中...</p>
+          </div>
+
+          <!-- Insert AI Command Button -->
+          <button
+            v-if="isRecording"
+            @click="showAICommandDialog = true"
+            class="mt-4 w-full flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-semibold transition-colors bg-[#ac0089]/10 text-[#ac0089] hover:bg-[#ac0089]/20 border border-[#ac0089]/20"
+          >
+            <Wand2 :size="16" />
+            插入 AI 命令
+          </button>
+        </div>
+
+        <!-- AI Command Dialog -->
+        <div v-if="showAICommandDialog" class="fixed inset-0 z-50 flex items-center justify-center bg-black/40" @click.self="showAICommandDialog = false">
+          <div class="bg-white rounded-2xl shadow-2xl w-[420px] p-6 space-y-4">
+            <h3 class="text-lg font-bold text-gray-900 flex items-center gap-2">
+              <Wand2 :size="20" class="text-[#ac0089]" />
+              插入 AI 命令
+            </h3>
+
+            <!-- Mode selection -->
+            <div class="flex gap-2">
+              <button
+                @click="aiCommandMode = 'execute'"
+                class="flex-1 py-2 text-sm font-semibold rounded-lg border transition-colors"
+                :class="aiCommandMode === 'execute' ? 'bg-[#ac0089] text-white border-[#ac0089]' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'"
+                :disabled="aiCommandLoading"
+              >执行操作</button>
+              <button
+                @click="aiCommandMode = 'data'"
+                class="flex-1 py-2 text-sm font-semibold rounded-lg border transition-colors"
+                :class="aiCommandMode === 'data' ? 'bg-[#ac0089] text-white border-[#ac0089]' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'"
+                :disabled="aiCommandLoading"
+              >提取数据</button>
+            </div>
+            <p class="text-[10px] text-gray-400 -mt-2">
+              {{ aiCommandMode === 'execute' ? 'AI 将生成 Playwright 代码并在浏览器中执行' : 'AI 将返回文本数据，存为变量供后续步骤使用' }}
+            </p>
+
+            <div>
+              <label class="block text-xs font-semibold text-gray-600 mb-1">提示词 *</label>
+              <textarea
+                v-model="aiCommandPrompt"
+                class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#ac0089]/40 resize-none"
+                rows="3"
+                :placeholder="aiCommandMode === 'execute' ? '例如：点击页面上价格最低的商品' : '例如：提取当前页面的商品标题'"
+                :disabled="aiCommandLoading"
+              ></textarea>
+            </div>
+            <div v-if="aiCommandMode === 'data'">
+              <label class="block text-xs font-semibold text-gray-600 mb-1">输出变量名</label>
+              <input
+                v-model="aiCommandOutputVar"
+                class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#ac0089]/40"
+                placeholder="例如 product_title"
+                :disabled="aiCommandLoading"
+              />
+            </div>
+            <div class="flex justify-end gap-2 pt-2">
+              <button
+                @click="showAICommandDialog = false"
+                class="px-4 py-2 text-sm rounded-lg text-gray-600 hover:bg-gray-100"
+                :disabled="aiCommandLoading"
+              >取消</button>
+              <button
+                @click="submitAICommand"
+                class="px-4 py-2 text-sm rounded-lg bg-[#ac0089] text-white hover:bg-[#ac0089]/90 disabled:opacity-50"
+                :disabled="!aiCommandPrompt.trim() || aiCommandLoading"
+              >
+                {{ aiCommandLoading ? 'AI 正在思考...' : '执行' }}
+              </button>
+            </div>
           </div>
         </div>
       </aside>

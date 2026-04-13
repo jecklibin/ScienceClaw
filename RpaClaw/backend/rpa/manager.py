@@ -42,6 +42,8 @@ class RPAStep(BaseModel):
     source_tab_id: Optional[str] = None
     target_tab_id: Optional[str] = None
     result_key: Optional[str] = None
+    output_variable: Optional[str] = None  # variable name to store AI command result (mode=data)
+    ai_mode: str = "data"  # "execute" (AI generates & runs Playwright code) or "data" (AI returns text)
     collection_hint: Dict[str, Any] = Field(default_factory=dict)
     item_hint: Dict[str, Any] = Field(default_factory=dict)
     ordinal: Optional[str] = None
@@ -69,6 +71,8 @@ class RPASession(BaseModel):
     sandbox_session_id: str
     paused: bool = False  # pause event recording during AI execution
     active_tab_id: Optional[str] = None
+    suppress_navigation_until_ms: Optional[int] = None
+    suppress_navigation_tab_id: Optional[str] = None
 
 
 # ── CAPTURE_JS: injected into pages to capture user events ──────────
@@ -500,6 +504,8 @@ class RPASessionManager:
             new_url = frame.url
             if new_url and new_url != last_url["value"] and new_url != "about:blank":
                 last_url["value"] = new_url
+                session = self.sessions.get(session_id)
+                paused_at_source = bool(session.paused) if session else False
                 tab = self._tab_meta.get(session_id, {}).get(tab_id)
                 if tab:
                     tab.url = new_url
@@ -509,6 +515,7 @@ class RPASessionManager:
                     "url": new_url,
                     "timestamp": int(datetime.now().timestamp() * 1000),
                     "tab_id": tab_id,
+                    "paused_at_source": paused_at_source,
                 }
                 asyncio.create_task(self._handle_event(session_id, evt))
 
@@ -948,6 +955,14 @@ class RPASessionManager:
         if session_id in self.sessions:
             self.sessions[session_id].paused = False
 
+    def suppress_navigation_events(self, session_id: str, tab_id: Optional[str], duration_ms: int = 2000):
+        """Temporarily ignore navigation events for the given tab after AI-driven execution."""
+        session = self.sessions.get(session_id)
+        if not session:
+            return
+        session.suppress_navigation_tab_id = tab_id
+        session.suppress_navigation_until_ms = int(datetime.now().timestamp() * 1000) + max(duration_ms, 0)
+
     def get_page(self, session_id: str) -> Optional[Page]:
         active_page = self.get_active_page(session_id)
         if active_page is not None:
@@ -964,8 +979,22 @@ class RPASessionManager:
         if session_id not in self.sessions:
             return
         session = self.sessions[session_id]
+        if evt.get("paused_at_source"):
+            return
         if session.status != "recording" or session.paused:
             return
+
+        suppress_until_ms = session.suppress_navigation_until_ms
+        suppress_tab_id = session.suppress_navigation_tab_id
+        if suppress_until_ms is not None:
+            event_ts = evt.get("timestamp") or int(datetime.now().timestamp() * 1000)
+            if event_ts > suppress_until_ms:
+                session.suppress_navigation_until_ms = None
+                session.suppress_navigation_tab_id = None
+            elif evt.get("action") == "navigate" and (
+                suppress_tab_id is None or evt.get("tab_id") == suppress_tab_id
+            ):
+                return
 
         event_tab_id = evt.get("tab_id")
         if event_tab_id and event_tab_id != session.active_tab_id:
@@ -1119,6 +1148,9 @@ class RPASessionManager:
             return f"导航到 {evt.get('url', '')}"
         if action == "download":
             return f"下载文件 {value}"
+        if action == "ai_command":
+            prompt = evt.get("prompt", "")
+            return f"AI 命令: {prompt[:50]}" if prompt else "AI 命令"
         return f"{action} on {target}"
 
     async def add_step(self, session_id: str, step_data: Dict[str, Any]) -> RPAStep:
@@ -1232,4 +1264,3 @@ class RPASessionManager:
 
 # ── Global instance ──────────────────────────────────────────────────
 rpa_manager = RPASessionManager()
-

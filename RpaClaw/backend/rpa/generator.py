@@ -25,6 +25,7 @@ import sys
 import httpx
 from playwright.async_api import async_playwright
 
+_AI_COMMAND_URL = "{ai_command_url}"
 
 async def _get_cdp_url() -> str:
     """Fetch CDP WebSocket URL from the local sandbox API."""
@@ -32,6 +33,39 @@ async def _get_cdp_url() -> str:
         resp = await client.get("http://127.0.0.1:8080/v1/browser/info")
         resp.raise_for_status()
         return resp.json()["data"]["cdp_url"]
+
+
+async def _ai_command(prompt: str, mode: str, page, token: str):
+    """Call AI with prompt. mode='execute' runs Playwright code, mode='data' returns text."""
+    _ctx = ""
+    try:
+        _ctx = await page.inner_text("body")
+        if len(_ctx) > 50000:
+            _ctx = _ctx[:50000]
+    except Exception:
+        pass
+    _headers = {{"Authorization": f"Bearer {{token}}"}} if token else {{}}
+    async with httpx.AsyncClient(timeout=120) as _c:
+        _r = await _c.post(
+            _AI_COMMAND_URL,
+            json={{"prompt": prompt, "page_context": _ctx, "mode": mode}},
+            headers=_headers
+        )
+        _r.raise_for_status()
+        try:
+            _payload = _r.json()
+        except Exception as _json_exc:
+            raise RuntimeError(
+                f"AI command returned non-JSON response (status={{_r.status_code}}): {{_r.text[:200]}}"
+            ) from _json_exc
+        _text = _payload["data"]["response"]
+        if mode == "execute":
+            _fn_src = "async def __ai():\\n" + "\\n".join("    " + l for l in _text.strip().split("\\n"))
+            _ns = {{"page": page}}
+            exec(_fn_src, _ns)
+            await _ns["__ai"]()
+            return None
+        return _text
 
 
 {execute_skill_func}
@@ -73,7 +107,43 @@ if __name__ == "__main__":
 import asyncio
 import json as _json
 import sys
+import httpx
 from playwright.async_api import async_playwright
+
+_AI_COMMAND_URL = "{ai_command_url}"
+
+
+async def _ai_command(prompt: str, mode: str, page, token: str):
+    """Call AI with prompt. mode='execute' runs Playwright code, mode='data' returns text."""
+    _ctx = ""
+    try:
+        _ctx = await page.inner_text("body")
+        if len(_ctx) > 50000:
+            _ctx = _ctx[:50000]
+    except Exception:
+        pass
+    _headers = {{"Authorization": f"Bearer {{token}}"}} if token else {{}}
+    async with httpx.AsyncClient(timeout=120) as _c:
+        _r = await _c.post(
+            _AI_COMMAND_URL,
+            json={{"prompt": prompt, "page_context": _ctx, "mode": mode}},
+            headers=_headers
+        )
+        _r.raise_for_status()
+        try:
+            _payload = _r.json()
+        except Exception as _json_exc:
+            raise RuntimeError(
+                f"AI command returned non-JSON response (status={{_r.status_code}}): {{_r.text[:200]}}"
+            ) from _json_exc
+        _text = _payload["data"]["response"]
+        if mode == "execute":
+            _fn_src = "async def __ai():\\n" + "\\n".join("    " + l for l in _text.strip().split("\\n"))
+            _ns = {{"page": page}}
+            exec(_fn_src, _ns)
+            await _ns["__ai"]()
+            return None
+        return _text
 
 
 {execute_skill_func}
@@ -119,7 +189,14 @@ class StepExecutionError(Exception):
         super().__init__(f"STEP_FAILED:{step_index}:{original_error}")
 '''
 
-    def generate_script(self, steps: List[Dict[str, Any]], params: Dict[str, Any] = None, is_local: bool = False, test_mode: bool = False) -> str:
+    def generate_script(
+        self,
+        steps: List[Dict[str, Any]],
+        params: Dict[str, Any] = None,
+        is_local: bool = False,
+        test_mode: bool = False,
+        ai_command_url: str | None = None,
+    ) -> str:
         params = params or {}
         deduped = self._deduplicate_steps(steps)
         deduped = self._infer_missing_tab_transitions(deduped)
@@ -171,6 +248,26 @@ class StepExecutionError(Exception):
                     converted = self._strip_locator_result_capture(converted)
                     for code_line in converted.split("\n"):
                         step_lines.append(f"    {code_line}" if code_line.strip() else "")
+                lines.extend(self._wrap_step_lines(step_lines, step_index, test_mode))
+                lines.append("")
+                continue
+
+            # AI command — call _ai_command(prompt, mode, page, token)
+            if action == "ai_command":
+                prompt_text = self._escape(step.get("prompt", ""))
+                ai_mode = step.get("ai_mode", "data")
+                output_var = step.get("output_variable") or ""
+
+                if ai_mode == "execute":
+                    # Mode 1: AI generates and executes Playwright code, no return
+                    step_lines.append(f'    await _ai_command("{prompt_text}", "execute", current_page, kwargs.get("_ai_token", ""))')
+                else:
+                    # Mode 2: AI returns data, stored in variable
+                    result_var = output_var or f"ai_result_{step_index + 1}"
+                    result_key = output_var or f"ai_command_{step_index + 1}"
+                    step_lines.append(f'    {result_var} = await _ai_command("{prompt_text}", "data", current_page, kwargs.get("_ai_token", ""))')
+                    step_lines.append(f'    _results["{result_key}"] = {result_var}')
+
                 lines.extend(self._wrap_step_lines(step_lines, step_index, test_mode))
                 lines.append("")
                 continue
@@ -334,7 +431,18 @@ class StepExecutionError(Exception):
             execute_skill_func=execute_skill_func,
             default_timeout_ms=RPA_PLAYWRIGHT_TIMEOUT_MS,
             navigation_timeout_ms=RPA_NAVIGATION_TIMEOUT_MS,
+            ai_command_url=ai_command_url or self._get_ai_command_url(is_local),
         )
+
+    @staticmethod
+    def _get_ai_command_url(is_local: bool) -> str:
+        """Return the backend AI command URL for the generated script."""
+        import os
+        explicit = os.environ.get("RPA_AI_COMMAND_URL", "").strip()
+        if explicit:
+            return explicit.rstrip("/")
+        # Default: assume backend is on localhost:8000
+        return "http://127.0.0.1:8000/api/v1/rpa/ai-command"
 
     @staticmethod
     def _wrap_step_lines(step_lines: List[str], step_index: int, test_mode: bool) -> List[str]:
@@ -560,7 +668,7 @@ class StepExecutionError(Exception):
             # BUT: never deduplicate AI steps (each AI instruction is unique)
             if (step.get("action") == prev.get("action")
                     and step.get("target") == prev.get("target")
-                    and step.get("action") not in ("navigate", "ai_script")):
+                    and step.get("action") not in ("navigate", "ai_script", "ai_command")):
                 result[-1] = step  # Replace previous with current (keep last)
                 continue
             result.append(step)

@@ -1,6 +1,7 @@
 import json
 import logging
 import asyncio
+import os
 from pathlib import Path
 from urllib.parse import urlparse
 from typing import Dict, Any
@@ -21,6 +22,7 @@ from backend.rpa.cdp_connector import get_cdp_connector
 from backend.rpa.screencast import SessionScreencastController
 from backend.user.dependencies import get_current_user, User
 from backend.config import settings
+from backend.deepagent.engine import get_llm_model
 from backend.storage import get_repository
 from backend.credential.vault import inject_credentials
 
@@ -28,12 +30,27 @@ logger = logging.getLogger(__name__)
 
 RPA_TEST_TIMEOUT_S = 180.0
 RPA_PAGE_TIMEOUT_MS = 60000
+AI_COMMAND_NAVIGATION_SUPPRESS_MS = 2000
+AI_COMMAND_DOMCONTENTLOADED_TIMEOUT_MS = 1500
+AI_COMMAND_NETWORKIDLE_TIMEOUT_MS = 1000
 
 router = APIRouter(tags=["RPA"])
 generator = PlaywrightGenerator()
 executor = ScriptExecutor()
 exporter = SkillExporter()
 assistant = RPAAssistant()
+
+
+async def _wait_for_ai_command_page_stability(page) -> None:
+    """Give AI-triggered navigations a brief chance to settle before resuming recording."""
+    try:
+        await page.wait_for_load_state("domcontentloaded", timeout=AI_COMMAND_DOMCONTENTLOADED_TIMEOUT_MS)
+    except Exception:
+        pass
+    try:
+        await page.wait_for_load_state("networkidle", timeout=AI_COMMAND_NETWORKIDLE_TIMEOUT_MS)
+    except Exception:
+        pass
 
 
 class StartSessionRequest(BaseModel):
@@ -57,6 +74,18 @@ class ChatRequest(BaseModel):
 
 class ConfirmRequest(BaseModel):
     approved: bool
+
+
+class AICommandRequest(BaseModel):
+    prompt: str
+    page_context: str = ""
+    mode: str = "data"  # "execute" or "data"
+
+
+class SessionAICommandRequest(BaseModel):
+    prompt: str
+    output_variable: str = ""
+    ai_mode: str = "data"  # "execute" or "data"
 
 
 class NavigateRequest(BaseModel):
@@ -138,6 +167,42 @@ async def _get_http_user(request: Request) -> User | None:
         username=session_doc["username"],
         role=session_doc.get("role", "user"),
     )
+
+
+def _extract_request_auth_token(request: Request | None) -> str:
+    """Extract the auth session token from either Authorization header or session cookie."""
+    if request is None:
+        return ""
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        return auth_header.split(" ", 1)[1].strip()
+    return (request.cookies.get(settings.session_cookie) or "").strip()
+
+
+def _build_ai_command_url_for_request(request: Request | None, *, is_local: bool) -> str:
+    """Build a runtime-accessible AI command URL for generated scripts."""
+    env_override = (os.environ.get("RPA_AI_COMMAND_URL") or "").strip()
+    if env_override:
+        return env_override.rstrip("/")
+    if request is None:
+        return generator._get_ai_command_url(is_local)
+
+    base = str(request.base_url).rstrip("/")
+    parsed = urlparse(base)
+    scheme = parsed.scheme or "http"
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port
+    if not is_local and host in {"127.0.0.1", "localhost"}:
+        host = "host.docker.internal"
+    netloc = host if port is None else f"{host}:{port}"
+    return parsed._replace(
+        scheme=scheme,
+        netloc=netloc,
+        path="/api/v1/rpa/ai-command",
+        params="",
+        query="",
+        fragment="",
+    ).geturl()
 
 
 def _get_sandbox_vnc_ws_url() -> str:
@@ -402,15 +467,24 @@ async def generate_script(
 @router.post("/session/{session_id}/test")
 async def test_script(
     session_id: str,
-    request: GenerateRequest = GenerateRequest(),
+    body: GenerateRequest = GenerateRequest(),
     current_user: User = Depends(get_current_user),
+    http_request: Request = None,
 ):
     session = await rpa_manager.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
     steps = [step.model_dump() for step in session.steps]
-    script = generator.generate_script(steps, request.params, is_local=(settings.storage_backend == "local"), test_mode=True)
+    is_local_mode = settings.storage_backend == "local"
+    ai_command_url = _build_ai_command_url_for_request(http_request, is_local=is_local_mode)
+    script = generator.generate_script(
+        steps,
+        body.params,
+        is_local=is_local_mode,
+        test_mode=True,
+        ai_command_url=ai_command_url,
+    )
 
     logs = []
     browser = await get_cdp_connector().get_browser(
@@ -423,10 +497,11 @@ async def test_script(
     pw_loop_runner = getattr(connector, "run_in_pw_loop", None)
 
     # 本地模式：通过 pw_loop_runner 确保 Playwright 操作在正确的事件循环里执行
-    if settings.storage_backend == "local":
-        test_kwargs: Dict[str, Any] = {"_downloads_dir": downloads_dir}
-        if request.params:
-            test_kwargs.update(await inject_credentials(str(current_user.id), request.params, {}))
+    _ai_token = _extract_request_auth_token(http_request)
+    if is_local_mode:
+        test_kwargs: Dict[str, Any] = {"_downloads_dir": downloads_dir, "_ai_token": _ai_token}
+        if body.params:
+            test_kwargs.update(await inject_credentials(str(current_user.id), body.params, {}))
         result = await executor.execute(
             browser,
             script,
@@ -440,10 +515,10 @@ async def test_script(
         )
     else:
         # Docker 模式：使用原有逻辑
-        docker_kwargs: Dict[str, Any] = {}
-        if request.params:
+        docker_kwargs: Dict[str, Any] = {"_ai_token": _ai_token}
+        if body.params:
             docker_kwargs = await inject_credentials(
-                str(current_user.id), request.params, {}
+                str(current_user.id), body.params, {}
             )
         result = await executor.execute(
             browser,
@@ -627,6 +702,210 @@ async def agent_abort(
     if agent:
         agent.abort()
     return {"ok": True}
+
+
+@router.post("/ai-command")
+async def execute_ai_command(
+    request: AICommandRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Call LLM with a prompt — used by generated scripts at runtime.
+
+    mode='execute': AI generates Playwright Python code (async, using `page` variable).
+    mode='data': AI returns plain text data.
+    """
+    model_config = await _resolve_user_model_config(str(current_user.id))
+    model = get_llm_model(config=model_config, streaming=False)
+
+    system_prompt = ""
+    if request.mode == "execute":
+        system_prompt = (
+            "你是一个 Playwright 自动化专家。根据用户的指令和页面内容，生成简短的 Playwright Python 代码（async）。\n"
+            "规则：\n"
+            "- 代码中使用 `page` 变量来操作页面\n"
+            "- 只输出纯 Python 代码，绝对不要使用 markdown 代码块标记（不要写 ```python 或 ```）\n"
+            "- 不要包含注释说明或 import 语句\n"
+            "- 每行一条 await 语句\n"
+            "- 不要使用 try/except\n"
+        )
+        if request.page_context:
+            system_prompt += f"\n当前页面文本内容：\n\n{request.page_context[:50000]}"
+    else:
+        if request.page_context:
+            system_prompt = f"以下是当前页面的文本内容：\n\n{request.page_context[:50000]}"
+
+    messages = []
+    if system_prompt:
+        messages.append(("system", system_prompt))
+    messages.append(("human", request.prompt))
+
+    response = await model.ainvoke(messages)
+    ai_response = response.content if hasattr(response, "content") else str(response)
+
+    # Strip markdown code fences for execute mode
+    if request.mode == "execute":
+        import re as _re
+        cleaned = ai_response.strip()
+        cleaned = _re.sub(r"^```(?:python)?\s*\n?", "", cleaned)
+        cleaned = _re.sub(r"\n?```\s*$", "", cleaned)
+        ai_response = cleaned.strip()
+
+    return {"data": {"response": ai_response}}
+
+
+@router.post("/session/{session_id}/ai-command")
+async def session_ai_command(
+    session_id: str,
+    request: SessionAICommandRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Insert an AI command step into recording session and execute AI immediately.
+
+    ai_mode='execute': AI generates Playwright code and executes it on the page.
+    ai_mode='data': AI returns data stored as a variable.
+    """
+    recording_paused = False
+    try:
+        session = await rpa_manager.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        if session.user_id != str(current_user.id):
+            raise HTTPException(status_code=403, detail="Not authorized")
+
+        page = rpa_manager.get_page(session_id)
+        if request.ai_mode == "execute" and not page:
+            logger.warning(
+                "RPA session ai-command execute requested without active page session=%s user=%s",
+                session_id,
+                current_user.username,
+            )
+            raise HTTPException(status_code=400, detail="No active page for this session")
+        if request.ai_mode == "execute":
+            rpa_manager.pause_recording(session_id)
+            recording_paused = True
+
+        # Capture page context
+        page_context = ""
+        if page:
+            try:
+                page_context = await page.inner_text("body")
+                if len(page_context) > 50000:
+                    page_context = page_context[:50000]
+            except Exception as e:
+                logger.warning(f"Failed to capture page context: {e}")
+
+        # Build system prompt based on mode
+        model_config = await _resolve_user_model_config(str(current_user.id))
+        model = get_llm_model(config=model_config, streaming=False)
+
+        if request.ai_mode == "execute":
+            system_prompt = (
+                "你是一个 Playwright 自动化专家。根据用户的指令和页面内容，生成简短的 Playwright Python 代码（async）。\n"
+                "规则：\n"
+                "- 代码中使用 `page` 变量来操作页面\n"
+                "- 只输出纯 Python 代码，绝对不要使用 markdown 代码块标记（不要写 ```python 或 ```）\n"
+                "- 不要包含注释说明或 import 语句\n"
+                "- 每行一条 await 语句\n"
+                "- 不要使用 try/except\n"
+            )
+            if page_context:
+                system_prompt += f"\n当前页面文本内容：\n\n{page_context}"
+        else:
+            system_prompt = ""
+            if page_context:
+                system_prompt = f"以下是当前页面的文本内容：\n\n{page_context}"
+
+        messages = []
+        if system_prompt:
+            messages.append(("system", system_prompt))
+        messages.append(("human", request.prompt))
+
+        logger.info(
+            "RPA session ai-command start session=%s user=%s mode=%s prompt_len=%s has_page=%s",
+            session_id,
+            current_user.username,
+            request.ai_mode,
+            len(request.prompt or ""),
+            bool(page),
+        )
+        response = await model.ainvoke(messages)
+        ai_response = response.content if hasattr(response, "content") else str(response)
+
+        # Strip markdown code fences if present (```python ... ``` or ``` ... ```)
+        import re as _re
+        cleaned = ai_response.strip()
+        cleaned = _re.sub(r"^```(?:python)?\s*\n?", "", cleaned)
+        cleaned = _re.sub(r"\n?```\s*$", "", cleaned)
+        cleaned = cleaned.strip()
+
+        # For execute mode, actually run the generated code on the page
+        execute_error = None
+        if request.ai_mode == "execute" and page:
+            try:
+                await page.evaluate("window.__rpa_paused = true")
+            except Exception:
+                pass
+            try:
+                fn_src = "async def __ai_fn():\n" + "\n".join("    " + line for line in cleaned.split("\n"))
+                ns = {"page": page}
+                exec(fn_src, ns)
+                await ns["__ai_fn"]()
+            except Exception:
+                logger.exception(
+                    "Failed to execute AI-generated code session=%s user=%s mode=%s",
+                    session_id,
+                    current_user.username,
+                    request.ai_mode,
+                )
+                import traceback as _traceback
+                execute_error = _traceback.format_exc()
+            finally:
+                rpa_manager.suppress_navigation_events(
+                    session_id,
+                    session.active_tab_id,
+                    duration_ms=AI_COMMAND_NAVIGATION_SUPPRESS_MS,
+                )
+                await _wait_for_ai_command_page_stability(page)
+                try:
+                    await page.evaluate("window.__rpa_paused = false")
+                except Exception:
+                    pass
+
+        # Add step to session
+        step_data = {
+            "action": "ai_command",
+            "prompt": request.prompt,
+            "value": cleaned if request.ai_mode == "execute" else ai_response,
+            "output_variable": request.output_variable or None if request.ai_mode == "data" else None,
+            "include_page_context": True,  # always capture page context for AI commands
+            "ai_mode": request.ai_mode,
+            "source": "record",
+            "description": f"AI 命令 ({('执行' if request.ai_mode == 'execute' else '数据')}): {request.prompt[:40]}",
+        }
+        step = await rpa_manager.add_step(session_id, step_data)
+
+        result = {
+            "status": "success",
+            "step": step.model_dump(),
+            "ai_response": ai_response,
+            "ai_mode": request.ai_mode,
+        }
+        if execute_error:
+            result["execute_error"] = execute_error
+        return result
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception(
+            "RPA session ai-command failed session=%s user=%s mode=%s",
+            session_id,
+            current_user.username,
+            request.ai_mode,
+        )
+        raise
+    finally:
+        if recording_paused:
+            rpa_manager.resume_recording(session_id)
 
 
 @router.websocket("/session/{session_id}/steps")
