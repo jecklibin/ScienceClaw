@@ -255,17 +255,48 @@ class StepExecutionError(Exception):
             # AI command — call _ai_command(prompt, mode, page, token)
             if action == "ai_command":
                 prompt_text = self._escape(step.get("prompt", ""))
-                ai_mode = step.get("ai_mode", "data")
+                operation_code = step.get("operation_code") or ""
+                operation_summary = self._escape(step.get("operation_summary") or "")
+                data_prompt = self._escape(step.get("data_prompt") or "")
+                data_value = step.get("data_value")
                 output_var = step.get("output_variable") or ""
+                result_mode = step.get("ai_result_mode") or "data_only"
+                legacy_mode = step.get("ai_mode", "data")
 
-                if ai_mode == "execute":
-                    # Mode 1: AI generates and executes Playwright code, no return
+                if not operation_code and legacy_mode == "execute":
                     step_lines.append(f'    await _ai_command("{prompt_text}", "execute", current_page, kwargs.get("_ai_token", ""))')
-                else:
-                    # Mode 2: AI returns data, stored in variable
+                    lines.extend(self._wrap_step_lines(step_lines, step_index, test_mode))
+                    lines.append("")
+                    continue
+
+                has_operation = bool(operation_code)
+                has_data = result_mode in {"data_only", "operation_and_data"} or (not operation_code and legacy_mode == "data")
+
+                # Operation: call AI at runtime so it can see the actual page state
+                # instead of hardcoding recorded code that may break on page changes.
+                if has_operation:
+                    operation_prompt = operation_summary or prompt_text
+                    step_lines.append(f'    await _ai_command("{operation_prompt}", "execute", current_page, kwargs.get("_ai_token", ""))')
+
+                # Stability wait between operation and data extraction
+                if has_operation and has_data:
+                    step_lines.append('    await current_page.wait_for_timeout(500)')
+                    step_lines.append('    try:')
+                    step_lines.append('        await current_page.wait_for_load_state("domcontentloaded", timeout=5000)')
+                    step_lines.append('    except Exception:')
+                    step_lines.append('        pass')
+                    step_lines.append('    try:')
+                    step_lines.append('        await current_page.wait_for_load_state("networkidle", timeout=2000)')
+                    step_lines.append('    except Exception:')
+                    step_lines.append('        pass')
+                    step_lines.append('    await current_page.wait_for_timeout(500)')
+
+                # Data extraction
+                if has_data and (data_prompt or prompt_text or data_value is not None):
                     result_var = output_var or f"ai_result_{step_index + 1}"
                     result_key = output_var or f"ai_command_{step_index + 1}"
-                    step_lines.append(f'    {result_var} = await _ai_command("{prompt_text}", "data", current_page, kwargs.get("_ai_token", ""))')
+                    effective_prompt = data_prompt or prompt_text
+                    step_lines.append(f'    {result_var} = await _ai_command("{effective_prompt}", "data", current_page, kwargs.get("_ai_token", ""))')
                     step_lines.append(f'    _results["{result_key}"] = {result_var}')
 
                 lines.extend(self._wrap_step_lines(step_lines, step_index, test_mode))

@@ -28,7 +28,6 @@ const showAICommandDialog = ref(false);
 const aiCommandPrompt = ref('');
 const aiCommandOutputVar = ref('');
 const aiCommandLoading = ref(false);
-const aiCommandMode = ref<'execute' | 'data'>('data');
 const latestServerSteps = ref<any[]>([]);
 const pendingAISteps = ref<any[]>([]);
 
@@ -139,9 +138,14 @@ const mapServerSteps = (serverSteps: any[]) => ([
       frameSummary: isAICommand ? undefined : formatFramePath(s.frame_path),
       validationStatus: s.validation?.status || '',
       validationDetails: s.validation?.details || '',
-      aiResponse: isAICommand ? s.value : undefined,
+      operationCode: isAICommand ? s.operation_code : undefined,
+      operationSummary: isAICommand ? s.operation_summary : undefined,
+      dataValue: isAICommand ? s.data_value : undefined,
+      dataSummary: isAICommand ? s.data_summary : undefined,
+      dataPrompt: isAICommand ? s.data_prompt : undefined,
+      aiResultMode: isAICommand ? (s.ai_result_mode || 'data_only') : undefined,
       outputVariable: isAICommand ? s.output_variable : undefined,
-      aiMode: isAICommand ? (s.ai_mode || 'data') : undefined,
+      dataFormat: isAICommand ? (s.data_format || 'text') : undefined,
     };
   })
 ]);
@@ -158,23 +162,24 @@ const reconcilePendingAISteps = (serverSteps: any[]) => {
     return !serverSteps.some((serverStep: any) => (
       serverStep.action === 'ai_command' &&
       (serverStep.prompt || serverStep.description || '') === pendingStep.description &&
-      (serverStep.ai_mode || 'data') === pendingStep.aiMode &&
       ((serverStep.output_variable || '') === (pendingStep.outputVariable || ''))
     ));
   });
 };
 
-const createPendingAIStep = (prompt: string, aiMode: 'execute' | 'data', outputVariable: string) => ({
+const createPendingAIStep = (prompt: string, outputVariable: string) => ({
   id: `AI${pendingAISteps.value.length + 1}`,
   title: 'AI 命令（执行中）',
   description: prompt,
   status: 'active',
   source: 'ai',
   sensitive: false,
-  aiMode,
-  outputVariable: aiMode === 'data' ? outputVariable : undefined,
+  outputVariable: outputVariable || undefined,
   localOnly: true,
 });
+
+const hasAIOperation = (step: any) => Boolean(step.operationCode || step.operationSummary);
+const hasAIData = (step: any) => Boolean(step.dataValue || step.dataSummary || step.outputVariable);
 
 interface ChatMessage {
   role: 'user' | 'assistant';
@@ -592,21 +597,18 @@ const deleteStep = async (stepIndex: number) => {
 const submitAICommand = async () => {
   if (!sessionId.value || !aiCommandPrompt.value.trim()) return;
   const prompt = aiCommandPrompt.value.trim();
-  const outputVariable = aiCommandMode.value === 'data' ? aiCommandOutputVar.value.trim() : '';
-  const mode = aiCommandMode.value;
-  const pendingStep = createPendingAIStep(prompt, mode, outputVariable);
+  const outputVariable = aiCommandOutputVar.value.trim();
+  const pendingStep = createPendingAIStep(prompt, outputVariable);
   pendingAISteps.value.push(pendingStep);
   showAICommandDialog.value = false;
   aiCommandPrompt.value = '';
   aiCommandOutputVar.value = '';
-  aiCommandMode.value = 'data';
   syncDisplayedSteps();
   aiCommandLoading.value = true;
   try {
     const resp = await apiClient.post(`/rpa/session/${sessionId.value}/ai-command`, {
       prompt,
       output_variable: outputVariable,
-      ai_mode: mode,
     }, {
       timeout: 0,
     });
@@ -868,15 +870,21 @@ const sendMessage = async () => {
             </div>
             <h3 class="text-gray-900 font-semibold text-sm">{{ step.title }}</h3>
             <p class="text-gray-500 text-[11px] mt-2 leading-relaxed">{{ step.description }}</p>
-            <!-- AI command: mode badge -->
-            <span v-if="step.aiMode" class="inline-block mt-1.5 px-1.5 py-0.5 rounded text-[10px] font-semibold"
-              :class="step.aiMode === 'execute' ? 'bg-orange-100 text-orange-700' : 'bg-blue-100 text-blue-700'"
-            >{{ step.aiMode === 'execute' ? '执行操作' : '提取数据' }}</span>
-            <!-- AI command response display -->
-            <div v-if="step.aiResponse" class="mt-2 p-2 bg-purple-50 rounded-lg text-[10px]">
-              <p class="font-semibold text-purple-700 mb-1">{{ step.aiMode === 'execute' ? '生成的代码:' : 'AI 响应:' }}</p>
-              <pre v-if="step.aiMode === 'execute'" class="text-gray-700 whitespace-pre-wrap break-all font-mono">{{ step.aiResponse }}</pre>
-              <p v-else class="text-gray-700 whitespace-pre-wrap break-all">{{ step.aiResponse }}</p>
+            <div v-if="step.source === 'ai' && (hasAIOperation(step) || hasAIData(step))" class="mt-2 space-y-2 text-[10px]">
+              <div class="flex flex-wrap gap-1.5">
+                <span v-if="hasAIOperation(step)" class="inline-flex rounded bg-orange-100 px-1.5 py-0.5 font-semibold text-orange-700">操作</span>
+                <span v-if="hasAIData(step)" class="inline-flex rounded bg-blue-100 px-1.5 py-0.5 font-semibold text-blue-700">数据</span>
+              </div>
+              <div v-if="hasAIOperation(step)" class="rounded-lg bg-orange-50 p-2">
+                <p class="mb-1 font-semibold text-orange-700">操作结果</p>
+                <p v-if="step.operationSummary" class="text-gray-700 whitespace-pre-wrap break-all">{{ step.operationSummary }}</p>
+                <pre v-if="step.operationCode" class="mt-1 text-gray-700 whitespace-pre-wrap break-all font-mono">{{ step.operationCode }}</pre>
+              </div>
+              <div v-if="hasAIData(step)" class="rounded-lg bg-blue-50 p-2">
+                <p class="mb-1 font-semibold text-blue-700">数据结果</p>
+                <p v-if="step.dataSummary" class="text-gray-700 whitespace-pre-wrap break-all">{{ step.dataSummary }}</p>
+                <p v-if="step.dataValue" class="text-gray-700 whitespace-pre-wrap break-all">{{ step.dataValue }}</p>
+              </div>
             </div>
             <p v-if="step.outputVariable" class="mt-1.5 text-[10px] text-purple-600">
               <span class="font-semibold">变量:</span>
@@ -930,23 +938,8 @@ const sendMessage = async () => {
               插入 AI 命令
             </h3>
 
-            <!-- Mode selection -->
-            <div class="flex gap-2">
-              <button
-                @click="aiCommandMode = 'execute'"
-                class="flex-1 py-2 text-sm font-semibold rounded-lg border transition-colors"
-                :class="aiCommandMode === 'execute' ? 'bg-[#ac0089] text-white border-[#ac0089]' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'"
-                :disabled="aiCommandLoading"
-              >执行操作</button>
-              <button
-                @click="aiCommandMode = 'data'"
-                class="flex-1 py-2 text-sm font-semibold rounded-lg border transition-colors"
-                :class="aiCommandMode === 'data' ? 'bg-[#ac0089] text-white border-[#ac0089]' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'"
-                :disabled="aiCommandLoading"
-              >提取数据</button>
-            </div>
             <p class="text-[10px] text-gray-400 -mt-2">
-              {{ aiCommandMode === 'execute' ? 'AI 将生成 Playwright 代码并在浏览器中执行' : 'AI 将返回文本数据，存为变量供后续步骤使用' }}
+              AI 会先判断是否需要执行页面操作，再决定是否提取数据；操作结果和数据结果都可能为空。
             </p>
 
             <div>
@@ -955,18 +948,19 @@ const sendMessage = async () => {
                 v-model="aiCommandPrompt"
                 class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#ac0089]/40 resize-none"
                 rows="3"
-                :placeholder="aiCommandMode === 'execute' ? '例如：点击页面上价格最低的商品' : '例如：提取当前页面的商品标题'"
+                placeholder="例如：先打开价格最低的商品详情页，再提取商品标题和价格"
                 :disabled="aiCommandLoading"
               ></textarea>
             </div>
-            <div v-if="aiCommandMode === 'data'">
+            <div>
               <label class="block text-xs font-semibold text-gray-600 mb-1">输出变量名</label>
               <input
                 v-model="aiCommandOutputVar"
                 class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#ac0089]/40"
-                placeholder="例如 product_title"
+                placeholder="例如 product_info"
                 :disabled="aiCommandLoading"
               />
+              <p class="mt-1 text-[10px] text-gray-400">如果 AI 最终有数据产出，会写入该变量；纯操作场景可以留空。</p>
             </div>
             <div class="flex justify-end gap-2 pt-2">
               <button

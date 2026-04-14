@@ -44,6 +44,13 @@ class RPAStep(BaseModel):
     result_key: Optional[str] = None
     output_variable: Optional[str] = None  # variable name to store AI command result (mode=data)
     ai_mode: str = "data"  # "execute" (AI generates & runs Playwright code) or "data" (AI returns text)
+    ai_result_mode: str = "data_only"  # operation_only | data_only | operation_and_data
+    operation_code: Optional[str] = None
+    operation_summary: Optional[str] = None
+    data_prompt: Optional[str] = None
+    data_value: Optional[str] = None
+    data_summary: Optional[str] = None
+    data_format: str = "text"  # text | json | empty
     collection_hint: Dict[str, Any] = Field(default_factory=dict)
     item_hint: Dict[str, Any] = Field(default_factory=dict)
     ordinal: Optional[str] = None
