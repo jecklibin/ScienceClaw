@@ -21,6 +21,7 @@ class SkillExporter:
         description: str,
         script: str,
         params: Dict[str, Any],
+        ai_command_url: str = "",
     ) -> str:
         """Export skill to MongoDB or local filesystem based on storage_backend.
 
@@ -107,8 +108,11 @@ The skill is implemented in `skill.py` using Playwright for browser automation.
             (skill_dir / "SKILL.md").write_text(skill_md, encoding="utf-8")
             (skill_dir / "skill.py").write_text(script, encoding="utf-8")
             # Save params config (includes credential_id for sensitive params)
+            export_params = dict(params)
+            if ai_command_url:
+                export_params["_ai_command_url"] = ai_command_url
             (skill_dir / "params.json").write_text(
-                json.dumps(params, ensure_ascii=False, indent=2), encoding="utf-8"
+                json.dumps(export_params, ensure_ascii=False, indent=2), encoding="utf-8"
             )
 
             logger.info(f"Skill '{skill_name}' exported to {skill_dir}")
@@ -116,6 +120,9 @@ The skill is implemented in `skill.py` using Playwright for browser automation.
             # Save to MongoDB
             now = datetime.now(timezone.utc)
             col = get_repository("skills")
+            export_params = dict(params)
+            if ai_command_url:
+                export_params["_ai_command_url"] = ai_command_url
             await col.update_one(
                 {"user_id": user_id, "name": skill_name},
                 {
@@ -125,7 +132,7 @@ The skill is implemented in `skill.py` using Playwright for browser automation.
                             "skill.py": script,
                         },
                         "description": description,
-                        "params": params,
+                        "params": export_params,
                         "updated_at": now,
                     },
                     "$setOnInsert": {

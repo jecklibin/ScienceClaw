@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
-import { Camera, Terminal, CheckCircle, Radio, Send, Wand2, Bot, Code, X, House, FolderOpen, Globe } from 'lucide-vue-next';
+import { Camera, Terminal, CheckCircle, AlertCircle, LoaderCircle, Radio, Send, Wand2, Bot, Code, X, House, FolderOpen, Globe } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
 import { getBackendWsUrl } from '@/utils/sandbox';
 import {
@@ -22,6 +22,9 @@ const recordingTime = ref('00:00');
 const timerInterval = ref<any>(null);
 const loading = ref(true);
 const error = ref<string | null>(null);
+
+const latestServerSteps = ref<any[]>([]);
+const pendingAISteps = ref<any[]>([]);
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 const screencastFrameSize = ref<ScreencastSize>({ width: 1280, height: 720 });
@@ -115,19 +118,61 @@ const getValidationClass = (status?: string) => {
 
 const mapServerSteps = (serverSteps: any[]) => ([
   { id: '0', title: '环境就绪', description: '已成功启动 Playwright 浏览器', status: 'completed' },
-  ...serverSteps.map((s: any, i: number) => ({
-    id: String(i + 1),
-    title: s.description || s.action,
-    description: s.source === 'ai' ? (s.prompt || s.description || 'AI 操作') : `${s.action} -> ${formatLocator(s.target || s.label || '')}`,
-    status: 'completed',
-    source: s.source || 'record',
-    sensitive: s.sensitive || false,
-    locatorSummary: formatLocator(s.target),
-    frameSummary: formatFramePath(s.frame_path),
-    validationStatus: s.validation?.status || '',
-    validationDetails: s.validation?.details || '',
-  }))
+  ...serverSteps.map((s: any, i: number) => {
+    const isAICommand = s.action === 'ai_command';
+    return {
+      id: String(i + 1),
+      title: s.description || (isAICommand ? 'AI 命令' : s.action),
+      description: isAICommand
+        ? (s.prompt || s.description || 'AI 命令')
+        : (s.source === 'ai' ? (s.prompt || s.description || 'AI 操作') : `${s.action} -> ${formatLocator(s.target || s.label || '')}`),
+      status: 'completed',
+      source: isAICommand ? 'ai' : (s.source || 'record'),
+      sensitive: s.sensitive || false,
+      locatorSummary: isAICommand ? undefined : formatLocator(s.target),
+      frameSummary: isAICommand ? undefined : formatFramePath(s.frame_path),
+      validationStatus: s.validation?.status || '',
+      validationDetails: s.validation?.details || '',
+      operationCode: isAICommand ? s.operation_code : undefined,
+      operationSummary: isAICommand ? s.operation_summary : undefined,
+      dataValue: isAICommand ? s.data_value : undefined,
+      dataSummary: isAICommand ? s.data_summary : undefined,
+      dataPrompt: isAICommand ? s.data_prompt : undefined,
+      aiResultMode: isAICommand ? (s.ai_result_mode || 'data_only') : undefined,
+      outputVariable: isAICommand ? s.output_variable : undefined,
+      dataFormat: isAICommand ? (s.data_format || 'text') : undefined,
+    };
+  })
 ]);
+
+const syncDisplayedSteps = () => {
+  const mappedSteps = mapServerSteps(latestServerSteps.value);
+  steps.value = pendingAISteps.value.length
+    ? [...mappedSteps, ...pendingAISteps.value]
+    : mappedSteps;
+};
+
+const reconcilePendingAISteps = (serverSteps: any[]) => {
+  pendingAISteps.value = pendingAISteps.value.filter((pendingStep) => {
+    return !serverSteps.some((serverStep: any) => (
+      serverStep.action === 'ai_command' &&
+      (serverStep.prompt || serverStep.description || '') === pendingStep.description
+    ));
+  });
+};
+
+const createPendingAIStep = (prompt: string) => ({
+  id: `AI${pendingAISteps.value.length + 1}`,
+  title: 'AI 命令（执行中）',
+  description: prompt,
+  status: 'active',
+  source: 'ai',
+  sensitive: false,
+  localOnly: true,
+});
+
+const hasAIOperation = (step: any) => Boolean(step.operationCode || step.operationSummary);
+const hasAIData = (step: any) => Boolean(step.dataValue || step.dataSummary || step.outputVariable);
 
 interface ChatMessage {
   role: 'user' | 'assistant';
@@ -149,6 +194,7 @@ const newMessage = ref('');
 const sending = ref(false);
 const agentMode = ref(false);
 const agentRunning = ref(false);
+let aiCommandAbortController: AbortController | null = null;
 
 interface PendingConfirm {
   description: string;
@@ -199,9 +245,10 @@ const initSession = async () => {
 
     if (resp.data.status === 'success') {
       sessionId.value = resp.data.session.id;
-      steps.value = [
-        { id: '0', title: '环境就绪', description: '已成功启动 Playwright 浏览器，准备录制', status: 'completed' }
-      ];
+      latestServerSteps.value = [];
+      pendingAISteps.value = [];
+      syncDisplayedSteps();
+      steps.value[0] = { id: '0', title: '环境就绪', description: '已成功启动 Playwright 浏览器，准备录制', status: 'completed' };
       startTimer();
       startPollingSteps();
       await nextTick();
@@ -221,9 +268,9 @@ const startPollingSteps = () => {
     try {
       const resp = await apiClient.get(`/rpa/session/${sessionId.value}`);
       const serverSteps = resp.data.session?.steps || [];
-      if (serverSteps.length > 0) {
-        steps.value = mapServerSteps(serverSteps);
-      }
+      reconcilePendingAISteps(serverSteps);
+      latestServerSteps.value = serverSteps;
+      syncDisplayedSteps();
     } catch (err) {
       // Ignore polling errors
     }
@@ -534,7 +581,8 @@ const deleteStep = async (stepIndex: number) => {
     await apiClient.delete(`/rpa/session/${sessionId.value}/step/${stepIndex}`);
     const resp = await apiClient.get(`/rpa/session/${sessionId.value}`);
     const serverSteps = resp.data.session?.steps || [];
-    steps.value = mapServerSteps(serverSteps);
+    latestServerSteps.value = serverSteps;
+    syncDisplayedSteps();
   } catch (err) {
     console.error('Failed to delete step:', err);
   }
@@ -542,7 +590,14 @@ const deleteStep = async (stepIndex: number) => {
 
 const abortAgent = async () => {
   if (!sessionId.value) return;
-  await apiClient.post(`/rpa/session/${sessionId.value}/agent/abort`);
+  if (agentMode.value && aiCommandAbortController) {
+    aiCommandAbortController.abort();
+    aiCommandAbortController = null;
+    agentRunning.value = false;
+    sending.value = false;
+  } else {
+    await apiClient.post(`/rpa/session/${sessionId.value}/agent/abort`);
+  }
 };
 
 const sendConfirm = async (approved: boolean) => {
@@ -556,7 +611,6 @@ const sendMessage = async () => {
   const userText = newMessage.value.trim();
   newMessage.value = '';
   sending.value = true;
-  if (agentMode.value) agentRunning.value = true;
 
   const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   chatMessages.value.push({ role: 'user', text: userText, time: now });
@@ -565,6 +619,72 @@ const sendMessage = async () => {
   chatMessages.value.push(assistantMsg);
   const msgIdx = chatMessages.value.length - 1;
 
+  // AI command mode: call /ai-command endpoint
+  if (agentMode.value) {
+    agentRunning.value = true;
+    const pendingStep = createPendingAIStep(userText);
+    pendingAISteps.value.push(pendingStep);
+    syncDisplayedSteps();
+    chatMessages.value[msgIdx].text = 'AI 正在分析指令并执行...';
+    aiCommandAbortController = new AbortController();
+    try {
+      const resp = await apiClient.post(`/rpa/session/${sessionId.value}/ai-command`, {
+        prompt: userText,
+      }, {
+        timeout: 0,
+        signal: aiCommandAbortController.signal,
+      });
+      const result = resp.data;
+      // Build result summary
+      const parts: string[] = [];
+      if (result.operation_code) {
+        parts.push(`操作: ${result.ai_result_mode === 'operation_only' ? '已完成' : '已执行'}`);
+      }
+      if (result.data_value) {
+        parts.push(`数据: ${result.data_value}`);
+      }
+      if (result.execute_error) {
+        parts.push(`⚠️ 执行警告: ${result.execute_error.split('\n').slice(-3).join('\n')}`);
+      }
+      if (parts.length === 0) {
+        parts.push('指令已处理');
+      }
+      chatMessages.value[msgIdx].text = parts.join('\n');
+      chatMessages.value[msgIdx].status = 'done';
+      // Refresh steps
+      pendingAISteps.value = pendingAISteps.value.filter((step) => step !== pendingStep);
+      try {
+        const stepsResp = await apiClient.get(`/rpa/session/${sessionId.value}`);
+        const serverSteps = stepsResp.data.session?.steps || [];
+        reconcilePendingAISteps(serverSteps);
+        latestServerSteps.value = serverSteps;
+        syncDisplayedSteps();
+      } catch { /* ignore refresh errors */ }
+    } catch (err: any) {
+      if (err.name === 'CanceledError' || err.name === 'AbortError') {
+        chatMessages.value[msgIdx].text = 'AI 指令已中止';
+        chatMessages.value[msgIdx].status = 'error';
+        pendingStep.title = 'AI 命令（已中止）';
+        pendingStep.status = 'error';
+      } else {
+        console.error('Failed to execute AI command:', err);
+        const errorMessage = err?.response?.data?.detail || err?.message || '未知错误';
+        chatMessages.value[msgIdx].text = `AI 指令执行失败: ${errorMessage}`;
+        chatMessages.value[msgIdx].status = 'error';
+        pendingStep.title = 'AI 命令执行失败';
+        pendingStep.description = `${userText}\n${errorMessage}`;
+        pendingStep.status = 'error';
+      }
+      syncDisplayedSteps();
+    } finally {
+      aiCommandAbortController = null;
+      agentRunning.value = false;
+      sending.value = false;
+    }
+    return;
+  }
+
+  // Normal chat mode: SSE streaming
   try {
     const resp = await fetch(`/api/v1/rpa/session/${sessionId.value}/chat`, {
       method: 'POST',
@@ -572,7 +692,7 @@ const sendMessage = async () => {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${localStorage.getItem('token') || ''}`,
       },
-      body: JSON.stringify({ message: userText, mode: agentMode.value ? 'react' : 'chat' }),
+      body: JSON.stringify({ message: userText, mode: 'chat' }),
     });
 
     if (!resp.ok || !resp.body) {
@@ -742,7 +862,11 @@ const sendMessage = async () => {
             :key="step.id"
             class="bg-white p-4 rounded-xl shadow-sm border-l-4 transition-all group relative"
             :class="[
-              step.source === 'ai' ? 'border-[#ac0089]' : (step.status === 'active' ? 'border-[#831bd7]' : 'border-gray-200 opacity-70')
+              step.status === 'error'
+                ? 'border-rose-400'
+                : step.source === 'ai'
+                  ? 'border-[#ac0089]'
+                  : (step.status === 'active' ? 'border-[#831bd7]' : 'border-gray-200 opacity-70')
             ]"
           >
             <div class="flex justify-between items-start mb-1">
@@ -754,18 +878,40 @@ const sendMessage = async () => {
               </div>
               <div class="flex items-center gap-1">
                 <button
-                  v-if="index > 0"
+                  v-if="index > 0 && !step.localOnly"
                   @click="deleteStep(index - 1)"
                   class="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-red-50 rounded"
                   title="删除步骤"
                 >
                   <X class="text-red-500" :size="14" />
                 </button>
+                <LoaderCircle v-if="step.status === 'active'" class="text-[#831bd7] animate-spin" :size="14" />
                 <CheckCircle v-if="step.status === 'completed'" class="text-green-500" :size="14" />
+                <AlertCircle v-if="step.status === 'error'" class="text-rose-500" :size="14" />
               </div>
             </div>
             <h3 class="text-gray-900 font-semibold text-sm">{{ step.title }}</h3>
             <p class="text-gray-500 text-[11px] mt-2 leading-relaxed">{{ step.description }}</p>
+            <div v-if="step.source === 'ai' && (hasAIOperation(step) || hasAIData(step))" class="mt-2 space-y-2 text-[10px]">
+              <div class="flex flex-wrap gap-1.5">
+                <span v-if="hasAIOperation(step)" class="inline-flex rounded bg-orange-100 px-1.5 py-0.5 font-semibold text-orange-700">操作</span>
+                <span v-if="hasAIData(step)" class="inline-flex rounded bg-blue-100 px-1.5 py-0.5 font-semibold text-blue-700">数据</span>
+              </div>
+              <div v-if="hasAIOperation(step)" class="rounded-lg bg-orange-50 p-2">
+                <p class="mb-1 font-semibold text-orange-700">操作结果</p>
+                <p v-if="step.operationSummary" class="text-gray-700 whitespace-pre-wrap break-all">{{ step.operationSummary }}</p>
+                <pre v-if="step.operationCode" class="mt-1 text-gray-700 whitespace-pre-wrap break-all font-mono">{{ step.operationCode }}</pre>
+              </div>
+              <div v-if="hasAIData(step)" class="rounded-lg bg-blue-50 p-2">
+                <p class="mb-1 font-semibold text-blue-700">数据结果</p>
+                <p v-if="step.dataSummary" class="text-gray-700 whitespace-pre-wrap break-all">{{ step.dataSummary }}</p>
+                <p v-if="step.dataValue" class="text-gray-700 whitespace-pre-wrap break-all">{{ step.dataValue }}</p>
+              </div>
+            </div>
+            <p v-if="step.outputVariable" class="mt-1.5 text-[10px] text-purple-600">
+              <span class="font-semibold">变量:</span>
+              <span class="font-mono ml-1">{{ step.outputVariable }}</span>
+            </p>
             <div v-if="step.locatorSummary || step.frameSummary || step.validationStatus" class="mt-3 space-y-1.5 text-[10px] text-gray-500">
               <p v-if="step.locatorSummary" class="break-all">
                 <span class="font-semibold text-gray-600">Locator:</span>
@@ -884,7 +1030,7 @@ const sendMessage = async () => {
               <div>
                 <h3 class="text-gray-900 font-bold text-sm">AI 录制助手</h3>
                 <p class="text-[10px] font-bold" :class="agentRunning ? 'text-orange-500' : 'text-[#831bd7]'">
-                  {{ agentRunning ? 'Agent 运行中...' : (agentMode ? 'Agent 模式' : '已就绪 · 协助录制中') }}
+                  {{ agentRunning ? 'AI 指令执行中...' : (agentMode ? 'AI 指令模式' : '已就绪 · 协助录制中') }}
                 </p>
               </div>
             </div>
@@ -895,7 +1041,7 @@ const sendMessage = async () => {
                 class="text-[10px] font-bold text-red-500 border border-red-200 px-2 py-1 rounded-lg hover:bg-red-50 transition-colors"
               >中止</button>
               <label class="flex items-center gap-1.5 cursor-pointer" :class="agentRunning ? 'opacity-50 pointer-events-none' : ''">
-                <span class="text-[10px] text-gray-500 font-medium">Agent</span>
+                <span class="text-[10px] text-gray-500 font-medium">AI 指令</span>
                 <div
                   @click="agentMode = !agentMode"
                   class="w-8 h-4 rounded-full transition-colors relative"
@@ -1000,7 +1146,7 @@ const sendMessage = async () => {
               @keyup.enter="sendMessage"
               :disabled="sending || agentRunning"
               class="w-full bg-white border border-gray-200 rounded-2xl py-3 pl-4 pr-12 text-xs focus:ring-2 focus:ring-[#831bd7] focus:border-transparent shadow-sm placeholder:text-gray-400 outline-none disabled:opacity-50"
-              :placeholder="agentRunning ? 'Agent 运行中...' : (sending ? 'AI 正在处理...' : (agentMode ? '描述目标任务...' : '向助手提问...'))"
+              :placeholder="agentRunning ? 'AI 指令执行中...' : (sending ? 'AI 正在处理...' : (agentMode ? '输入 AI 指令...' : '向助手提问...'))"
               type="text"
             />
             <button

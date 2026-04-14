@@ -9,6 +9,7 @@ import {
   Tag,
   ChevronDown,
   ChevronUp,
+  Wand2,
 } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -60,6 +61,20 @@ interface StepItem {
   label?: string;
   sensitive?: boolean;
   url?: string;
+  prompt?: string;
+  output_variable?: string;
+  include_page_context?: boolean;
+  ai_mode?: string;
+  ai_result_mode?: string;
+  operation_code?: string;
+  operation_summary?: string;
+  data_prompt?: string;
+  data_value?: string;
+  data_summary?: string;
+  data_format?: string;
+  source?: string;
+  status?: 'pending' | 'error' | 'completed';
+  localOnly?: boolean;
 }
 
 interface ParamItem {
@@ -89,6 +104,26 @@ const credentials = ref<CredentialItem[]>([]);
 const promotingStepIndex = ref<number | null>(null);
 const expandedStepIndex = ref<number | null>(null);
 const isScriptDrawerOpen = ref(false);
+
+// AI Command dialog state
+const showAICommandDialog = ref(false);
+const aiCommandPrompt = ref('');
+const aiCommandOutputVar = ref('');
+const aiCommandLoading = ref(false);
+
+const createPendingAIStep = (prompt: string, outputVariable: string): StepItem => ({
+  id: `pending-ai-${Date.now()}`,
+  action: 'ai_command',
+  description: 'AI 命令（执行中）',
+  prompt,
+  output_variable: outputVariable,
+  source: 'ai',
+  status: 'pending',
+  localOnly: true,
+});
+
+const hasAIOperation = (step: StepItem) => Boolean(step.operation_code || step.operation_summary);
+const hasAIData = (step: StepItem) => Boolean(step.data_value || step.data_summary || step.output_variable);
 
 const parseLocator = (raw: unknown): ParsedLocator | null => {
   if (!raw) return null;
@@ -173,6 +208,9 @@ const getActionLabel = (action: string) => {
     close_tab: '关闭标签',
     download_click: '点击下载',
     download: '下载',
+    ai_command: 'AI 命令',
+    ai_script: 'AI 脚本',
+    extract_text: '提取文本',
   };
   return map[action] || action;
 };
@@ -192,6 +230,9 @@ const getActionColor = (action: string) => {
     close_tab: 'bg-rose-100 text-rose-700',
     download_click: 'bg-teal-100 text-teal-700',
     download: 'bg-teal-100 text-teal-700',
+    ai_command: 'bg-purple-100 text-purple-700',
+    ai_script: 'bg-purple-100 text-purple-700',
+    extract_text: 'bg-lime-100 text-lime-700',
   };
   return map[action] || 'bg-gray-100 text-gray-700';
 };
@@ -437,6 +478,44 @@ const goToTest = () => {
   });
 };
 
+const submitAICommand = async () => {
+  if (!sessionId.value || !aiCommandPrompt.value.trim()) return;
+  const prompt = aiCommandPrompt.value.trim();
+  const outputVariable = aiCommandOutputVar.value.trim();
+  const pendingStep = createPendingAIStep(prompt, outputVariable);
+  steps.value = [...steps.value, pendingStep];
+  showAICommandDialog.value = false;
+  aiCommandPrompt.value = '';
+  aiCommandOutputVar.value = '';
+  aiCommandLoading.value = true;
+  try {
+    const resp = await apiClient.post(`/rpa/session/${sessionId.value}/ai-command`, {
+      prompt,
+      output_variable: outputVariable,
+    }, {
+      timeout: 0,
+    });
+    // Show execute error if any
+    if (resp.data?.execute_error) {
+      alert(`AI 命令执行出错: ${resp.data.execute_error}`);
+    }
+    // Reload session to include the new AI command step
+    await loadSession();
+  } catch (err) {
+    console.error('Failed to execute AI command:', err);
+    const errorMessage =
+      (err as any)?.details?.detail ||
+      (err as any)?.message ||
+      '未知错误';
+    pendingStep.description = 'AI 命令执行失败';
+    pendingStep.value = errorMessage;
+    pendingStep.status = 'error';
+    alert(`AI 命令执行失败: ${errorMessage}`);
+  } finally {
+    aiCommandLoading.value = false;
+  }
+};
+
 onMounted(() => {
   loadSession();
   loadCredentials();
@@ -533,6 +612,13 @@ onMounted(() => {
                         {{ getActionLabel(step.action) }}
                       </span>
                       <span
+                        v-if="step.status === 'pending' || step.status === 'error'"
+                        class="rounded-full px-2.5 py-1 text-[10px] font-semibold"
+                        :class="step.status === 'pending' ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700'"
+                      >
+                        {{ step.status === 'pending' ? '执行中' : '失败' }}
+                      </span>
+                      <span
                         v-if="step.validation?.status"
                         class="rounded-full px-2.5 py-1 text-[10px] font-semibold"
                         :class="getValidationClass(step.validation.status)"
@@ -578,6 +664,43 @@ onMounted(() => {
               >
                 <div class="grid gap-3 rounded-2xl bg-white p-4 ring-1 ring-[#831bd7]/10">
                   <div class="grid gap-2 text-sm text-gray-600">
+                    <!-- AI Command specific fields -->
+                    <template v-if="step.action === 'ai_command'">
+                      <div class="grid gap-1 sm:grid-cols-[92px_minmax(0,1fr)]">
+                        <span class="text-xs font-bold uppercase tracking-wide text-gray-400">提示词</span>
+                        <span class="break-all text-xs text-gray-700 whitespace-pre-wrap">{{ (step as any).prompt || step.description }}</span>
+                      </div>
+                      <div class="grid gap-1 sm:grid-cols-[92px_minmax(0,1fr)]">
+                        <span class="text-xs font-bold uppercase tracking-wide text-gray-400">结果类型</span>
+                        <div class="flex flex-wrap gap-2 text-xs">
+                          <span v-if="hasAIOperation(step)" class="rounded bg-orange-100 px-1.5 py-0.5 font-semibold text-orange-700">操作</span>
+                          <span v-if="hasAIData(step)" class="rounded bg-blue-100 px-1.5 py-0.5 font-semibold text-blue-700">数据</span>
+                          <span v-if="!hasAIOperation(step) && !hasAIData(step)" class="text-gray-500">无显式结果</span>
+                        </div>
+                      </div>
+                      <div v-if="step.output_variable" class="grid gap-1 sm:grid-cols-[92px_minmax(0,1fr)]">
+                        <span class="text-xs font-bold uppercase tracking-wide text-gray-400">输出变量</span>
+                        <span class="break-all font-mono text-xs text-purple-700">{{ step.output_variable }}</span>
+                      </div>
+                      <div v-if="hasAIOperation(step)" class="grid gap-1 sm:grid-cols-[92px_minmax(0,1fr)]">
+                        <span class="text-xs font-bold uppercase tracking-wide text-gray-400">操作结果</span>
+                        <div class="rounded-lg bg-orange-50 p-2">
+                          <p v-if="step.operation_summary" class="break-all text-xs text-gray-700 whitespace-pre-wrap">{{ step.operation_summary }}</p>
+                          <pre v-if="step.operation_code" class="mt-1 break-all text-xs text-gray-700 whitespace-pre-wrap font-mono">{{ step.operation_code }}</pre>
+                        </div>
+                      </div>
+                      <div v-if="hasAIData(step)" class="grid gap-1 sm:grid-cols-[92px_minmax(0,1fr)]">
+                        <span class="text-xs font-bold uppercase tracking-wide text-gray-400">数据结果</span>
+                        <div class="rounded-lg bg-blue-50 p-2">
+                          <p v-if="step.data_prompt" class="text-[11px] text-blue-700">提取指令: {{ step.data_prompt }}</p>
+                          <p v-if="step.data_summary" class="mt-1 break-all text-xs text-gray-700 whitespace-pre-wrap">{{ step.data_summary }}</p>
+                          <pre v-if="step.data_format === 'json' && step.data_value" class="mt-1 break-all text-xs text-gray-700 whitespace-pre-wrap font-mono">{{ step.data_value }}</pre>
+                          <span v-else-if="step.data_value" class="mt-1 block break-all text-xs text-gray-700 whitespace-pre-wrap">{{ step.data_value }}</span>
+                        </div>
+                      </div>
+                    </template>
+                    <!-- Regular step fields (hidden for ai_command) -->
+                    <template v-if="step.action !== 'ai_command'">
                     <div class="grid gap-1 sm:grid-cols-[92px_minmax(0,1fr)]">
                       <span class="text-xs font-bold uppercase tracking-wide text-gray-400">主定位器</span>
                       <span class="break-all font-mono text-xs text-gray-700">{{ formatLocator(step.target) }}</span>
@@ -599,8 +722,8 @@ onMounted(() => {
                         <span class="text-xs text-gray-600">{{ step.validation?.details || '无额外说明' }}</span>
                       </div>
                     </div>
+                    </template>
                   </div>
-
                   <div v-if="step.locator_candidates?.length" class="space-y-2">
                     <div class="flex items-center justify-between">
                       <p class="text-sm font-bold text-gray-900">候选定位器</p>
@@ -651,6 +774,15 @@ onMounted(() => {
             <div v-if="steps.length === 0" class="rounded-3xl border border-dashed border-gray-300 bg-white px-6 py-12 text-center text-sm text-gray-400">
               当前没有可配置的录制步骤。
             </div>
+
+            <!-- Add AI Command Button -->
+            <button
+              @click="showAICommandDialog = true"
+              class="mt-4 w-full flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-semibold transition-colors bg-purple-50 text-purple-700 hover:bg-purple-100 border border-purple-200"
+            >
+              <Wand2 :size="16" />
+              添加 AI 命令
+            </button>
           </div>
         </section>
 
@@ -772,5 +904,54 @@ onMounted(() => {
         </div>
       </DialogContent>
     </Dialog>
+
+    <!-- AI Command Dialog -->
+    <div v-if="showAICommandDialog" class="fixed inset-0 z-50 flex items-center justify-center bg-black/40" @click.self="showAICommandDialog = false">
+      <div class="bg-white rounded-2xl shadow-2xl w-[420px] p-6 space-y-4">
+        <h3 class="text-lg font-bold text-gray-900 flex items-center gap-2">
+          <Wand2 :size="20" class="text-purple-700" />
+          添加 AI 命令
+        </h3>
+
+        <p class="text-[10px] text-gray-400 -mt-2">
+          AI 会先判断是否需要执行页面操作，再决定是否提取数据；操作结果和数据结果都可能为空。
+        </p>
+
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">提示词 *</label>
+          <textarea
+            v-model="aiCommandPrompt"
+            class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-400/40 resize-none"
+            rows="3"
+            placeholder="例如：先筛选价格最低的商品，再提取商品标题和价格"
+            :disabled="aiCommandLoading"
+          ></textarea>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">输出变量名</label>
+          <input
+            v-model="aiCommandOutputVar"
+            class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-400/40"
+            placeholder="例如 product_info"
+            :disabled="aiCommandLoading"
+          />
+          <p class="mt-1 text-[10px] text-gray-400">如果 AI 最终有数据产出，会写入该变量；纯操作场景可以留空。</p>
+        </div>
+        <div class="flex justify-end gap-2 pt-2">
+          <button
+            @click="showAICommandDialog = false"
+            class="px-4 py-2 text-sm rounded-lg text-gray-600 hover:bg-gray-100"
+            :disabled="aiCommandLoading"
+          >取消</button>
+          <button
+            @click="submitAICommand"
+            class="px-4 py-2 text-sm rounded-lg bg-purple-700 text-white hover:bg-purple-800 disabled:opacity-50"
+            :disabled="!aiCommandPrompt.trim() || aiCommandLoading"
+          >
+            {{ aiCommandLoading ? 'AI 正在思考...' : '执行' }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
