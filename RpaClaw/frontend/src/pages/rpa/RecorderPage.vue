@@ -23,11 +23,6 @@ const timerInterval = ref<any>(null);
 const loading = ref(true);
 const error = ref<string | null>(null);
 
-// AI Command dialog state
-const showAICommandDialog = ref(false);
-const aiCommandPrompt = ref('');
-const aiCommandOutputVar = ref('');
-const aiCommandLoading = ref(false);
 const latestServerSteps = ref<any[]>([]);
 const pendingAISteps = ref<any[]>([]);
 
@@ -161,20 +156,18 @@ const reconcilePendingAISteps = (serverSteps: any[]) => {
   pendingAISteps.value = pendingAISteps.value.filter((pendingStep) => {
     return !serverSteps.some((serverStep: any) => (
       serverStep.action === 'ai_command' &&
-      (serverStep.prompt || serverStep.description || '') === pendingStep.description &&
-      ((serverStep.output_variable || '') === (pendingStep.outputVariable || ''))
+      (serverStep.prompt || serverStep.description || '') === pendingStep.description
     ));
   });
 };
 
-const createPendingAIStep = (prompt: string, outputVariable: string) => ({
+const createPendingAIStep = (prompt: string) => ({
   id: `AI${pendingAISteps.value.length + 1}`,
   title: 'AI 命令（执行中）',
   description: prompt,
   status: 'active',
   source: 'ai',
   sensitive: false,
-  outputVariable: outputVariable || undefined,
   localOnly: true,
 });
 
@@ -201,6 +194,7 @@ const newMessage = ref('');
 const sending = ref(false);
 const agentMode = ref(false);
 const agentRunning = ref(false);
+let aiCommandAbortController: AbortController | null = null;
 
 interface PendingConfirm {
   description: string;
@@ -594,53 +588,16 @@ const deleteStep = async (stepIndex: number) => {
   }
 };
 
-const submitAICommand = async () => {
-  if (!sessionId.value || !aiCommandPrompt.value.trim()) return;
-  const prompt = aiCommandPrompt.value.trim();
-  const outputVariable = aiCommandOutputVar.value.trim();
-  const pendingStep = createPendingAIStep(prompt, outputVariable);
-  pendingAISteps.value.push(pendingStep);
-  showAICommandDialog.value = false;
-  aiCommandPrompt.value = '';
-  aiCommandOutputVar.value = '';
-  syncDisplayedSteps();
-  aiCommandLoading.value = true;
-  try {
-    const resp = await apiClient.post(`/rpa/session/${sessionId.value}/ai-command`, {
-      prompt,
-      output_variable: outputVariable,
-    }, {
-      timeout: 0,
-    });
-    pendingAISteps.value = pendingAISteps.value.filter((step) => step !== pendingStep);
-    // Show execute error if any
-    if (resp.data?.execute_error) {
-      alert(`AI 命令执行出错: ${resp.data.execute_error}`);
-    }
-    // Refresh steps to include the new AI command step
-    const stepsResp = await apiClient.get(`/rpa/session/${sessionId.value}`);
-    const serverSteps = stepsResp.data.session?.steps || [];
-    reconcilePendingAISteps(serverSteps);
-    latestServerSteps.value = serverSteps;
-    syncDisplayedSteps();
-  } catch (err) {
-    console.error('Failed to execute AI command:', err);
-    const errorMessage =
-      (err as any)?.details?.detail ||
-      (err as any)?.message ||
-      '未知错误';
-    pendingStep.title = 'AI 命令执行失败';
-    pendingStep.description = `${prompt}\n${errorMessage}`;
-    pendingStep.status = 'error';
-    alert(`AI 命令执行失败: ${errorMessage}`);
-  } finally {
-    aiCommandLoading.value = false;
-  }
-};
-
 const abortAgent = async () => {
   if (!sessionId.value) return;
-  await apiClient.post(`/rpa/session/${sessionId.value}/agent/abort`);
+  if (agentMode.value && aiCommandAbortController) {
+    aiCommandAbortController.abort();
+    aiCommandAbortController = null;
+    agentRunning.value = false;
+    sending.value = false;
+  } else {
+    await apiClient.post(`/rpa/session/${sessionId.value}/agent/abort`);
+  }
 };
 
 const sendConfirm = async (approved: boolean) => {
@@ -654,7 +611,6 @@ const sendMessage = async () => {
   const userText = newMessage.value.trim();
   newMessage.value = '';
   sending.value = true;
-  if (agentMode.value) agentRunning.value = true;
 
   const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   chatMessages.value.push({ role: 'user', text: userText, time: now });
@@ -663,6 +619,72 @@ const sendMessage = async () => {
   chatMessages.value.push(assistantMsg);
   const msgIdx = chatMessages.value.length - 1;
 
+  // AI command mode: call /ai-command endpoint
+  if (agentMode.value) {
+    agentRunning.value = true;
+    const pendingStep = createPendingAIStep(userText);
+    pendingAISteps.value.push(pendingStep);
+    syncDisplayedSteps();
+    chatMessages.value[msgIdx].text = 'AI 正在分析指令并执行...';
+    aiCommandAbortController = new AbortController();
+    try {
+      const resp = await apiClient.post(`/rpa/session/${sessionId.value}/ai-command`, {
+        prompt: userText,
+      }, {
+        timeout: 0,
+        signal: aiCommandAbortController.signal,
+      });
+      const result = resp.data;
+      // Build result summary
+      const parts: string[] = [];
+      if (result.operation_code) {
+        parts.push(`操作: ${result.ai_result_mode === 'operation_only' ? '已完成' : '已执行'}`);
+      }
+      if (result.data_value) {
+        parts.push(`数据: ${result.data_value}`);
+      }
+      if (result.execute_error) {
+        parts.push(`⚠️ 执行警告: ${result.execute_error.split('\n').slice(-3).join('\n')}`);
+      }
+      if (parts.length === 0) {
+        parts.push('指令已处理');
+      }
+      chatMessages.value[msgIdx].text = parts.join('\n');
+      chatMessages.value[msgIdx].status = 'done';
+      // Refresh steps
+      pendingAISteps.value = pendingAISteps.value.filter((step) => step !== pendingStep);
+      try {
+        const stepsResp = await apiClient.get(`/rpa/session/${sessionId.value}`);
+        const serverSteps = stepsResp.data.session?.steps || [];
+        reconcilePendingAISteps(serverSteps);
+        latestServerSteps.value = serverSteps;
+        syncDisplayedSteps();
+      } catch { /* ignore refresh errors */ }
+    } catch (err: any) {
+      if (err.name === 'CanceledError' || err.name === 'AbortError') {
+        chatMessages.value[msgIdx].text = 'AI 指令已中止';
+        chatMessages.value[msgIdx].status = 'error';
+        pendingStep.title = 'AI 命令（已中止）';
+        pendingStep.status = 'error';
+      } else {
+        console.error('Failed to execute AI command:', err);
+        const errorMessage = err?.response?.data?.detail || err?.message || '未知错误';
+        chatMessages.value[msgIdx].text = `AI 指令执行失败: ${errorMessage}`;
+        chatMessages.value[msgIdx].status = 'error';
+        pendingStep.title = 'AI 命令执行失败';
+        pendingStep.description = `${userText}\n${errorMessage}`;
+        pendingStep.status = 'error';
+      }
+      syncDisplayedSteps();
+    } finally {
+      aiCommandAbortController = null;
+      agentRunning.value = false;
+      sending.value = false;
+    }
+    return;
+  }
+
+  // Normal chat mode: SSE streaming
   try {
     const resp = await fetch(`/api/v1/rpa/session/${sessionId.value}/chat`, {
       method: 'POST',
@@ -670,7 +692,7 @@ const sendMessage = async () => {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${localStorage.getItem('token') || ''}`,
       },
-      body: JSON.stringify({ message: userText, mode: agentMode.value ? 'react' : 'chat' }),
+      body: JSON.stringify({ message: userText, mode: 'chat' }),
     });
 
     if (!resp.ok || !resp.body) {
@@ -918,65 +940,6 @@ const sendMessage = async () => {
             </div>
             <p class="text-xs text-gray-500 font-medium">检测新操作中...</p>
           </div>
-
-          <!-- Insert AI Command Button -->
-          <button
-            v-if="isRecording"
-            @click="showAICommandDialog = true"
-            class="mt-4 w-full flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-semibold transition-colors bg-[#ac0089]/10 text-[#ac0089] hover:bg-[#ac0089]/20 border border-[#ac0089]/20"
-          >
-            <Wand2 :size="16" />
-            插入 AI 命令
-          </button>
-        </div>
-
-        <!-- AI Command Dialog -->
-        <div v-if="showAICommandDialog" class="fixed inset-0 z-50 flex items-center justify-center bg-black/40" @click.self="showAICommandDialog = false">
-          <div class="bg-white rounded-2xl shadow-2xl w-[420px] p-6 space-y-4">
-            <h3 class="text-lg font-bold text-gray-900 flex items-center gap-2">
-              <Wand2 :size="20" class="text-[#ac0089]" />
-              插入 AI 命令
-            </h3>
-
-            <p class="text-[10px] text-gray-400 -mt-2">
-              AI 会先判断是否需要执行页面操作，再决定是否提取数据；操作结果和数据结果都可能为空。
-            </p>
-
-            <div>
-              <label class="block text-xs font-semibold text-gray-600 mb-1">提示词 *</label>
-              <textarea
-                v-model="aiCommandPrompt"
-                class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#ac0089]/40 resize-none"
-                rows="3"
-                placeholder="例如：先打开价格最低的商品详情页，再提取商品标题和价格"
-                :disabled="aiCommandLoading"
-              ></textarea>
-            </div>
-            <div>
-              <label class="block text-xs font-semibold text-gray-600 mb-1">输出变量名</label>
-              <input
-                v-model="aiCommandOutputVar"
-                class="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#ac0089]/40"
-                placeholder="例如 product_info"
-                :disabled="aiCommandLoading"
-              />
-              <p class="mt-1 text-[10px] text-gray-400">如果 AI 最终有数据产出，会写入该变量；纯操作场景可以留空。</p>
-            </div>
-            <div class="flex justify-end gap-2 pt-2">
-              <button
-                @click="showAICommandDialog = false"
-                class="px-4 py-2 text-sm rounded-lg text-gray-600 hover:bg-gray-100"
-                :disabled="aiCommandLoading"
-              >取消</button>
-              <button
-                @click="submitAICommand"
-                class="px-4 py-2 text-sm rounded-lg bg-[#ac0089] text-white hover:bg-[#ac0089]/90 disabled:opacity-50"
-                :disabled="!aiCommandPrompt.trim() || aiCommandLoading"
-              >
-                {{ aiCommandLoading ? 'AI 正在思考...' : '执行' }}
-              </button>
-            </div>
-          </div>
         </div>
       </aside>
 
@@ -1067,7 +1030,7 @@ const sendMessage = async () => {
               <div>
                 <h3 class="text-gray-900 font-bold text-sm">AI 录制助手</h3>
                 <p class="text-[10px] font-bold" :class="agentRunning ? 'text-orange-500' : 'text-[#831bd7]'">
-                  {{ agentRunning ? 'Agent 运行中...' : (agentMode ? 'Agent 模式' : '已就绪 · 协助录制中') }}
+                  {{ agentRunning ? 'AI 指令执行中...' : (agentMode ? 'AI 指令模式' : '已就绪 · 协助录制中') }}
                 </p>
               </div>
             </div>
@@ -1078,7 +1041,7 @@ const sendMessage = async () => {
                 class="text-[10px] font-bold text-red-500 border border-red-200 px-2 py-1 rounded-lg hover:bg-red-50 transition-colors"
               >中止</button>
               <label class="flex items-center gap-1.5 cursor-pointer" :class="agentRunning ? 'opacity-50 pointer-events-none' : ''">
-                <span class="text-[10px] text-gray-500 font-medium">Agent</span>
+                <span class="text-[10px] text-gray-500 font-medium">AI 指令</span>
                 <div
                   @click="agentMode = !agentMode"
                   class="w-8 h-4 rounded-full transition-colors relative"
@@ -1183,7 +1146,7 @@ const sendMessage = async () => {
               @keyup.enter="sendMessage"
               :disabled="sending || agentRunning"
               class="w-full bg-white border border-gray-200 rounded-2xl py-3 pl-4 pr-12 text-xs focus:ring-2 focus:ring-[#831bd7] focus:border-transparent shadow-sm placeholder:text-gray-400 outline-none disabled:opacity-50"
-              :placeholder="agentRunning ? 'Agent 运行中...' : (sending ? 'AI 正在处理...' : (agentMode ? '描述目标任务...' : '向助手提问...'))"
+              :placeholder="agentRunning ? 'AI 指令执行中...' : (sending ? 'AI 正在处理...' : (agentMode ? '输入 AI 指令...' : '向助手提问...'))"
               type="text"
             />
             <button
