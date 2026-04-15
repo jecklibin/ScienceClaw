@@ -35,18 +35,20 @@ from deepagents.middleware.filesystem import (
     _supports_execution,
 )
 
-from backend.deepagent.windows_path_utils import canonicalize_local_agent_path
+from backend.config import settings
+from backend.deepagent.local_path_utils import canonicalize_local_agent_path
 
-LOCAL_WINDOWS_FILESYSTEM_SYSTEM_PROMPT = """## Following Conventions
+LOCAL_FILESYSTEM_SYSTEM_PROMPT = """## Following Conventions
 
 - Read files before editing and follow existing project patterns
-- This agent is running in local Windows mode
+- This agent is running in local filesystem mode on the host machine
 
 ## Filesystem Tools `ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep`
 
-Use Windows absolute paths for filesystem tool calls.
-Canonical form is forward-slash Windows paths like `D:/code/MyScienceClaw/workspace/session/file.txt`.
-Backslash paths like `D:\\code\\MyScienceClaw\\workspace\\session\\file.txt` are also accepted.
+Use host absolute paths for filesystem tool calls that match `LOCAL_PATH_STYLE`.
+When `LOCAL_PATH_STYLE=windows`, use paths like `D:/code/MyScienceClaw/workspace/session/file.txt`.
+When `LOCAL_PATH_STYLE=posix`, use paths like `/workspace/session/file.txt`.
+Backslash Windows paths like `D:\\code\\MyScienceClaw\\workspace\\session\\file.txt` are accepted only in `windows` mode.
 The special path `/` is allowed for directory-oriented tools and means the current workspace root.
 
 - ls: list files in a directory
@@ -60,10 +62,10 @@ The special path `/` is allowed for directory-oriented tools and means the curre
 def validate_local_tool_path(path: str) -> str:
     if path == "/":
         return "/"
-    return canonicalize_local_agent_path(path)
+    return canonicalize_local_agent_path(path, path_style=settings.local_path_style)
 
 
-class WindowsFilesystemMiddleware(FilesystemMiddleware[ContextT, ResponseT]):
+class LocalFilesystemMiddleware(FilesystemMiddleware[ContextT, ResponseT]):
     def __init__(
         self,
         *,
@@ -75,7 +77,7 @@ class WindowsFilesystemMiddleware(FilesystemMiddleware[ContextT, ResponseT]):
     ) -> None:
         super().__init__(
             backend=backend,
-            system_prompt=system_prompt or LOCAL_WINDOWS_FILESYSTEM_SYSTEM_PROMPT,
+            system_prompt=system_prompt or LOCAL_FILESYSTEM_SYSTEM_PROMPT,
             custom_tool_descriptions=custom_tool_descriptions,
             tool_token_limit_before_evict=tool_token_limit_before_evict,
             max_execute_timeout=max_execute_timeout,
@@ -89,7 +91,7 @@ class WindowsFilesystemMiddleware(FilesystemMiddleware[ContextT, ResponseT]):
 
         def sync_ls(
             runtime: ToolRuntime[None, Any],
-            path: Annotated[str, "Windows absolute directory path. `/` means the current workspace root."],
+            path: Annotated[str, "Absolute directory path on the host machine. `/` means the current workspace root."],
         ) -> str:
             resolved_backend = self._get_backend(runtime)
             try:
@@ -102,7 +104,7 @@ class WindowsFilesystemMiddleware(FilesystemMiddleware[ContextT, ResponseT]):
 
         async def async_ls(
             runtime: ToolRuntime[None, Any],
-            path: Annotated[str, "Windows absolute directory path. `/` means the current workspace root."],
+            path: Annotated[str, "Absolute directory path on the host machine. `/` means the current workspace root."],
         ) -> str:
             resolved_backend = self._get_backend(runtime)
             try:
@@ -120,7 +122,7 @@ class WindowsFilesystemMiddleware(FilesystemMiddleware[ContextT, ResponseT]):
         token_limit = self._tool_token_limit_before_evict
 
         def sync_read_file(
-            file_path: Annotated[str, "Windows absolute file path to read."],
+            file_path: Annotated[str, "Absolute file path on the host machine to read."],
             runtime: ToolRuntime[None, Any],
             offset: Annotated[int, "Line number to start reading from (0-indexed)."] = DEFAULT_READ_OFFSET,
             limit: Annotated[int, "Maximum number of lines to read."] = DEFAULT_READ_LIMIT,
@@ -158,7 +160,7 @@ class WindowsFilesystemMiddleware(FilesystemMiddleware[ContextT, ResponseT]):
             return result
 
         async def async_read_file(
-            file_path: Annotated[str, "Windows absolute file path to read."],
+            file_path: Annotated[str, "Absolute file path on the host machine to read."],
             runtime: ToolRuntime[None, Any],
             offset: Annotated[int, "Line number to start reading from (0-indexed)."] = DEFAULT_READ_OFFSET,
             limit: Annotated[int, "Maximum number of lines to read."] = DEFAULT_READ_LIMIT,
@@ -201,7 +203,7 @@ class WindowsFilesystemMiddleware(FilesystemMiddleware[ContextT, ResponseT]):
         tool_description = self._custom_tool_descriptions.get("write_file") or WRITE_FILE_TOOL_DESCRIPTION
 
         def sync_write_file(
-            file_path: Annotated[str, "Windows absolute path where the file should be created."],
+            file_path: Annotated[str, "Absolute path on the host machine where the file should be created."],
             content: Annotated[str, "The text content to write to the file."],
             runtime: ToolRuntime[None, Any],
         ) -> Command | str:
@@ -218,7 +220,7 @@ class WindowsFilesystemMiddleware(FilesystemMiddleware[ContextT, ResponseT]):
             return f"Updated file {res.path}"
 
         async def async_write_file(
-            file_path: Annotated[str, "Windows absolute path where the file should be created."],
+            file_path: Annotated[str, "Absolute path on the host machine where the file should be created."],
             content: Annotated[str, "The text content to write to the file."],
             runtime: ToolRuntime[None, Any],
         ) -> Command | str:
@@ -240,7 +242,7 @@ class WindowsFilesystemMiddleware(FilesystemMiddleware[ContextT, ResponseT]):
         tool_description = self._custom_tool_descriptions.get("edit_file") or EDIT_FILE_TOOL_DESCRIPTION
 
         def sync_edit_file(
-            file_path: Annotated[str, "Windows absolute path to the file to edit."],
+            file_path: Annotated[str, "Absolute path on the host machine to the file to edit."],
             old_string: Annotated[str, "The exact text to find and replace."],
             new_string: Annotated[str, "The replacement text."],
             runtime: ToolRuntime[None, Any],
@@ -260,7 +262,7 @@ class WindowsFilesystemMiddleware(FilesystemMiddleware[ContextT, ResponseT]):
             return f"Successfully replaced {res.occurrences} instance(s) of the string in '{res.path}'"
 
         async def async_edit_file(
-            file_path: Annotated[str, "Windows absolute path to the file to edit."],
+            file_path: Annotated[str, "Absolute path on the host machine to the file to edit."],
             old_string: Annotated[str, "The exact text to find and replace."],
             new_string: Annotated[str, "The replacement text."],
             runtime: ToolRuntime[None, Any],
@@ -282,12 +284,12 @@ class WindowsFilesystemMiddleware(FilesystemMiddleware[ContextT, ResponseT]):
         return StructuredTool.from_function(name="edit_file", description=tool_description, func=sync_edit_file, coroutine=async_edit_file)
 
     def _create_glob_tool(self) -> BaseTool:
-        tool_description = self._custom_tool_descriptions.get("glob") or "Find files matching a glob pattern using Windows absolute paths. The special path `/` means the current workspace root."
+        tool_description = self._custom_tool_descriptions.get("glob") or "Find files matching a glob pattern using absolute host paths. The special path `/` means the current workspace root."
 
         def sync_glob(
             pattern: Annotated[str, "Glob pattern to match files (for example `**/*.py`)."],
             runtime: ToolRuntime[None, Any],
-            path: Annotated[str, "Base directory to search from. Use a Windows absolute path or `/` for the current workspace root."] = "/",
+            path: Annotated[str, "Base directory to search from. Use an absolute host path or `/` for the current workspace root."] = "/",
         ) -> str:
             resolved_backend = self._get_backend(runtime)
             try:
@@ -306,7 +308,7 @@ class WindowsFilesystemMiddleware(FilesystemMiddleware[ContextT, ResponseT]):
         async def async_glob(
             pattern: Annotated[str, "Glob pattern to match files (for example `**/*.py`)."],
             runtime: ToolRuntime[None, Any],
-            path: Annotated[str, "Base directory to search from. Use a Windows absolute path or `/` for the current workspace root."] = "/",
+            path: Annotated[str, "Base directory to search from. Use an absolute host path or `/` for the current workspace root."] = "/",
         ) -> str:
             resolved_backend = self._get_backend(runtime)
             try:
