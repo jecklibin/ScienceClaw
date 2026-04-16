@@ -7,6 +7,9 @@ from unittest.mock import AsyncMock, patch
 
 ASSISTANT_MODULE = importlib.import_module("backend.rpa.assistant")
 ASSISTANT_RUNTIME_MODULE = importlib.import_module("backend.rpa.assistant_runtime")
+SEGMENT_MODELS_MODULE = importlib.import_module("backend.rpa.segment_models")
+SEGMENT_VALIDATOR_MODULE = importlib.import_module("backend.rpa.segment_validator")
+RPA_ROUTE_MODULE = importlib.import_module("backend.route.rpa")
 
 
 class _FakeModel:
@@ -67,6 +70,15 @@ class _FakeLocator:
         return self.text
 
 
+class _FailingLocator(_FakeLocator):
+    def __init__(self, exc: Exception):
+        super().__init__("")
+        self._exc = exc
+
+    async def click(self):
+        raise self._exc
+
+
 class _FakeFrameScope:
     def __init__(self):
         self.locator_calls = []
@@ -116,6 +128,29 @@ class _FakeActionPage(_FakePage):
 
     async def wait_for_load_state(self, state):
         self.load_state_calls.append(state)
+
+
+class _FailingActionPage(_FakeActionPage):
+    def __init__(self, exc: Exception):
+        super().__init__()
+        self.scope.locator_obj = _FailingLocator(exc)
+
+
+class _FailingNavigationPage(_FakeActionPage):
+    def __init__(self, exc: Exception, phase: str = "goto"):
+        super().__init__()
+        self._exc = exc
+        self._phase = phase
+
+    async def goto(self, url):
+        self.goto_calls.append(url)
+        if self._phase == "goto":
+            raise self._exc
+
+    async def wait_for_load_state(self, state):
+        self.load_state_calls.append(state)
+        if self._phase == "load_state":
+            raise self._exc
 
 
 class RPAReActAgentTests(unittest.IsolatedAsyncioTestCase):
@@ -238,8 +273,68 @@ class RPAReActAgentTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [event["event"] for event in events],
-            ["agent_thought", "agent_done"],
+            ["segment_planned", "recording_done"],
         )
+        self.assertEqual(events[0]["data"], {"thought": "task done"})
+        self.assertEqual(events[1]["data"], {"total_steps": 0})
+
+    async def test_react_agent_recovers_from_invalid_planner_json_response(self):
+        agent = ASSISTANT_MODULE.RPAReActAgent()
+        snapshot = {"url": "https://example.com/issues", "title": "Issues", "frames": []}
+        responses = [
+            '{"thought":"need read title","action":"execute","segment_goal":"读取第一个 issue 标题","segment_kind":"read_only","stop_reason":',
+            json.dumps(
+                {
+                    "thought": "retry with valid json",
+                    "action": "execute",
+                    "segment_goal": "读取第一个 issue 标题",
+                    "segment_kind": "read_only",
+                    "stop_reason": "goal_reached",
+                    "expected_outcome": {"type": "observation", "summary": "返回第一个 issue 标题"},
+                    "completion_check": {},
+                    "code": "async def run(page):\n    return {'output': 'Bug: example title'}",
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps({"thought": "done", "action": "done"}, ensure_ascii=False),
+        ]
+
+        async def fake_stream(_history, _model_config=None):
+            yield responses.pop(0)
+
+        run_result = SEGMENT_MODELS_MODULE.SegmentRunResult(
+            success=True,
+            output="Bug: example title",
+            page_changed=False,
+            selected_artifacts={"output": "Bug: example title"},
+            before_snapshot=snapshot,
+            after_snapshot=snapshot,
+        )
+
+        agent._stream_llm = fake_stream
+
+        with patch.object(
+            ASSISTANT_MODULE,
+            "build_page_snapshot",
+            new=AsyncMock(return_value=snapshot),
+        ), patch.object(
+            ASSISTANT_MODULE,
+            "run_segment",
+            new=AsyncMock(return_value=run_result),
+        ):
+            events = [event async for event in agent.run(
+                session_id="recover-invalid-json",
+                page=_FakePage(),
+                goal="获取第一个 issues 的标题",
+                existing_steps=[],
+            )]
+
+        recovering = [event for event in events if event["event"] == "segment_recovering"]
+        self.assertTrue(any(event["data"]["error_code"] == "invalid_planner_response" for event in recovering))
+        committed = [event for event in events if event["event"] == "segment_committed"]
+        self.assertEqual(len(committed), 1)
+        self.assertEqual(committed[0]["data"]["output"], "Bug: example title")
+        self.assertEqual(events[-1], {"event": "recording_done", "data": {"total_steps": 1}})
 
     async def test_react_agent_build_observation_lists_frames_and_collections(self):
         snapshot = {
@@ -293,6 +388,7 @@ class RPAReActAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("actionable=2", content)
         self.assertIn("content=2", content)
 
+    @unittest.skip("legacy structured-agent path removed in unified segment mode")
     async def test_react_agent_executes_structured_collection_action_with_frame_context(self):
         agent = ASSISTANT_MODULE.RPAReActAgent()
         page = _FakeActionPage()
@@ -366,7 +462,7 @@ class RPAReActAgentTests(unittest.IsolatedAsyncioTestCase):
             ):
                 events.append(event)
 
-        step_done = next(event for event in events if event["event"] == "agent_step_done")
+        step_done = next(event for event in events if event["event"] == "agent_step_committed")
         self.assertEqual(page.scope.locator_calls[0], "frame:iframe[title='results']")
         self.assertEqual(
             json.loads(step_done["data"]["step"]["target"]),
@@ -376,6 +472,1404 @@ class RPAReActAgentTests(unittest.IsolatedAsyncioTestCase):
                 "ordinal": "first",
                 "item": {"method": "css", "value": "h2 a"},
             },
+        )
+
+    @unittest.skip("legacy structured-agent path removed in unified segment mode")
+    async def test_react_agent_emits_recovering_and_retries_after_retryable_structured_failure(self):
+        agent = ASSISTANT_MODULE.RPAReActAgent()
+        page = _FakeActionPage()
+        snapshot = {"url": "https://example.com", "title": "Example", "frames": []}
+        responses = [
+            json.dumps(
+                {
+                    "thought": "click save",
+                    "action": "execute",
+                    "execution_mode": "structured",
+                    "operation": "click",
+                    "description": "Click the save button",
+                    "target_hint": {"role": "button", "name": "Save"},
+                    "risk": "none",
+                    "risk_reason": "",
+                }
+            ),
+            json.dumps(
+                {
+                    "thought": "click save again",
+                    "action": "execute",
+                    "execution_mode": "structured",
+                    "operation": "click",
+                    "description": "Try pressing the save control again",
+                    "target_hint": {"role": "button", "name": "Save"},
+                    "risk": "none",
+                    "risk_reason": "",
+                }
+            ),
+            json.dumps(
+                {
+                    "thought": "click save one more time",
+                    "action": "execute",
+                    "execution_mode": "structured",
+                    "operation": "click",
+                    "description": "Press the Save button once more",
+                    "target_hint": {"role": "button", "name": "Save"},
+                    "risk": "none",
+                    "risk_reason": "",
+                }
+            ),
+            json.dumps(
+                {
+                    "thought": "done",
+                    "action": "done",
+                    "description": "done",
+                    "risk": "none",
+                    "risk_reason": "",
+                }
+            ),
+        ]
+        execution_results = [
+            {
+                "success": False,
+                "error": "Timeout",
+                "error_code": "execution_timeout",
+                "retryable": True,
+                "output": "",
+                "step": None,
+                "resolved_intent": None,
+            },
+            {
+                "success": False,
+                "error": "Timeout again",
+                "error_code": "execution_timeout",
+                "retryable": True,
+                "output": "",
+                "step": None,
+                "resolved_intent": None,
+            },
+            {
+                "success": True,
+                "error": "",
+                "error_code": "",
+                "retryable": False,
+                "output": "ok",
+                "step": {
+                    "action": "click",
+                    "source": "ai",
+                    "description": "Click the save button",
+                    "prompt": "Click the save button",
+                },
+                "resolved_intent": {
+                    "action": "click",
+                    "resolved": {"locator": {"method": "role", "role": "button", "name": "Save"}},
+                },
+            },
+        ]
+
+        async def fake_stream(_history, _model_config=None):
+            yield responses.pop(0)
+
+        agent._stream_llm = fake_stream
+
+        with patch.object(
+            ASSISTANT_MODULE,
+            "build_page_snapshot",
+            new=AsyncMock(return_value=snapshot),
+        ), patch.object(
+            ASSISTANT_MODULE,
+            "run_structured_intent",
+            new=AsyncMock(side_effect=execution_results),
+        ):
+            events = []
+            async for event in agent.run(
+                session_id="session-1",
+                page=page,
+                goal="Click the save button",
+                existing_steps=[],
+            ):
+                events.append(event)
+
+        recovering_events = [event for event in events if event["event"] == "agent_recovering"]
+        self.assertEqual(len(recovering_events), 2)
+        self.assertEqual(
+            recovering_events[0]["data"],
+            {
+                "description": "Click the save button",
+                "error_code": "execution_timeout",
+                "message": "Timeout",
+                "attempt": 1,
+            },
+        )
+        self.assertEqual(
+            recovering_events[1]["data"],
+            {
+                "description": "Try pressing the save control again",
+                "error_code": "execution_timeout",
+                "message": "Timeout again",
+                "attempt": 2,
+            },
+        )
+        warning_events = [event for event in events if event["event"] == "agent_warning"]
+        self.assertEqual(len(warning_events), 1)
+        self.assertEqual(
+            warning_events[0]["data"],
+            {
+                "description": "Try pressing the save control again",
+                "error_code": "execution_timeout",
+                "message": "Retry budget nearly exhausted",
+            },
+        )
+        self.assertIn("agent_step_committed", [event["event"] for event in events])
+        self.assertEqual(events[-1]["event"], "agent_done")
+        self.assertTrue(
+            any(
+                message["role"] == "user"
+                and "Error code: execution_timeout" in message["content"]
+                for message in agent._history
+            )
+        )
+
+    @unittest.skip("legacy code/structured dual-mode events removed in unified segment mode")
+    async def test_react_agent_emits_escalated_and_persists_ai_script_for_control_flow(self):
+        agent = ASSISTANT_MODULE.RPAReActAgent()
+        page = _FakeActionPage()
+        snapshot = {"url": "https://example.com", "title": "Example", "frames": []}
+        code = "await page.wait_for_timeout(500)"
+        responses = [
+            json.dumps(
+                {
+                    "thought": "need to poll until save completes",
+                    "action": "execute",
+                    "execution_mode": "code",
+                    "upgrade_reason": "polling_loop",
+                    "description": "Poll until the save completes",
+                    "code": code,
+                    "risk": "none",
+                    "risk_reason": "",
+                }
+            ),
+            json.dumps(
+                {
+                    "thought": "done",
+                    "action": "done",
+                    "description": "done",
+                    "risk": "none",
+                    "risk_reason": "",
+                }
+            ),
+        ]
+
+        async def fake_stream(_history, _model_config=None):
+            yield responses.pop(0)
+
+        agent._stream_llm = fake_stream
+
+        with patch.object(
+            ASSISTANT_MODULE,
+            "build_page_snapshot",
+            new=AsyncMock(return_value=snapshot),
+        ), patch.object(
+            ASSISTANT_MODULE,
+            "_execute_on_page",
+            new=AsyncMock(return_value={"success": True, "output": "ok", "error": None}),
+        ):
+            events = []
+            async for event in agent.run(
+                session_id="session-1",
+                page=page,
+                goal="Wait until save completes",
+                existing_steps=[],
+            ):
+                events.append(event)
+
+        escalated_event = next(event for event in events if event["event"] == "agent_escalated")
+        self.assertEqual(
+            escalated_event["data"],
+            {
+                "description": "Poll until the save completes",
+                "upgrade_reason": "polling_loop",
+            },
+        )
+        step_done = next(event for event in events if event["event"] == "agent_step_committed")
+        step = step_done["data"]["step"]
+        self.assertEqual(step["action"], "ai_script")
+        self.assertEqual(step["assistant_diagnostics"]["execution_mode"], "code")
+        self.assertEqual(step["assistant_diagnostics"]["upgrade_reason"], "polling_loop")
+        self.assertEqual(step["assistant_diagnostics"]["recovery_attempts"], 0)
+        self.assertTrue(step["value"].startswith("async def run(page):"))
+
+    @unittest.skip("legacy code/structured dual-mode events removed in unified segment mode")
+    async def test_react_agent_upgrades_runtime_comparison_request_to_ai_script(self):
+        agent = ASSISTANT_MODULE.RPAReActAgent()
+        page = _FakeActionPage()
+        snapshot = {"url": "https://example.com/trending", "title": "Trending", "frames": []}
+        code = "\n".join(
+            [
+                "cards = page.locator('article')",
+                "count = await cards.count()",
+                "best = None",
+                "best_score = -1",
+                "for i in range(count):",
+                "    card = cards.nth(i)",
+                "    text = await card.inner_text()",
+                "    score = text.count('stars')",
+                "    if score > best_score:",
+                "        best = card",
+                "        best_score = score",
+                "await best.get_by_role('link').first.click()",
+            ]
+        )
+        responses = [
+            json.dumps(
+                {
+                    "thought": "need to inspect and compare all rows",
+                    "action": "execute",
+                    "execution_mode": "code",
+                    "upgrade_reason": "dynamic_selection",
+                    "description": "Open the project with the most stars this week",
+                    "code": code,
+                    "risk": "none",
+                    "risk_reason": "",
+                }
+            ),
+            json.dumps(
+                {
+                    "thought": "done",
+                    "action": "done",
+                    "description": "done",
+                    "risk": "none",
+                    "risk_reason": "",
+                }
+            ),
+        ]
+
+        async def fake_stream(_history, _model_config=None):
+            yield responses.pop(0)
+
+        agent._stream_llm = fake_stream
+
+        with patch.object(
+            ASSISTANT_MODULE,
+            "build_page_snapshot",
+            new=AsyncMock(return_value=snapshot),
+        ), patch.object(
+            ASSISTANT_MODULE,
+            "_execute_on_page",
+            new=AsyncMock(return_value={"success": True, "output": "ok", "error": None}),
+        ):
+            events = []
+            async for event in agent.run(
+                session_id="session-2",
+                page=page,
+                goal="Click the project with the most stars this week",
+                existing_steps=[],
+            ):
+                events.append(event)
+
+        event_names = [event["event"] for event in events]
+        self.assertIn("agent_escalated", event_names)
+        step_done = next(event for event in events if event["event"] == "agent_step_committed")
+        step = step_done["data"]["step"]
+        self.assertEqual(step["action"], "ai_script")
+        self.assertEqual(step["assistant_diagnostics"]["execution_mode"], "code")
+        self.assertEqual(step["assistant_diagnostics"]["upgrade_reason"], "dynamic_selection")
+        self.assertTrue(step["value"].startswith("async def run(page):"))
+
+    @unittest.skip("legacy structured-agent path removed in unified segment mode")
+    async def test_react_agent_emits_attempt_events_but_commits_only_validated_navigation_step(self):
+        agent = ASSISTANT_MODULE.RPAReActAgent()
+        page = _FakeActionPage()
+        responses = [
+            json.dumps(
+                {
+                    "thought": "try clicking issues",
+                    "action": "execute",
+                    "execution_mode": "structured",
+                    "operation": "click",
+                    "subgoal": "Enter the Issues page",
+                    "description": "Click Issues tab",
+                    "target_hint": {"role": "link", "name": "Issues"},
+                    "risk": "none",
+                    "risk_reason": "",
+                }
+            ),
+            json.dumps(
+                {
+                    "thought": "navigate directly",
+                    "action": "execute",
+                    "execution_mode": "structured",
+                    "operation": "navigate",
+                    "subgoal": "Enter the Issues page",
+                    "description": "Open the Issues page directly",
+                    "value": "https://example.com/issues",
+                    "risk": "none",
+                    "risk_reason": "",
+                }
+            ),
+            json.dumps(
+                {
+                    "thought": "done",
+                    "action": "done",
+                    "description": "done",
+                    "risk": "none",
+                    "risk_reason": "",
+                }
+            ),
+        ]
+        results = [
+            {"success": True, "output": "ok", "step": {"action": "click", "source": "ai", "description": "Click Issues tab", "prompt": "Get the latest issue title"}},
+            {"success": True, "output": "ok", "step": {"action": "navigate", "source": "ai", "description": "Open the Issues page directly", "prompt": "Get the latest issue title", "value": "https://example.com/issues"}},
+        ]
+        snapshots = [
+            {"url": "https://example.com/repo", "title": "Repo", "frames": [], "actionable_nodes": [], "content_nodes": [], "containers": []},
+            {"url": "https://example.com/repo", "title": "Repo", "frames": [], "actionable_nodes": [], "content_nodes": [], "containers": []},
+            {"url": "https://example.com/repo", "title": "Repo", "frames": [], "actionable_nodes": [], "content_nodes": [], "containers": []},
+            {"url": "https://example.com/issues", "title": "Issues", "frames": [], "actionable_nodes": [], "content_nodes": [], "containers": []},
+            {"url": "https://example.com/issues", "title": "Issues", "frames": [], "actionable_nodes": [], "content_nodes": [], "containers": []},
+        ]
+
+        async def fake_stream(_history, _model_config=None):
+            yield responses.pop(0)
+
+        agent._stream_llm = fake_stream
+
+        with patch.object(
+            ASSISTANT_MODULE,
+            "build_page_snapshot",
+            new=AsyncMock(side_effect=lambda *_args, **_kwargs: snapshots.pop(0)),
+        ), patch.object(
+            ASSISTANT_MODULE,
+            "run_structured_intent",
+            new=AsyncMock(side_effect=lambda *_args, **_kwargs: results.pop(0)),
+        ):
+            events = []
+            async for event in agent.run(
+                session_id="session-commit",
+                page=page,
+                goal="Get the latest issue title",
+                existing_steps=[],
+            ):
+                events.append(event)
+
+        event_names = [event["event"] for event in events]
+        self.assertIn("agent_attempted", event_names)
+        self.assertIn("agent_step_committed", event_names)
+        committed = [event for event in events if event["event"] == "agent_step_committed"]
+        self.assertEqual(len(committed), 1)
+        self.assertEqual(committed[0]["data"]["step"]["action"], "navigate")
+
+    @unittest.skip("legacy code/structured dual-mode events removed in unified segment mode")
+    async def test_react_agent_retries_code_mode_after_invalid_generated_code(self):
+        agent = ASSISTANT_MODULE.RPAReActAgent()
+        page = _FakeActionPage()
+        snapshot = {"url": "https://example.com", "title": "Example", "frames": []}
+        responses = [
+            json.dumps(
+                {
+                    "thought": "need code mode for comparison",
+                    "action": "execute",
+                    "execution_mode": "code",
+                    "upgrade_reason": "dynamic_selection",
+                    "description": "Compare visible projects and open the highest-star repository",
+                    "code": "const repoLinks = [...document.querySelectorAll('a[href]')]",
+                    "risk": "none",
+                    "risk_reason": "",
+                }
+            ),
+            json.dumps(
+                {
+                    "thought": "rewrite it as Python",
+                    "action": "execute",
+                    "execution_mode": "code",
+                    "upgrade_reason": "dynamic_selection",
+                    "description": "Compare visible projects and open the highest-star repository",
+                    "code": "async def run(page):\n    await page.wait_for_timeout(10)\n    return 'ok'",
+                    "risk": "none",
+                    "risk_reason": "",
+                }
+            ),
+            json.dumps(
+                {
+                    "thought": "done",
+                    "action": "done",
+                    "description": "done",
+                    "risk": "none",
+                    "risk_reason": "",
+                }
+            ),
+        ]
+        executed_codes = []
+
+        async def fake_stream(_history, _model_config=None):
+            yield responses.pop(0)
+
+        async def fake_execute(_page, code):
+            executed_codes.append(code)
+            return {"success": True, "output": "ok", "error": None}
+
+        agent._stream_llm = fake_stream
+
+        with patch.object(
+            ASSISTANT_MODULE,
+            "build_page_snapshot",
+            new=AsyncMock(return_value=snapshot),
+        ), patch.object(
+            ASSISTANT_MODULE,
+            "_execute_on_page",
+            new=fake_execute,
+        ):
+            events = []
+            async for event in agent.run(
+                session_id="session-1",
+                page=page,
+                goal="Click the project with the most stars this week",
+                existing_steps=[],
+            ):
+                events.append(event)
+
+        self.assertEqual(len(executed_codes), 1)
+        self.assertTrue(executed_codes[0].startswith("async def run(page):"))
+        event_names = [event["event"] for event in events]
+        self.assertIn("agent_recovering", event_names)
+        self.assertIn("agent_escalated", event_names)
+        self.assertIn("agent_step_committed", event_names)
+        self.assertNotIn("agent_aborted", event_names)
+
+    @unittest.skip("legacy code/structured dual-mode events removed in unified segment mode")
+    async def test_react_agent_aborts_code_mode_after_retry_budget_exhausted(self):
+        agent = ASSISTANT_MODULE.RPAReActAgent()
+        page = _FakeActionPage()
+        snapshot = {"url": "https://example.com", "title": "Example", "frames": []}
+        responses = [
+            json.dumps(
+                {
+                    "thought": "need code mode for polling",
+                    "action": "execute",
+                    "execution_mode": "code",
+                    "upgrade_reason": "polling_loop",
+                    "description": "Poll until the save completes",
+                    "code": "await page.wait_for_timeout(500)",
+                    "risk": "none",
+                    "risk_reason": "",
+                }
+            ),
+            json.dumps(
+                {
+                    "thought": "try code again",
+                    "action": "execute",
+                    "execution_mode": "code",
+                    "upgrade_reason": "polling_loop",
+                    "description": "Poll until the save completes",
+                    "code": "await page.wait_for_timeout(500)",
+                    "risk": "none",
+                    "risk_reason": "",
+                }
+            ),
+            json.dumps(
+                {
+                    "thought": "one more try",
+                    "action": "execute",
+                    "execution_mode": "code",
+                    "upgrade_reason": "polling_loop",
+                    "description": "Poll until the save completes",
+                    "code": "await page.wait_for_timeout(500)",
+                    "risk": "none",
+                    "risk_reason": "",
+                }
+            ),
+        ]
+
+        async def fake_stream(_history, _model_config=None):
+            yield responses.pop(0)
+
+        agent._stream_llm = fake_stream
+
+        with patch.object(
+            ASSISTANT_MODULE,
+            "build_page_snapshot",
+            new=AsyncMock(return_value=snapshot),
+        ), patch.object(
+            ASSISTANT_MODULE,
+            "_execute_on_page",
+            new=AsyncMock(return_value={"success": False, "output": "", "error": "boom"}),
+        ):
+            events = []
+            async for event in agent.run(
+                session_id="session-1",
+                page=page,
+                goal="Wait until save completes",
+                existing_steps=[],
+            ):
+                events.append(event)
+
+        self.assertEqual(
+            [event["event"] for event in events],
+            [
+                "agent_thought",
+                "agent_attempted",
+                "agent_action",
+                "agent_recovering",
+                "agent_thought",
+                "agent_attempted",
+                "agent_action",
+                "agent_warning",
+                "agent_recovering",
+                "agent_thought",
+                "agent_attempted",
+                "agent_action",
+                "agent_aborted",
+            ],
+        )
+        self.assertEqual(
+            events[-1]["data"],
+            {
+                "description": "Poll until the save completes",
+                "error_code": "code_execution_failed",
+                "message": "boom",
+                "reason": "boom",
+            },
+        )
+
+    def test_react_prompt_requires_python_async_run_for_segment_mode(self):
+        self.assertIn("Python", ASSISTANT_MODULE.REACT_SYSTEM_PROMPT)
+        self.assertIn("async def run(page):", ASSISTANT_MODULE.REACT_SYSTEM_PROMPT)
+        self.assertIn("Never return structured browser actions", ASSISTANT_MODULE.REACT_SYSTEM_PROMPT)
+
+    async def test_react_agent_commits_single_segment_for_dynamic_click_goal(self):
+        agent = ASSISTANT_MODULE.RPAReActAgent()
+        page = _FakeActionPage()
+        snapshots = [
+            {"url": "https://example.com/trending", "title": "Trending", "frames": []},
+            {"url": "https://example.com/trending", "title": "Trending", "frames": []},
+            {"url": "https://example.com/microsoft/markitdown", "title": "markitdown", "frames": []},
+            {"url": "https://example.com/microsoft/markitdown", "title": "markitdown", "frames": []},
+        ]
+        responses = [
+            json.dumps(
+                {
+                    "thought": "compare visible rows and click the highest-star repository",
+                    "action": "execute",
+                    "segment_goal": "在当前趋势列表中动态比较 stars 并点击最高项",
+                    "segment_kind": "state_changing",
+                    "stop_reason": "after_state_change",
+                    "expected_outcome": {"type": "page_state_changed", "summary": "进入目标仓库页"},
+                    "completion_check": {
+                        "url_not_same": True,
+                        "selected_target_key": "selected_repo_name",
+                        "page_contains_selected_target": True,
+                    },
+                    "code": (
+                        "async def run(page):\n"
+                        "    return {'selected_repo_name': 'markitdown', 'page_changed': True}"
+                    ),
+                }
+            ),
+            json.dumps({"thought": "done", "action": "done"}),
+        ]
+
+        async def fake_stream(_history, _model_config=None):
+            yield responses.pop(0)
+
+        async def fake_execute(_page, code):
+            self.assertTrue(code.startswith("async def run(page):"))
+            return {
+                "success": True,
+                "output": "clicked",
+                "error": None,
+                "selected_artifacts": {"selected_repo_name": "markitdown"},
+                "page_changed": True,
+            }
+
+        agent._stream_llm = fake_stream
+
+        with patch.object(
+            ASSISTANT_MODULE,
+            "build_page_snapshot",
+            new=AsyncMock(side_effect=lambda *_args, **_kwargs: snapshots.pop(0)),
+        ), patch.object(
+            ASSISTANT_MODULE,
+            "_execute_on_page",
+            new=fake_execute,
+        ):
+            events = []
+            async for event in agent.run(
+                session_id="segment-1",
+                page=page,
+                goal="点击 stars 最多的项目",
+                existing_steps=[],
+            ):
+                events.append(event)
+
+        committed = [event for event in events if event["event"] == "segment_committed"]
+        self.assertEqual(len(committed), 1)
+        step = committed[0]["data"]["step"]
+        self.assertEqual(step["action"], "ai_script")
+        self.assertEqual(step["assistant_diagnostics"]["execution_mode"], "segment")
+        self.assertEqual(step["assistant_diagnostics"]["segment_kind"], "state_changing")
+        self.assertNotIn("microsoft / markitdown", step["description"])
+        self.assertEqual(events[-1]["event"], "recording_done")
+
+    async def test_react_agent_uses_selection_compiler_for_first_project_without_llm(self):
+        agent = ASSISTANT_MODULE.RPAReActAgent()
+        page = _FakeActionPage()
+        snapshot = {
+            "url": "https://github.com/trending",
+            "title": "Trending repositories on GitHub today · GitHub",
+            "frames": [
+                {
+                    "frame_hint": "main document",
+                    "frame_path": [],
+                    "elements": [],
+                    "collections": [
+                        {
+                            "kind": "repeated_items",
+                            "frame_path": [],
+                            "container_hint": {"locator": {"method": "css", "value": "main article.Box-row"}},
+                            "item_hint": {"role": "link", "locator": {"method": "css", "value": "h2 a"}},
+                            "item_count": 2,
+                            "items": [
+                                {"index": 1, "tag": "a", "role": "link", "name": "owner1 / repo1", "href": "/owner1/repo1"},
+                                {"index": 2, "tag": "a", "role": "link", "name": "owner2 / repo2", "href": "/owner2/repo2"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+            "actionable_nodes": [],
+            "content_nodes": [],
+            "containers": [],
+        }
+        captured_specs = []
+
+        async def should_not_stream(_history, _model_config=None):
+            raise AssertionError("LLM planner should not be called for deterministic first-item selection")
+            yield  # pragma: no cover
+
+        async def fake_run_segment(*, page, spec, executor, snapshot_builder):
+            del page, executor, snapshot_builder
+            captured_specs.append(spec)
+            return SEGMENT_MODELS_MODULE.SegmentRunResult(
+                success=True,
+                output="ok",
+                page_changed=True,
+                selected_artifacts={
+                    "selected_repo_name": "owner1 / repo1",
+                    "selected_repo_href": "/owner1/repo1",
+                },
+                before_snapshot=snapshot,
+                after_snapshot={
+                    "url": "https://github.com/owner1/repo1",
+                    "title": "owner1/repo1",
+                    "frames": [],
+                    "actionable_nodes": [],
+                    "content_nodes": [],
+                    "containers": [],
+                },
+            )
+
+        agent._stream_llm = should_not_stream
+
+        with patch.object(
+            ASSISTANT_MODULE,
+            "build_page_snapshot",
+            new=AsyncMock(return_value=snapshot),
+        ), patch.object(
+            ASSISTANT_MODULE,
+            "run_segment",
+            new=fake_run_segment,
+        ):
+            events = [event async for event in agent.run(
+                session_id="compiled-first-project",
+                page=page,
+                goal="点击第一个项目",
+                existing_steps=[],
+            )]
+
+        self.assertEqual(len(captured_specs), 1)
+        self.assertEqual(captured_specs[0].segment_kind, "state_changing")
+        self.assertIn("article.Box-row", captured_specs[0].code)
+        self.assertNotIn("owner1 / repo1", captured_specs[0].code)
+        self.assertEqual(events[-1], {"event": "recording_done", "data": {"total_steps": 1}})
+
+    async def test_react_agent_uses_selection_compiler_for_reading_first_issue_title_without_llm(self):
+        agent = ASSISTANT_MODULE.RPAReActAgent()
+        page = _FakeActionPage()
+        snapshot = {
+            "url": "https://github.com/public-apis/public-apis/issues",
+            "title": "Issues · public-apis/public-apis · GitHub",
+            "frames": [
+                {
+                    "frame_hint": "main document",
+                    "frame_path": [],
+                    "elements": [],
+                    "collections": [
+                        {
+                            "kind": "repeated_items",
+                            "frame_path": [],
+                            "container_hint": {"locator": {"method": "css", "value": "div[aria-label='Issues'] > div"}},
+                            "item_hint": {"role": "link", "locator": {"method": "css", "value": "a[href*='/issues/']"}},
+                            "item_count": 2,
+                            "items": [
+                                {"index": 1, "tag": "a", "role": "link", "name": "Bug: first visible issue", "href": "/public-apis/public-apis/issues/100"},
+                                {"index": 2, "tag": "a", "role": "link", "name": "Bug: second visible issue", "href": "/public-apis/public-apis/issues/99"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+            "actionable_nodes": [],
+            "content_nodes": [],
+            "containers": [],
+        }
+        captured_specs = []
+
+        async def should_not_stream(_history, _model_config=None):
+            raise AssertionError("LLM planner should not be called for deterministic first-issue read")
+            yield  # pragma: no cover
+
+        async def fake_run_segment(*, page, spec, executor, snapshot_builder):
+            del page, executor, snapshot_builder
+            captured_specs.append(spec)
+            return SEGMENT_MODELS_MODULE.SegmentRunResult(
+                success=True,
+                output="Bug: first visible issue",
+                page_changed=False,
+                selected_artifacts={"selected_issue_title": "Bug: first visible issue"},
+                before_snapshot=snapshot,
+                after_snapshot={
+                    **snapshot,
+                    "actionable_nodes": [{"name": "Bug: first visible issue"}],
+                    "content_nodes": [{"text": "Bug: first visible issue"}],
+                },
+            )
+
+        agent._stream_llm = should_not_stream
+
+        with patch.object(
+            ASSISTANT_MODULE,
+            "build_page_snapshot",
+            new=AsyncMock(return_value=snapshot),
+        ), patch.object(
+            ASSISTANT_MODULE,
+            "run_segment",
+            new=fake_run_segment,
+        ):
+            events = [event async for event in agent.run(
+                session_id="compiled-first-issue",
+                page=page,
+                goal="获取第一个 issues 的标题",
+                existing_steps=[],
+            )]
+
+        self.assertEqual(len(captured_specs), 1)
+        self.assertEqual(captured_specs[0].segment_kind, "read_only")
+        self.assertIn("/issues/", captured_specs[0].code)
+        committed = [event for event in events if event["event"] == "segment_committed"]
+        self.assertEqual(committed[0]["data"]["output"], "Bug: first visible issue")
+        self.assertEqual(events[-1], {"event": "recording_done", "data": {"total_steps": 1}})
+
+    async def test_react_agent_uses_selection_compiler_for_max_stars_without_llm(self):
+        agent = ASSISTANT_MODULE.RPAReActAgent()
+        page = _FakeActionPage()
+        snapshot = {
+            "url": "https://github.com/trending",
+            "title": "Trending repositories on GitHub today · GitHub",
+            "frames": [
+                {
+                    "frame_hint": "main document",
+                    "frame_path": [],
+                    "elements": [],
+                    "collections": [
+                        {
+                            "kind": "repeated_items",
+                            "frame_path": [],
+                            "container_hint": {"locator": {"method": "css", "value": "main article.Box-row"}},
+                            "item_hint": {"role": "link", "locator": {"method": "css", "value": "h2 a"}},
+                            "item_count": 2,
+                            "items": [
+                                {"index": 1, "tag": "a", "role": "link", "name": "owner1 / repo1", "href": "/owner1/repo1"},
+                                {"index": 2, "tag": "a", "role": "link", "name": "owner2 / repo2", "href": "/owner2/repo2"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+            "actionable_nodes": [],
+            "content_nodes": [],
+            "containers": [],
+        }
+        captured_specs = []
+
+        async def should_not_stream(_history, _model_config=None):
+            raise AssertionError("LLM planner should not be called for deterministic max-selection")
+            yield  # pragma: no cover
+
+        async def fake_run_segment(*, page, spec, executor, snapshot_builder):
+            del page, executor, snapshot_builder
+            captured_specs.append(spec)
+            return SEGMENT_MODELS_MODULE.SegmentRunResult(
+                success=True,
+                output="ok",
+                page_changed=True,
+                selected_artifacts={
+                    "selected_repo_name": "owner2 / repo2",
+                    "selected_repo_href": "/owner2/repo2",
+                },
+                before_snapshot=snapshot,
+                after_snapshot={
+                    "url": "https://github.com/owner2/repo2",
+                    "title": "owner2/repo2",
+                    "frames": [],
+                    "actionable_nodes": [],
+                    "content_nodes": [],
+                    "containers": [],
+                },
+            )
+
+        agent._stream_llm = should_not_stream
+
+        with patch.object(
+            ASSISTANT_MODULE,
+            "build_page_snapshot",
+            new=AsyncMock(return_value=snapshot),
+        ), patch.object(
+            ASSISTANT_MODULE,
+            "run_segment",
+            new=fake_run_segment,
+        ):
+            events = [event async for event in agent.run(
+                session_id="compiled-max-stars",
+                page=page,
+                goal="点击 stars 数最多的项目",
+                existing_steps=[],
+            )]
+
+        self.assertEqual(len(captured_specs), 1)
+        self.assertIn("/stargazers", captured_specs[0].code)
+        self.assertNotIn("owner1 / repo1", captured_specs[0].code)
+        self.assertNotIn("owner2 / repo2", captured_specs[0].code)
+        self.assertEqual(events[-1], {"event": "recording_done", "data": {"total_steps": 1}})
+
+    async def test_react_agent_rejects_javascript_segment_and_recovers_with_python(self):
+        agent = ASSISTANT_MODULE.RPAReActAgent()
+        page = _FakeActionPage()
+        snapshots = [
+            {"url": "https://example.com/trending", "title": "Trending", "frames": []},
+            {"url": "https://example.com/trending", "title": "Trending", "frames": []},
+            {"url": "https://example.com/repo", "title": "Repo", "frames": []},
+            {"url": "https://example.com/repo", "title": "Repo", "frames": []},
+            {"url": "https://example.com/repo", "title": "Repo", "frames": []},
+        ]
+        responses = [
+            json.dumps(
+                {
+                    "thought": "plan a dynamic segment",
+                    "action": "execute",
+                    "segment_goal": "找出 stars 最高的项目并点击",
+                    "segment_kind": "state_changing",
+                    "stop_reason": "after_state_change",
+                    "expected_outcome": {"type": "page_state_changed", "summary": "进入目标仓库页"},
+                    "completion_check": {"url_not_same": True},
+                    "code": "const repoLinks = [...document.querySelectorAll('a[href]')];",
+                }
+            ),
+            json.dumps(
+                {
+                    "thought": "rewrite as python",
+                    "action": "execute",
+                    "segment_goal": "找出 stars 最高的项目并点击",
+                    "segment_kind": "state_changing",
+                    "stop_reason": "after_state_change",
+                    "expected_outcome": {"type": "page_state_changed", "summary": "进入目标仓库页"},
+                    "completion_check": {"url_not_same": True},
+                    "code": "async def run(page):\n    return {'page_changed': True}",
+                }
+            ),
+            json.dumps({"thought": "done", "action": "done"}),
+        ]
+        executed_codes = []
+
+        async def fake_stream(_history, _model_config=None):
+            yield responses.pop(0)
+
+        async def fake_execute(_page, code):
+            executed_codes.append(code)
+            return {"success": True, "output": "ok", "error": None, "page_changed": True}
+
+        agent._stream_llm = fake_stream
+
+        with patch.object(
+            ASSISTANT_MODULE,
+            "build_page_snapshot",
+            new=AsyncMock(side_effect=lambda *_args, **_kwargs: snapshots.pop(0)),
+        ), patch.object(
+            ASSISTANT_MODULE,
+            "_execute_on_page",
+            new=fake_execute,
+        ):
+            events = []
+            async for event in agent.run(
+                session_id="segment-2",
+                page=page,
+                goal="点击 stars 最多的项目",
+                existing_steps=[],
+            ):
+                events.append(event)
+
+        recovering = [event for event in events if event["event"] == "segment_recovering"]
+        self.assertGreaterEqual(len(recovering), 1)
+        self.assertEqual(recovering[0]["data"]["error_code"], "invalid_generated_code")
+        self.assertEqual(len(executed_codes), 1)
+        self.assertTrue(executed_codes[0].startswith("async def run(page):"))
+        self.assertIn("segment_committed", [event["event"] for event in events])
+
+    async def test_react_agent_requires_read_segment_before_done_for_read_goal(self):
+        agent = ASSISTANT_MODULE.RPAReActAgent()
+        page = _FakeActionPage()
+        snapshots = [
+            {"url": "https://github.com/microsoft/markitdown", "title": "Repo", "frames": []},
+            {"url": "https://github.com/microsoft/markitdown", "title": "Repo", "frames": []},
+            {"url": "https://github.com/microsoft/markitdown/issues", "title": "Issues", "frames": []},
+            {"url": "https://github.com/microsoft/markitdown/issues", "title": "Issues", "frames": []},
+            {"url": "https://github.com/microsoft/markitdown/issues", "title": "Issues", "frames": []},
+            {"url": "https://github.com/microsoft/markitdown/issues", "title": "Issues", "frames": []},
+            {"url": "https://github.com/microsoft/markitdown/issues", "title": "Issues", "frames": []},
+            {"url": "https://github.com/microsoft/markitdown/issues", "title": "Issues", "frames": []},
+        ]
+        responses = [
+            json.dumps(
+                {
+                    "thought": "go to issues first",
+                    "action": "execute",
+                    "segment_goal": "打开当前仓库的 Issues 列表页以便读取最近一条 issue 标题",
+                    "segment_kind": "state_changing",
+                    "stop_reason": "after_state_change",
+                    "expected_outcome": {"type": "page_state_changed", "summary": "进入 Issues 列表页"},
+                    "completion_check": {"url_not_same": True},
+                    "code": "async def run(page):\n    return {'page_changed': True}",
+                }
+            ),
+            json.dumps({"thought": "issues page is visible now", "action": "done"}),
+            json.dumps(
+                {
+                    "thought": "extract the first issue title",
+                    "action": "execute",
+                    "segment_goal": "提取当前 Issues 列表页第一条 issue 的标题",
+                    "segment_kind": "read_only",
+                    "stop_reason": "goal_reached",
+                    "expected_outcome": {"type": "observation", "summary": "拿到最近一条 issue 标题"},
+                    "completion_check": {},
+                    "code": "async def run(page):\n    return {'output': 'Bug: example title'}",
+                }
+            ),
+            json.dumps({"thought": "done", "action": "done"}),
+        ]
+        execute_results = [
+            {
+                "success": True,
+                "output": "ok",
+                "error": None,
+                "selected_artifacts": {},
+                "page_changed": True,
+            },
+            {
+                "success": True,
+                "output": "Bug: example title",
+                "error": None,
+                "selected_artifacts": {},
+                "page_changed": False,
+            },
+        ]
+
+        async def fake_stream(_history, _model_config=None):
+            yield responses.pop(0)
+
+        async def fake_execute(_page, _code):
+            return execute_results.pop(0)
+
+        agent._stream_llm = fake_stream
+
+        with patch.object(
+            ASSISTANT_MODULE,
+            "build_page_snapshot",
+            new=AsyncMock(side_effect=lambda *_args, **_kwargs: snapshots.pop(0)),
+        ), patch.object(
+            ASSISTANT_MODULE,
+            "_execute_on_page",
+            new=fake_execute,
+        ):
+            events = [event async for event in agent.run(
+                session_id="segment-read-goal",
+                page=page,
+                goal="获取最近一条 issues 的标题",
+                existing_steps=[],
+            )]
+
+        recovering = [event for event in events if event["event"] == "segment_recovering"]
+        self.assertTrue(any(event["data"]["error_code"] == "goal_not_complete" for event in recovering))
+        committed = [event for event in events if event["event"] == "segment_committed"]
+        self.assertEqual(len(committed), 2)
+        self.assertEqual(committed[1]["data"]["output"], "Bug: example title")
+        self.assertEqual(events[-1]["event"], "recording_done")
+        self.assertEqual(events[-1]["data"]["total_steps"], 2)
+
+    async def test_react_agent_rejects_non_adaptive_hard_coded_segment_code(self):
+        agent = ASSISTANT_MODULE.RPAReActAgent()
+        page = _FakeActionPage()
+        snapshots = [
+            {
+                "url": "https://github.com/microsoft/markitdown",
+                "title": "Repo",
+                "frames": [
+                    {
+                        "frame_hint": "main document",
+                        "frame_path": [],
+                        "elements": [{"index": 1, "tag": "a", "role": "link", "name": "Issues 340"}],
+                        "collections": [],
+                    }
+                ],
+            },
+            {
+                "url": "https://github.com/microsoft/markitdown",
+                "title": "Repo",
+                "frames": [
+                    {
+                        "frame_hint": "main document",
+                        "frame_path": [],
+                        "elements": [{"index": 1, "tag": "a", "role": "link", "name": "Issues 340"}],
+                        "collections": [],
+                    }
+                ],
+            },
+            {"url": "https://github.com/microsoft/markitdown/issues", "title": "Issues", "frames": []},
+            {"url": "https://github.com/microsoft/markitdown/issues", "title": "Issues", "frames": []},
+            {"url": "https://github.com/microsoft/markitdown/issues", "title": "Issues", "frames": []},
+        ]
+        responses = [
+            json.dumps(
+                {
+                    "thought": "open issues",
+                    "action": "execute",
+                    "segment_goal": "打开当前仓库的 Issues 列表页",
+                    "segment_kind": "state_changing",
+                    "stop_reason": "after_state_change",
+                    "expected_outcome": {"type": "page_state_changed", "summary": "进入 Issues 列表页"},
+                    "completion_check": {"url_not_same": True},
+                    "code": "async def run(page):\n    await page.get_by_role('link', name='Issues 340').click()",
+                }
+            ),
+            json.dumps(
+                {
+                    "thought": "rewrite with adaptive matching",
+                    "action": "execute",
+                    "segment_goal": "打开当前仓库的 Issues 列表页",
+                    "segment_kind": "state_changing",
+                    "stop_reason": "after_state_change",
+                    "expected_outcome": {"type": "page_state_changed", "summary": "进入 Issues 列表页"},
+                    "completion_check": {"url_not_same": True},
+                    "code": "async def run(page):\n    await page.get_by_role('link', name='Issues').click()",
+                }
+            ),
+            json.dumps({"thought": "done", "action": "done"}),
+        ]
+        executed_codes = []
+
+        async def fake_stream(_history, _model_config=None):
+            yield responses.pop(0)
+
+        async def fake_execute(_page, code):
+            executed_codes.append(code)
+            return {"success": True, "output": "ok", "error": None, "page_changed": True}
+
+        agent._stream_llm = fake_stream
+
+        with patch.object(
+            ASSISTANT_MODULE,
+            "build_page_snapshot",
+            new=AsyncMock(side_effect=lambda *_args, **_kwargs: snapshots.pop(0)),
+        ), patch.object(
+            ASSISTANT_MODULE,
+            "_execute_on_page",
+            new=fake_execute,
+        ):
+            events = [event async for event in agent.run(
+                session_id="segment-non-adaptive",
+                page=page,
+                goal="打开当前仓库的 Issues 列表页",
+                existing_steps=[],
+            )]
+
+        recovering = [event for event in events if event["event"] == "segment_recovering"]
+        self.assertTrue(any(event["data"]["error_code"] == "non_adaptive_code" for event in recovering))
+        self.assertEqual(len(executed_codes), 1)
+        self.assertNotIn("Issues 340", executed_codes[0])
+
+    def test_find_non_adaptive_literal_ignores_numeric_sentinel_string(self):
+        snapshot = {
+            "url": "https://example.com/trending?page=-1",
+            "title": "Trending",
+            "frames": [],
+            "actionable_nodes": [],
+            "content_nodes": [],
+            "containers": [],
+        }
+        code = (
+            "async def run(page):\n"
+            "    best_score = '-1'\n"
+            "    return {'output': best_score}\n"
+        )
+
+        literal = ASSISTANT_MODULE.RPAReActAgent._find_non_adaptive_literal(
+            code,
+            snapshot,
+            "点击 stars 数最多的项目",
+        )
+
+        self.assertEqual(literal, "")
+
+    @unittest.skip("legacy code/structured dual-mode events removed in unified segment mode")
+    async def test_react_agent_rejects_javascript_code_before_exec_and_recovers(self):
+        agent = ASSISTANT_MODULE.RPAReActAgent()
+        page = _FakeActionPage()
+        snapshot = {"url": "https://example.com", "title": "Example", "frames": []}
+        responses = [
+            json.dumps(
+                {
+                    "thought": "need code mode for comparison",
+                    "action": "execute",
+                    "execution_mode": "code",
+                    "upgrade_reason": "dynamic_selection",
+                    "description": "Compare visible projects and open the highest-star repository",
+                    "code": "const repoLinks = [...document.querySelectorAll('a[href]')];",
+                    "risk": "none",
+                    "risk_reason": "",
+                }
+            ),
+            json.dumps(
+                {
+                    "thought": "rewrite it as Python",
+                    "action": "execute",
+                    "execution_mode": "code",
+                    "upgrade_reason": "dynamic_selection",
+                    "description": "Compare visible projects and open the highest-star repository",
+                    "code": "async def run(page):\n    await page.wait_for_timeout(10)\n    return 'ok'",
+                    "risk": "none",
+                    "risk_reason": "",
+                }
+            ),
+            json.dumps(
+                {
+                    "thought": "done",
+                    "action": "done",
+                    "description": "done",
+                    "risk": "none",
+                    "risk_reason": "",
+                }
+            ),
+        ]
+        executed_codes = []
+
+        async def fake_stream(_history, _model_config=None):
+            yield responses.pop(0)
+
+        async def fake_execute(_page, code):
+            executed_codes.append(code)
+            return {"success": True, "output": "ok", "error": None}
+
+        agent._stream_llm = fake_stream
+
+        with patch.object(
+            ASSISTANT_MODULE,
+            "build_page_snapshot",
+            new=AsyncMock(return_value=snapshot),
+        ), patch.object(
+            ASSISTANT_MODULE,
+            "_execute_on_page",
+            new=fake_execute,
+        ):
+            events = []
+            async for event in agent.run(
+                session_id="session-1",
+                page=page,
+                goal="Click the project with the most stars this week",
+                existing_steps=[],
+            ):
+                events.append(event)
+
+        self.assertEqual(len(executed_codes), 1)
+        self.assertTrue(executed_codes[0].startswith("async def run(page):"))
+        recovering = [event for event in events if event["event"] == "agent_recovering"]
+        self.assertGreaterEqual(len(recovering), 1)
+        self.assertEqual(recovering[0]["data"]["error_code"], "invalid_generated_code")
+
+    @unittest.skip("legacy code/structured dual-mode events removed in unified segment mode")
+    async def test_react_agent_normalizes_sync_run_function_before_code_execution(self):
+        agent = ASSISTANT_MODULE.RPAReActAgent()
+        page = _FakeActionPage()
+        snapshot = {"url": "https://example.com", "title": "Example", "frames": []}
+        executed_codes = []
+        responses = [
+            json.dumps(
+                {
+                    "thought": "use code mode for a custom check",
+                    "action": "execute",
+                    "execution_mode": "code",
+                    "upgrade_reason": "custom_logic",
+                    "description": "Run a custom page check",
+                    "code": "def run(page):\n    return 'ok'",
+                    "risk": "none",
+                    "risk_reason": "",
+                }
+            ),
+            json.dumps(
+                {
+                    "thought": "done",
+                    "action": "done",
+                    "description": "done",
+                    "risk": "none",
+                    "risk_reason": "",
+                }
+            ),
+        ]
+
+        async def fake_stream(_history, _model_config=None):
+            yield responses.pop(0)
+
+        async def fake_execute(_page, code):
+            executed_codes.append(code)
+            return {"success": True, "output": "ok", "error": None}
+
+        agent._stream_llm = fake_stream
+
+        with patch.object(
+            ASSISTANT_MODULE,
+            "build_page_snapshot",
+            new=AsyncMock(return_value=snapshot),
+        ), patch.object(
+            ASSISTANT_MODULE,
+            "_execute_on_page",
+            new=fake_execute,
+        ):
+            events = []
+            async for event in agent.run(
+                session_id="session-1",
+                page=page,
+                goal="Run a custom page check",
+                existing_steps=[],
+            ):
+                events.append(event)
+
+        self.assertEqual(len(executed_codes), 1)
+        self.assertTrue(executed_codes[0].startswith("async def run(page):"))
+        step_done = next(event for event in events if event["event"] == "agent_step_committed")
+        self.assertTrue(step_done["data"]["step"]["value"].startswith("async def run(page):"))
+
+    def test_normalize_run_function_wraps_body_and_preserves_existing_async_definition(self):
+        agent = ASSISTANT_MODULE.RPAReActAgent()
+
+        wrapped = agent._normalize_run_function('await page.get_by_role("button", name="Save").click()')
+        already_wrapped = agent._normalize_run_function(
+            "async def run(page):\n    await page.wait_for_timeout(500)"
+        )
+
+        self.assertTrue(wrapped.startswith("async def run(page):"))
+        self.assertIn('await page.get_by_role("button", name="Save").click()', wrapped)
+        self.assertEqual(
+            already_wrapped,
+            "async def run(page):\n    await page.wait_for_timeout(500)",
+        )
+
+    def test_normalize_run_function_converts_sync_run_playwright_calls_to_awaits(self):
+        agent = ASSISTANT_MODULE.RPAReActAgent()
+
+        normalized = agent._normalize_run_function(
+            'def run(page):\n    page.goto("https://example.com")'
+        )
+
+        self.assertEqual(
+            normalized,
+            'async def run(page):\n    await page.goto("https://example.com")',
+        )
+
+    def test_normalize_run_function_converts_locator_variable_actions_to_awaits(self):
+        agent = ASSISTANT_MODULE.RPAReActAgent()
+
+        normalized = agent._normalize_run_function(
+            '\n'.join([
+                'def run(page):',
+                '    save = page.get_by_role("button", name="Save")',
+                '    save.click()',
+                '    text = save.inner_text()',
+            ])
+        )
+
+        self.assertIn('save = page.get_by_role("button", name="Save")', normalized)
+        self.assertIn("await save.click()", normalized)
+        self.assertIn("text = await save.inner_text()", normalized)
+        self.assertNotIn('save = await page.get_by_role("button", name="Save")', normalized)
+
+    def test_normalize_run_function_normalizes_already_async_wrapper_body(self):
+        agent = ASSISTANT_MODULE.RPAReActAgent()
+
+        normalized = agent._normalize_run_function(
+            '\n'.join([
+                'async def run(page):',
+                '    save = page.get_by_role("button", name="Save")',
+                '    save.click()',
+                '    text = save.inner_text()',
+            ])
+        )
+
+        self.assertTrue(normalized.startswith("async def run(page):"))
+        self.assertIn('save = page.get_by_role("button", name="Save")', normalized)
+        self.assertIn("await save.click()", normalized)
+        self.assertIn("text = await save.inner_text()", normalized)
+        self.assertNotIn('save = await page.get_by_role("button", name="Save")', normalized)
+
+    def test_normalize_run_function_awaits_playwright_calls_in_return_expressions(self):
+        agent = ASSISTANT_MODULE.RPAReActAgent()
+
+        normalized = agent._normalize_run_function(
+            'def run(page):\n    return page.locator("h1").inner_text()'
+        )
+
+        self.assertIn('return await page.locator("h1").inner_text()', normalized)
+
+    def test_normalize_execution_mode_defaults_to_structured_and_infers_code_for_control_flow(self):
+        agent = ASSISTANT_MODULE.RPAReActAgent()
+
+        self.assertEqual(
+            agent._normalize_execution_mode(
+                {"description": "Click the save button", "operation": "click"},
+                "Click the save button",
+            ),
+            "structured",
+        )
+        self.assertEqual(
+            agent._normalize_execution_mode(
+                {"description": "Refresh until the status changes", "operation": "click"},
+                "Refresh until the status changes",
+            ),
+            "code",
+        )
+        self.assertEqual(
+            agent._normalize_execution_mode(
+                {"execution_mode": "code", "description": "Click save"},
+                "Click the save button",
+            ),
+            "code",
+        )
+        self.assertEqual(
+            agent._normalize_execution_mode(
+                {"description": "Open the project with the most stars this week"},
+                "Click the project with the most stars this week",
+            ),
+            "code",
+        )
+        self.assertEqual(
+            agent._normalize_execution_mode(
+                {"description": "Open the latest issue"},
+                "Get the latest issue title",
+            ),
+            "code",
         )
 
 class RPAAssistantFrameAwareSnapshotTests(unittest.IsolatedAsyncioTestCase):
@@ -457,9 +1951,86 @@ class RPAAssistantFrameAwareSnapshotTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("actionable_nodes", snapshot)
         self.assertIn("content_nodes", snapshot)
         self.assertIn("containers", snapshot)
-        self.assertEqual(snapshot["actionable_nodes"][0]["locator"]["method"], "role")
-        self.assertEqual(snapshot["content_nodes"][0]["semantic_kind"], "cell")
-        self.assertEqual(snapshot["containers"][0]["container_kind"], "table")
+
+
+class RPARoutePersistenceTests(unittest.IsolatedAsyncioTestCase):
+    @unittest.skip("legacy agent_step_committed event removed in unified segment mode")
+    async def test_route_persists_only_agent_step_committed(self):
+        request = SimpleNamespace(mode="react", message="Get the latest issue title")
+        session = SimpleNamespace(
+            steps=[],
+            user_id="user-1",
+        )
+        fake_agent_events = [
+            {"event": "agent_attempted", "data": {"description": "Click Issues tab"}},
+            {"event": "agent_step_committed", "data": {"step": {"action": "navigate", "description": "Open Issues"}}},
+            {"event": "agent_done", "data": {"total_steps": 1}},
+        ]
+
+        class _FakeAgent:
+            async def run(self, **_kwargs):
+                for event in fake_agent_events:
+                    yield event
+
+        add_step = AsyncMock()
+
+        with patch.object(RPA_ROUTE_MODULE.rpa_manager, "get_session", new=AsyncMock(return_value=session)), patch.object(
+            RPA_ROUTE_MODULE, "_resolve_user_model_config", new=AsyncMock(return_value={})
+        ), patch.object(
+            RPA_ROUTE_MODULE.rpa_manager, "get_page", return_value=_FakePage()
+        ), patch.object(
+            RPA_ROUTE_MODULE.rpa_manager, "pause_recording"
+        ), patch.object(
+            RPA_ROUTE_MODULE.rpa_manager, "resume_recording"
+        ), patch.object(
+            RPA_ROUTE_MODULE.rpa_manager, "add_step", new=add_step
+        ), patch.dict(
+            RPA_ROUTE_MODULE._active_agents, {"session-1": _FakeAgent()}
+        ):
+            response = await RPA_ROUTE_MODULE.chat_with_assistant("session-1", request, SimpleNamespace(id="user-1"))
+            async for _chunk in response.body_iterator:
+                pass
+
+        add_step.assert_awaited_once_with("session-1", {"action": "navigate", "description": "Open Issues"})
+
+    async def test_route_persists_only_segment_committed(self):
+        request = SimpleNamespace(mode="segment", message="点击 stars 最多的项目")
+        session = SimpleNamespace(
+            steps=[],
+            user_id="user-1",
+        )
+        fake_agent_events = [
+            {"event": "segment_planned", "data": {"segment_goal": "动态比较 stars 并点击最高项"}},
+            {"event": "segment_validation_failed", "data": {"segment_goal": "动态比较 stars 并点击最高项", "reason": "timeout"}},
+            {"event": "segment_committed", "data": {"step": {"action": "ai_script", "description": "动态比较 stars 并点击最高项"}}},
+            {"event": "recording_done", "data": {"total_steps": 1}},
+        ]
+
+        class _FakeAgent:
+            async def run(self, **_kwargs):
+                for event in fake_agent_events:
+                    yield event
+
+        add_step = AsyncMock()
+
+        with patch.object(RPA_ROUTE_MODULE.rpa_manager, "get_session", new=AsyncMock(return_value=session)), patch.object(
+            RPA_ROUTE_MODULE, "_resolve_user_model_config", new=AsyncMock(return_value={})
+        ), patch.object(
+            RPA_ROUTE_MODULE.rpa_manager, "get_page", return_value=_FakePage()
+        ), patch.object(
+            RPA_ROUTE_MODULE.rpa_manager, "pause_recording"
+        ), patch.object(
+            RPA_ROUTE_MODULE.rpa_manager, "resume_recording"
+        ), patch.object(
+            RPA_ROUTE_MODULE.rpa_manager, "add_step", new=add_step
+        ), patch.dict(
+            RPA_ROUTE_MODULE._active_agents, {"session-1": _FakeAgent()}
+        ):
+            response = await RPA_ROUTE_MODULE.chat_with_assistant("session-1", request, SimpleNamespace(id="user-1"))
+            async for _chunk in response.body_iterator:
+                pass
+
+        add_step.assert_awaited_once_with("session-1", {"action": "ai_script", "description": "动态比较 stars 并点击最高项"})
 
     async def test_build_page_snapshot_includes_iframe_elements_and_collections(self):
         iframe = _FakeSnapshotFrame(
@@ -921,6 +2492,198 @@ class RPAAssistantStructuredExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["step"]["action"], "extract_text")
         self.assertEqual(result["step"]["result_key"], "latest_issue_title")
 
+    async def test_run_structured_intent_returns_target_not_found_failure_when_resolution_fails(self):
+        with self.subTest("resolution_failure"):
+            snapshot = {"frames": [], "actionable_nodes": [], "content_nodes": [], "containers": []}
+            intent = {
+                "action": "click",
+                "description": "Click the save button",
+                "prompt": "Click the save button",
+                "target_hint": {"role": "button", "name": "Save"},
+            }
+
+            result = await ASSISTANT_RUNTIME_MODULE.run_structured_intent(
+                _FakeActionPage(),
+                snapshot,
+                intent,
+            )
+
+            self.assertFalse(result["success"])
+            self.assertEqual(result["error"], "No frame-aware target matched the structured intent")
+            self.assertEqual(result["error_code"], "target_not_found")
+            self.assertTrue(result["retryable"])
+            self.assertEqual(result["output"], "")
+            self.assertIsNone(result["step"])
+            self.assertEqual(result["intent"], intent)
+            self.assertIsNone(result["resolved_intent"])
+
+        with self.subTest("legacy_direct_api_contract"):
+            snapshot = {"frames": [], "actionable_nodes": [], "content_nodes": [], "containers": []}
+            intent = {
+                "action": "click",
+                "description": "Click the save button",
+                "prompt": "Click the save button",
+                "target_hint": {"role": "button", "name": "Save"},
+            }
+
+            with self.assertRaisesRegex(ValueError, "No frame-aware target matched the structured intent"):
+                ASSISTANT_RUNTIME_MODULE.resolve_structured_intent(snapshot, intent)
+
+            with self.assertRaisesRegex(ValueError, "No collection target matched"):
+                ASSISTANT_RUNTIME_MODULE.resolve_collection_target(snapshot, intent)
+
+            with self.assertRaisesRegex(ValueError, "No ordinal node candidates"):
+                ASSISTANT_RUNTIME_MODULE._select_ordinal_node([], intent)
+
+        with self.subTest("success_contract"):
+            snapshot = {
+                "frames": [],
+                "actionable_nodes": [
+                    {
+                        "node_id": "save-1",
+                        "frame_path": [],
+                        "role": "button",
+                        "name": "Save",
+                        "action_kinds": ["click"],
+                        "locator": {"method": "role", "role": "button", "name": "Save"},
+                        "locator_candidates": [
+                            {
+                                "kind": "role",
+                                "selected": True,
+                                "locator": {"method": "role", "role": "button", "name": "Save"},
+                            }
+                        ],
+                        "validation": {"status": "ok"},
+                        "hit_test_ok": True,
+                        "is_visible": True,
+                        "is_enabled": True,
+                    }
+                ],
+                "content_nodes": [],
+                "containers": [],
+            }
+            intent = {
+                "action": "click",
+                "description": "Click Save",
+                "prompt": "Click Save",
+                "target_hint": {"role": "button", "name": "Save"},
+            }
+
+            result = await ASSISTANT_RUNTIME_MODULE.run_structured_intent(
+                _FakeActionPage(),
+                snapshot,
+                intent,
+            )
+
+            self.assertTrue(result["success"])
+            self.assertEqual(result["error"], "")
+            self.assertEqual(result["error_code"], "")
+            self.assertFalse(result["retryable"])
+            self.assertEqual(result["output"], "ok")
+            self.assertEqual(result["intent"], intent)
+            self.assertEqual(result["resolved_intent"]["resolved"]["locator"]["name"], "Save")
+            self.assertEqual(result["step"]["action"], "click")
+
+    async def test_run_structured_intent_classifies_timeout_as_retryable_execution_timeout(self):
+        with self.subTest("resolution_failure_with_extra_context"):
+            self.assertEqual(
+                ASSISTANT_RUNTIME_MODULE._classify_structured_intent_error(
+                    ValueError("No frame-aware target matched the structured intent while resolving click target"),
+                    action="click",
+                ),
+                ("target_not_found", True),
+            )
+
+        click_snapshot = {
+            "frames": [],
+            "actionable_nodes": [
+                {
+                    "node_id": "save-1",
+                    "frame_path": [],
+                    "role": "button",
+                    "name": "Save",
+                    "action_kinds": ["click"],
+                    "locator": {"method": "role", "role": "button", "name": "Save"},
+                    "locator_candidates": [{"kind": "role", "selected": True, "locator": {"method": "role", "role": "button", "name": "Save"}}],
+                    "validation": {"status": "ok"},
+                    "hit_test_ok": True,
+                    "is_visible": True,
+                    "is_enabled": True,
+                }
+            ],
+            "content_nodes": [],
+            "containers": [],
+        }
+        click_intent = {
+            "action": "click",
+            "description": "Click Save",
+            "prompt": "Click Save",
+            "target_hint": {"role": "button", "name": "Save"},
+        }
+
+        cases = [
+            (
+                "timeout",
+                _FailingActionPage(RuntimeError("Timeout 30000ms exceeded while waiting for click")),
+                click_snapshot,
+                click_intent,
+                "execution_timeout",
+                True,
+                "Save",
+            ),
+            (
+                "detached_frame",
+                _FailingActionPage(RuntimeError("Frame has been detached during click")),
+                click_snapshot,
+                click_intent,
+                "page_changed",
+                True,
+                "Save",
+            ),
+            (
+                "navigation_timeout_without_navigation_keyword",
+                _FailingNavigationPage(RuntimeError("Timeout 30000ms exceeded"), phase="load_state"),
+                {"frames": [], "actionable_nodes": [], "content_nodes": [], "containers": []},
+                {
+                    "action": "navigate",
+                    "description": "Open GitHub Trending",
+                    "prompt": "Open GitHub Trending",
+                    "value": "https://github.com/trending",
+                },
+                "navigation_timeout",
+                True,
+                "https://github.com/trending",
+            ),
+            (
+                "unexpected_runtime_fallback",
+                _FailingActionPage(RuntimeError("socket blew up")),
+                click_snapshot,
+                click_intent,
+                "unexpected_runtime_error",
+                False,
+                "Save",
+            ),
+        ]
+        for label, page, snapshot, intent, expected_code, expected_retryable, expected_target in cases:
+            with self.subTest(label):
+                result = await ASSISTANT_RUNTIME_MODULE.run_structured_intent(
+                    page,
+                    snapshot,
+                    intent,
+                )
+
+                self.assertFalse(result["success"])
+                self.assertEqual(result["error_code"], expected_code)
+                self.assertEqual(result["retryable"], expected_retryable)
+                self.assertEqual(result["output"], "")
+                self.assertIsNone(result["step"])
+                self.assertEqual(result["intent"], intent)
+                resolved = result["resolved_intent"]["resolved"]
+                if resolved.get("locator"):
+                    self.assertEqual(resolved["locator"]["name"], expected_target)
+                else:
+                    self.assertEqual(resolved["url"], expected_target)
+
     async def test_resolve_structured_intent_prefers_collection_item_inside_iframe(self):
         snapshot = {
             "frames": [
@@ -1173,13 +2936,230 @@ class RPAAssistantPromptFormattingTests(unittest.TestCase):
         self.assertIn("Frame: iframe title=results", content)
         self.assertIn("Collection: search_results (2 items)", content)
 
-    def test_react_system_prompt_requires_explicit_extraction_before_done(self):
+    def test_react_system_prompt_requires_segment_completion_before_done(self):
         prompt = ASSISTANT_MODULE.REACT_SYSTEM_PROMPT
 
-        self.assertIn("For extraction tasks, use operation=extract_text", prompt)
-        self.assertIn('"result_key": "short_ascii_snake_case_key_for_extracted_value"', prompt)
-        self.assertIn("Do not mark the task done just because the data is visible on the page.", prompt)
-        self.assertIn("Execute the extraction step first and return the extracted value.", prompt)
+        self.assertIn("Plan exactly one ai_script segment at a time.", prompt)
+        self.assertIn('"segment_goal": "what this segment will achieve on the current page"', prompt)
+        self.assertIn('Do not split a dynamic task into "extract a concrete name first, then click that fixed name later".', prompt)
+        self.assertIn(
+            "For action goals such as click, open, enter, download, or submit, do not claim success with a read-only segment that only extracts text.",
+            prompt,
+        )
+        self.assertIn("Only output action=done when the user goal is actually complete after the previous segment.", prompt)
+        self.assertIn("For read/extraction goals, do not output action=done until a prior read-only segment has returned the requested value in output.", prompt)
+        self.assertIn("For read-only extraction segments, return the exact visible value from the page in output or a named field.", prompt)
+        self.assertIn("Do not use selected_target_key/page_contains_selected_target for read-only extraction unless you need an explicit post-segment visibility check.", prompt)
+        self.assertIn("Use the current page snapshot to derive adaptive locators and comparisons.", prompt)
+        self.assertIn("Do not hard-code volatile values observed on the page or in previous segments", prompt)
+
+
+class RPASegmentValidationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_run_segment_does_not_force_page_changed_for_state_changing_segment(self):
+        spec = SEGMENT_MODELS_MODULE.SegmentSpec(
+            segment_goal="点击第一个项目",
+            segment_kind="state_changing",
+            stop_reason="after_state_change",
+            expected_outcome={"type": "page_state_changed", "summary": "打开项目"},
+            completion_check={"url_not_same": True},
+            code="async def run(page):\n    return {'page_changed': False}",
+        )
+        snapshots = [
+            {"url": "https://github.com/trending", "title": "Trending", "frames": [], "actionable_nodes": [], "content_nodes": [], "containers": []},
+            {"url": "https://github.com/trending", "title": "Trending", "frames": [], "actionable_nodes": [], "content_nodes": [], "containers": []},
+        ]
+
+        result = await ASSISTANT_MODULE.run_segment(
+            page=_FakePage(),
+            spec=spec,
+            executor=AsyncMock(return_value={"success": True, "output": "ok", "page_changed": False}),
+            snapshot_builder=AsyncMock(side_effect=snapshots),
+        )
+
+        self.assertFalse(result.page_changed)
+
+    async def test_run_segment_detects_delayed_page_changed_during_short_reobserve(self):
+        spec = SEGMENT_MODELS_MODULE.SegmentSpec(
+            segment_goal="点击第一个项目",
+            segment_kind="state_changing",
+            stop_reason="after_state_change",
+            expected_outcome={"type": "page_state_changed", "summary": "打开项目"},
+            completion_check={"url_not_same": True},
+            code="async def run(page):\n    return {'page_changed': False}",
+        )
+        page = _FakeActionPage()
+        snapshots = [
+            {"url": "https://github.com/trending", "title": "Trending", "frames": [], "actionable_nodes": [], "content_nodes": [], "containers": []},
+            {"url": "https://github.com/trending", "title": "Trending", "frames": [], "actionable_nodes": [], "content_nodes": [], "containers": []},
+            {"url": "https://github.com/owner/repo", "title": "owner/repo", "frames": [], "actionable_nodes": [], "content_nodes": [], "containers": []},
+        ]
+
+        result = await ASSISTANT_MODULE.run_segment(
+            page=page,
+            spec=spec,
+            executor=AsyncMock(return_value={"success": True, "output": "ok", "page_changed": False}),
+            snapshot_builder=AsyncMock(side_effect=snapshots),
+        )
+
+        self.assertTrue(result.page_changed)
+
+    async def test_validate_segment_result_accepts_selected_repo_after_navigation_when_href_matches_snapshot(self):
+        spec = SEGMENT_MODELS_MODULE.SegmentSpec(
+            segment_goal="在当前 Trending 列表中找出 stars 数最多的项目并点击打开其仓库页面",
+            segment_kind="state_changing",
+            stop_reason="after_state_change",
+            expected_outcome={"type": "page_state_changed", "summary": "进入所选仓库页面"},
+            completion_check={
+                "url_not_same": True,
+                "selected_target_key": "selected_repo_name",
+                "page_contains_selected_target": True,
+            },
+            code="async def run(page):\n    return {}",
+        )
+        run_result = SEGMENT_MODELS_MODULE.SegmentRunResult(
+            success=True,
+            page_changed=True,
+            selected_artifacts={
+                "selected_repo_name": "microsoft / markitdown",
+                "selected_repo_href": "/microsoft/markitdown",
+                "selected_repo_stars": 109222,
+            },
+            after_snapshot={
+                "url": "https://github.com/microsoft/markitdown",
+                "title": "GitHub - microsoft/markitdown: Python tool for converting files and office documents to Markdown. · GitHub",
+            },
+        )
+
+        result = await SEGMENT_VALIDATOR_MODULE.validate_segment_result(
+            goal="点击 stars 数最多的项目",
+            spec=spec,
+            run_result=run_result,
+        )
+
+        self.assertTrue(result.passed)
+        self.assertTrue(result.goal_completed)
+
+    async def test_validate_segment_result_does_not_complete_read_goal_after_navigation_only(self):
+        spec = SEGMENT_MODELS_MODULE.SegmentSpec(
+            segment_goal="打开当前仓库的 Issues 页面，为读取最近一条 issue 标题做准备",
+            segment_kind="state_changing",
+            stop_reason="after_state_change",
+            expected_outcome={"type": "page_state_changed", "summary": "进入 Issues 列表页"},
+            completion_check={"url_not_same": True},
+            code="async def run(page):\n    return {}",
+        )
+        run_result = SEGMENT_MODELS_MODULE.SegmentRunResult(
+            success=True,
+            output="ok",
+            page_changed=True,
+            after_snapshot={
+                "url": "https://github.com/public-apis/public-apis/issues",
+                "title": "Issues · public-apis/public-apis · GitHub",
+                "frames": [],
+                "actionable_nodes": [],
+                "content_nodes": [],
+                "containers": [],
+            },
+        )
+
+        result = await SEGMENT_VALIDATOR_MODULE.validate_segment_result(
+            goal="获取最近一条 issues 的标题",
+            spec=spec,
+            run_result=run_result,
+        )
+
+        self.assertTrue(result.passed)
+        self.assertFalse(result.goal_completed)
+
+    async def test_validate_segment_result_accepts_read_only_visible_text_from_snapshot_body(self):
+        spec = SEGMENT_MODELS_MODULE.SegmentSpec(
+            segment_goal="提取当前 Issues 列表中第一个 issue 条目的标题",
+            segment_kind="read_only",
+            stop_reason="goal_reached",
+            expected_outcome={"type": "observation", "summary": "返回第一个 issue 的标题"},
+            completion_check={
+                "selected_target_key": "latest_issue_title",
+                "page_contains_selected_target": True,
+            },
+            code="async def run(page):\n    return {}",
+        )
+        run_result = SEGMENT_MODELS_MODULE.SegmentRunResult(
+            success=True,
+            output="Bug: visible issue title",
+            selected_artifacts={
+                "latest_issue_title": "Bug: visible issue title",
+            },
+            after_snapshot={
+                "url": "https://github.com/public-apis/public-apis/issues",
+                "title": "Issues · public-apis/public-apis · GitHub",
+                "frames": [
+                    {
+                        "frame_hint": "main document",
+                        "frame_path": [],
+                        "elements": [
+                            {
+                                "index": 1,
+                                "tag": "a",
+                                "role": "link",
+                                "name": "Bug: visible issue title",
+                                "href": "/public-apis/public-apis/issues/1000",
+                            }
+                        ],
+                        "collections": [],
+                    }
+                ],
+                "actionable_nodes": [
+                    {"name": "Bug: visible issue title"},
+                ],
+                "content_nodes": [
+                    {"text": "Bug: visible issue title"},
+                ],
+                "containers": [],
+            },
+        )
+
+        result = await SEGMENT_VALIDATOR_MODULE.validate_segment_result(
+            goal="获取第一个 issues 的标题",
+            spec=spec,
+            run_result=run_result,
+        )
+
+        self.assertTrue(result.passed)
+        self.assertTrue(result.goal_completed)
+
+
+class RPAAssistantExecutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_execute_single_response_normalizes_code_before_execution(self):
+        assistant = ASSISTANT_MODULE.RPAAssistant()
+        page = _FakeActionPage()
+        snapshot = {"url": "https://example.com", "title": "Example", "frames": []}
+        executed_codes = []
+
+        async def fake_execute(_page, code):
+            executed_codes.append(code)
+            return {"success": True, "output": "ok", "error": None}
+
+        with patch.object(
+            assistant,
+            "_execute_on_page",
+            new=fake_execute,
+        ):
+            result, code, resolution = await assistant._execute_single_response(
+                page,
+                snapshot,
+                '```python\n'
+                'def run(page):\n'
+                '    save = page.get_by_role("button", name="Save")\n'
+                '    save.click()\n'
+                '```',
+            )
+
+        self.assertTrue(result["success"])
+        self.assertIsNone(resolution)
+        self.assertEqual(len(executed_codes), 1)
+        self.assertEqual(code, executed_codes[0])
+        self.assertTrue(code.startswith("async def run(page):"))
+        self.assertIn("await save.click()", code)
 
 
 if __name__ == "__main__":

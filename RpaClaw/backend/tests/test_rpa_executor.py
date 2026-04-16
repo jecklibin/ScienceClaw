@@ -1,4 +1,5 @@
 import importlib
+import threading
 import unittest
 
 
@@ -188,6 +189,22 @@ async def execute_skill(page, **kwargs):
 
         self.assertTrue(result["success"])
         self.assertIsNone(result.get("failed_step_index"))
+
+    async def test_execute_sanitizes_non_json_safe_success_data(self):
+        executor = EXECUTOR_MODULE.ScriptExecutor()
+        script = '''
+import threading
+
+async def execute_skill(page, **kwargs):
+    return {"lock": threading.Lock(), "ok": True}
+'''
+        browser = _FakeBrowser()
+        result = await executor.execute(browser, script)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["data"]["ok"], True)
+        self.assertIsInstance(result["data"]["lock"], str)
+        self.assertIn("lock", result["data"]["lock"].lower())
 
 
 if __name__ == "__main__":

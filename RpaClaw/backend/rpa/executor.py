@@ -12,6 +12,16 @@ logger = logging.getLogger(__name__)
 RPA_PAGE_TIMEOUT_MS = 60000
 
 
+def _make_json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _make_json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_make_json_safe(item) for item in value]
+    return str(value)
+
+
 class ScriptExecutor:
     """Execute generated Playwright scripts via CDP browser connection."""
 
@@ -79,14 +89,15 @@ class ScriptExecutor:
                     timeout=timeout,
                 )
                 await page.wait_for_timeout(3000)
+                safe_result = _make_json_safe(_result or {})
 
                 if _result:
-                    output = "SKILL_DATA:" + json.dumps(_result, ensure_ascii=False, default=str) + "\nSKILL_SUCCESS"
+                    output = "SKILL_DATA:" + json.dumps(safe_result, ensure_ascii=False, default=str) + "\nSKILL_SUCCESS"
                 else:
                     output = "SKILL_SUCCESS"
                 if on_log:
                     on_log("Execution completed successfully")
-                return {"success": True, "output": output, "data": _result or {}}
+                return {"success": True, "output": output, "data": safe_result}
 
             except asyncio.TimeoutError:
                 output = f"SKILL_ERROR: Script did not complete within {timeout}s"

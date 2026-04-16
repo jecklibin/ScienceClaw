@@ -964,3 +964,94 @@ async def execute_structured_intent(page, intent: Dict[str, Any]) -> Dict[str, A
     }
     return {"success": True, "step": step, "output": output}
 
+
+_KNOWN_STRUCTURED_INTENT_ERROR_PATTERNS = (
+    "no collection target matched",
+    "no ordinal node candidates",
+    "no frame-aware target matched the structured intent",
+)
+
+
+def _classify_structured_intent_error(exc: Exception, *, action: str = "") -> tuple[str, bool]:
+    message = str(exc or "")
+    if isinstance(exc, ValueError):
+        normalized_message = re.sub(r"\s+", " ", message).strip().lower()
+        if any(pattern in normalized_message for pattern in _KNOWN_STRUCTURED_INTENT_ERROR_PATTERNS):
+            return "target_not_found", True
+
+    text = message.lower()
+    if "strict mode violation" in text or "resolved to" in text and "elements" in text:
+        return "multiple_targets_matched", True
+    if "frame was detached" in text or "frame has been detached" in text:
+        return "page_changed", True
+    if "frame" in text and "not found" in text:
+        return "frame_not_found", True
+    if "not attached" in text or "not visible" in text or "not enabled" in text:
+        return "element_not_interactable", True
+    if "timeout" in text:
+        if action == "navigate" or "loadstate" in text or "domcontentloaded" in text or "goto" in text:
+            return "navigation_timeout", True
+        return "execution_timeout", True
+    if "page" in text and "closed" in text:
+        return "page_changed", True
+    return "unexpected_runtime_error", False
+
+
+def _structured_failure_payload(
+    *,
+    error_code: str,
+    error_message: str,
+    retryable: bool,
+    intent: Dict[str, Any],
+    resolved_intent: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    return {
+        "success": False,
+        "error": error_message,
+        "error_code": error_code,
+        "retryable": retryable,
+        "output": "",
+        "step": None,
+        "resolved_intent": resolved_intent,
+        "intent": intent,
+    }
+
+
+async def run_structured_intent(page, snapshot: Dict[str, Any], intent: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        resolved_intent = resolve_structured_intent(snapshot, intent)
+    except Exception as exc:
+        error_code, retryable = _classify_structured_intent_error(
+            exc,
+            action=str(intent.get("action") or ""),
+        )
+        return _structured_failure_payload(
+            error_code=error_code,
+            error_message=str(exc),
+            retryable=retryable,
+            intent=intent,
+        )
+
+    try:
+        result = await execute_structured_intent(page, resolved_intent)
+        result.setdefault("error", "")
+        result.setdefault("error_code", "")
+        result.setdefault("retryable", False)
+        result.setdefault("output", "")
+        result.setdefault("step", None)
+        result["intent"] = intent
+        result["resolved_intent"] = resolved_intent
+        return result
+    except Exception as exc:
+        error_code, retryable = _classify_structured_intent_error(
+            exc,
+            action=str(resolved_intent.get("action") or intent.get("action") or ""),
+        )
+        return _structured_failure_payload(
+            error_code=error_code,
+            error_message=str(exc),
+            retryable=retryable,
+            intent=intent,
+            resolved_intent=resolved_intent,
+        )
+

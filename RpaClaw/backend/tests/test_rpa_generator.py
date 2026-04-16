@@ -542,10 +542,161 @@ class PlaywrightGeneratorTests(unittest.TestCase):
 
         script = generator.generate_script(steps, is_local=True)
 
+        self.assertIn("page = current_page", script)
         self.assertIn('preview = page.frame_locator("iframe[title=\'运行结果预览\']").frame_locator("iframe")', script)
         self.assertNotIn('preview = await page.frame_locator("iframe[title=\'运行结果预览\']").frame_locator("iframe")', script)
         self.assertNotIn('_results["preview"] = preview', script)
 
+
+    def test_generate_script_unwraps_normalized_ai_script_function_and_adds_upgrade_comment(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "ai_script",
+                "source": "ai",
+                "description": "Wait for the save to settle",
+                "value": '\n'.join([
+                    "async def run(page):",
+                    "    await page.wait_for_timeout(500)",
+                ]),
+                "assistant_diagnostics": {
+                    "execution_mode": "code",
+                    "upgrade_reason": "polling_loop",
+                },
+                "url": "https://example.com",
+                "tab_id": "tab-1",
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn("AI upgraded script step", script)
+        self.assertIn("polling_loop", script)
+        self.assertIn("page = current_page", script)
+        self.assertIn("await page.wait_for_timeout(500)", script)
+        self.assertNotIn("async def run(page):", script)
+
+    def test_generate_script_ai_script_binds_page_locally_without_rewriting_shadowed_page(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "ai_script",
+                "source": "ai",
+                "description": "Open a new tab and navigate",
+                "value": '\n'.join([
+                    "async def run(page):",
+                    "    page = await page.context.new_page()",
+                    '    await page.goto("https://example.com")',
+                ]),
+                "assistant_diagnostics": {
+                    "execution_mode": "code",
+                    "upgrade_reason": "new_tab_flow",
+                },
+                "url": "https://example.com/start",
+                "tab_id": "tab-1",
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn("page = current_page", script)
+        self.assertEqual(script.count("page = current_page"), 1)
+        self.assertIn("page = await page.context.new_page()", script)
+        self.assertIn('await page.goto("https://example.com")', script)
+        self.assertNotIn("page = await current_page.context.new_page()", script)
+        self.assertNotIn('_results["page"]', script)
+
+    def test_generate_script_ai_script_awaits_locator_variable_actions_without_awaiting_builder_assignment(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "ai_script",
+                "source": "ai",
+                "description": "Click save and read text",
+                "value": '\n'.join([
+                    "async def run(page):",
+                    '    save = page.get_by_role("button", name="Save")',
+                    "    save.click()",
+                    "    text = save.inner_text()",
+                ]),
+                "assistant_diagnostics": {
+                    "execution_mode": "code",
+                    "upgrade_reason": "custom_logic",
+                },
+                "url": "https://example.com",
+                "tab_id": "tab-1",
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn("page = current_page", script)
+        self.assertIn('save = page.get_by_role("button", name="Save")', script)
+        self.assertIn("await save.click()", script)
+        self.assertIn("text = await save.inner_text()", script)
+        self.assertNotIn('save = await page.get_by_role("button", name="Save")', script)
+
+    def test_generate_script_ai_script_awaits_playwright_calls_in_return_expressions(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "ai_script",
+                "source": "ai",
+                "description": "Return title text",
+                "value": '\n'.join([
+                    "async def run(page):",
+                    '    return page.locator("h1").inner_text()',
+                ]),
+                "assistant_diagnostics": {
+                    "execution_mode": "code",
+                    "upgrade_reason": "custom_logic",
+                },
+                "url": "https://example.com",
+                "tab_id": "tab-1",
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn("page = current_page", script)
+        self.assertIn('return await page.locator("h1").inner_text()', script)
+
+    def test_generate_script_wraps_ai_script_returns_without_exiting_execute_skill(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "ai_script",
+                "source": "ai",
+                "description": "Select repository dynamically",
+                "value": '\n'.join([
+                    "async def run(page):",
+                    "    return {'selected_repo_name': 'microsoft / markitdown'}",
+                ]),
+                "assistant_diagnostics": {
+                    "execution_mode": "segment",
+                    "upgrade_reason": "segment",
+                },
+                "url": "https://github.com/trending",
+                "tab_id": "tab-1",
+            },
+            {
+                "action": "click",
+                "target": json.dumps({"method": "role", "role": "link", "name": "Issues"}),
+                "description": "Open issues",
+                "tag": "A",
+                "url": "https://github.com/microsoft/markitdown",
+                "tab_id": "tab-1",
+            },
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn("async def __ai_step_0():", script)
+        self.assertIn("__ai_step_result_0 = await __ai_step_0()", script)
+        self.assertIn("if isinstance(__ai_step_result_0, dict):", script)
+        self.assertIn("_results.update(__ai_step_result_0)", script)
+        self.assertIn('await current_page.get_by_role("link", name="Issues", exact=True).click()', script)
+        self.assertNotIn("    return {'selected_repo_name': 'microsoft / markitdown'}\n    try:\n        await current_page.get_by_role", script)
 
     def test_generate_script_keeps_result_capture_after_locator_variable_is_reassigned_to_data(self):
         generator = PlaywrightGenerator()
@@ -566,6 +717,7 @@ class PlaywrightGeneratorTests(unittest.TestCase):
 
         script = generator.generate_script(steps, is_local=True)
 
+        self.assertIn("page = current_page", script)
         self.assertIn('preview = page.frame_locator("iframe[title=\'杩愯缁撴灉棰勮\']").frame_locator("iframe")', script)
         self.assertIn('preview = await preview.locator("h1").inner_text()', script)
         self.assertEqual(script.count('_results["preview"] = preview'), 1)
@@ -591,6 +743,7 @@ class PlaywrightGeneratorTests(unittest.TestCase):
 
         script = generator.generate_script(steps, is_local=True)
 
+        self.assertIn("page = current_page", script)
         self.assertIn('for frame in page.frames:', script)
         self.assertNotIn('await for frame in page.frames:', script)
 

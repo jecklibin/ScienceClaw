@@ -168,11 +168,30 @@ class StepExecutionError(Exception):
             if action == "ai_script":
                 ai_code = step.get("value", "")
                 if ai_code:
-                    converted = self._sync_to_async(ai_code)
+                    diagnostics = step.get("assistant_diagnostics") or {}
+                    upgrade_reason = str(diagnostics.get("upgrade_reason") or "").strip()
+                    if upgrade_reason:
+                        step_lines.append(f"    # AI upgraded script step [{upgrade_reason}]")
+                    else:
+                        step_lines.append("    # AI upgraded script step")
+                    converted = self._extract_ai_script_body(ai_code)
+                    step_lines.append("    page = current_page")
+                    converted = self._sync_to_async(converted)
                     converted = self._inject_result_capture(converted)
                     converted = self._strip_locator_result_capture(converted)
-                    for code_line in converted.split("\n"):
-                        step_lines.append(f"    {code_line}" if code_line.strip() else "")
+                    helper_name = f"__ai_step_{step_index}"
+                    result_name = f"__ai_step_result_{step_index}"
+                    step_lines.append(f"    async def {helper_name}():")
+                    if converted.strip():
+                        for code_line in converted.split("\n"):
+                            step_lines.append(f"        {code_line}" if code_line.strip() else "")
+                    else:
+                        step_lines.append("        return None")
+                    step_lines.append(f"    {result_name} = await {helper_name}()")
+                    step_lines.append(f"    if isinstance({result_name}, dict):")
+                    step_lines.append(f"        _results.update({result_name})")
+                    step_lines.append(f"    elif {result_name} is not None:")
+                    step_lines.append(f'        _results["ai_step_{step_index + 1}"] = {result_name}')
                 lines.extend(self._wrap_step_lines(step_lines, step_index, test_mode))
                 lines.append("")
                 continue
@@ -750,35 +769,117 @@ class StepExecutionError(Exception):
         effective_value = files[0] if files else value
         return self._maybe_parameterize(str(effective_value or ""), params)
 
-    @staticmethod
-    def _sync_to_async(code: str) -> str:
+    @classmethod
+    def _sync_to_async(cls, code: str) -> str:
         """Convert Playwright sync API code to async by adding await."""
         import re as _re
+        assign_pattern = _re.compile(
+            r"^(?P<lhs>\w+)\s*=\s*(?P<await>await\s+)?(?P<receiver>\w+|page)(?P<chain>(?:\.\w+(?:\([^)]*\))?)+)\s*$"
+        )
+        call_pattern = _re.compile(
+            r"^(?P<await>await\s+)?(?P<receiver>\w+|page)(?P<chain>(?:\.\w+(?:\([^)]*\))?)+)\s*$"
+        )
+        return_pattern = _re.compile(
+            r"^return\s+(?P<await>await\s+)?(?P<receiver>\w+|page)(?P<chain>(?:\.\w+(?:\([^)]*\))?)+)\s*$"
+        )
+        generic_assign_pattern = _re.compile(r"^(?P<lhs>\w+)\s*=")
+
+        locator_vars = set()
         lines = code.split("\n")
         result = []
         for line in lines:
             stripped = line.lstrip()
             indent = line[:len(line) - len(stripped)]
-            if stripped and not stripped.startswith("#") and not stripped.startswith("def "):
-                if stripped.startswith("page.") or _re.match(r'^(\w[\w\s,]*=\s*)(await\s+)?(page\..+)$', stripped):
-                    if not stripped.startswith("await "):
-                        # Check for assignment: var = page.xxx or var = await page.xxx
-                        assign_match = _re.match(r'^(\w[\w\s,]*=\s*)(await\s+)?(page\..+)$', stripped)
-                        if assign_match:
-                            last_call = _re.search(r'\.(\w+)\([^)]*\)\s*$', assign_match.group(3))
-                            if last_call and last_call.group(1) in PlaywrightGenerator._LOCATOR_BUILDER_METHODS:
-                                result.append(f"{indent}{assign_match.group(1)}{assign_match.group(3)}")
-                                continue
-                            # If already has await, keep as-is; otherwise add await
-                            if assign_match.group(2):  # already has await
-                                result.append(line)
-                            else:
-                                result.append(f"{indent}{assign_match.group(1)}await {assign_match.group(3)}")
-                            continue
-                        result.append(f"{indent}await {stripped}")
-                        continue
-            result.append(line)
+            if not stripped or stripped.startswith("#") or stripped.startswith("def "):
+                result.append(line)
+                continue
+
+            generic_assign_match = generic_assign_pattern.match(stripped)
+            if generic_assign_match:
+                lhs = generic_assign_match.group("lhs")
+                assign_match = assign_pattern.match(stripped)
+                if not assign_match:
+                    locator_vars.discard(lhs)
+                    result.append(line)
+                    continue
+
+                receiver = assign_match.group("receiver")
+                chain = assign_match.group("chain")
+                last_call = _re.search(r"\.(\w+)\([^)]*\)(?!.*\.\w+\([^)]*\))", chain)
+                receiver_is_supported = receiver == "page" or receiver in locator_vars
+                if not receiver_is_supported or not last_call:
+                    locator_vars.discard(lhs)
+                    result.append(line)
+                    continue
+
+                if last_call.group(1) in cls._LOCATOR_BUILDER_METHODS:
+                    locator_vars.add(lhs)
+                    result.append(line)
+                    continue
+
+                locator_vars.discard(lhs)
+                if assign_match.group("await"):
+                    result.append(line)
+                else:
+                    result.append(f"{indent}{lhs} = await {receiver}{chain}")
+                continue
+
+            call_match = call_pattern.match(stripped)
+            if call_match:
+                receiver = call_match.group("receiver")
+                if receiver != "page" and receiver not in locator_vars:
+                    result.append(line)
+                    continue
+
+                last_call = _re.search(r"\.(\w+)\([^)]*\)(?!.*\.\w+\([^)]*\))", call_match.group("chain"))
+                if not last_call or last_call.group(1) in cls._LOCATOR_BUILDER_METHODS or call_match.group("await"):
+                    result.append(line)
+                    continue
+
+                result.append(f"{indent}await {stripped}")
+                continue
+
+            return_match = return_pattern.match(stripped)
+            if not return_match:
+                result.append(line)
+                continue
+
+            receiver = return_match.group("receiver")
+            if receiver != "page" and receiver not in locator_vars:
+                result.append(line)
+                continue
+
+            last_call = _re.search(r"\.(\w+)\([^)]*\)(?!.*\.\w+\([^)]*\))", return_match.group("chain"))
+            if not last_call or last_call.group(1) in cls._LOCATOR_BUILDER_METHODS or return_match.group("await"):
+                result.append(line)
+                continue
+
+            result.append(f"{indent}return await {receiver}{return_match.group('chain')}")
         return "\n".join(result)
+
+    @staticmethod
+    def _extract_ai_script_body(code: str) -> str:
+        stripped = code.strip()
+        if not stripped:
+            return ""
+        if stripped.startswith("async def run(") or stripped.startswith("def run("):
+            lines = stripped.split("\n")
+            body_lines = []
+            in_body = False
+            for line in lines:
+                current = line.strip()
+                if current.startswith("async def run(") or current.startswith("def run("):
+                    in_body = True
+                    continue
+                if in_body:
+                    if line.startswith("    "):
+                        body_lines.append(line[4:])
+                    elif current == "":
+                        body_lines.append("")
+                    else:
+                        body_lines.append(line)
+            return "\n".join(body_lines).strip()
+        return stripped
 
     # Methods whose return value is not data (actions, not queries)
     _ACTION_METHODS = frozenset({
@@ -816,6 +917,8 @@ class StepExecutionError(Exception):
             if not m:
                 continue
             var_name = m.group(1)
+            if var_name == "page":
+                continue
             # Find the last method call in the line
             last_call = re.search(r'\.(\w+)\([^)]*\)\s*$', stripped)
             if last_call and last_call.group(1) in cls._LOCATOR_BUILDER_METHODS:
