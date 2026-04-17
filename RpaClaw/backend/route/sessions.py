@@ -19,6 +19,7 @@ import json
 import os
 import re
 import time
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 
@@ -373,6 +374,9 @@ def _extract_tool_meta(data: Dict[str, Any]) -> Dict[str, Any]:
     }
     if meta.get("sandbox"):
         result["sandbox"] = True
+    mcp_meta = meta.get("mcp")
+    if isinstance(mcp_meta, dict):
+        result["mcp"] = deepcopy(mcp_meta)
     return result
 
 

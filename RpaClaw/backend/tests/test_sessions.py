@@ -124,6 +124,38 @@ class TestShouldSkipFile(unittest.TestCase):
         path = Path("/some/skill/utils")
         self.assertFalse(should_skip_file(path))
 
+    def test_extract_tool_meta_preserves_nested_mcp_metadata(self):
+        """Should keep nested MCP metadata alongside the base tool fields."""
+        extract_tool_meta = SESSIONS_MODULE._extract_tool_meta
+        payload = {
+            "tool_meta": {
+                "icon": "🔧",
+                "category": "execution",
+                "description": "PubMed search",
+                "sandbox": True,
+                "mcp": {
+                    "source": "mcp",
+                    "server_id": "pubmed",
+                    "nested": {"tool": "search"},
+                },
+            }
+        }
+
+        self.assertEqual(
+            extract_tool_meta(payload),
+            {
+                "icon": "🔧",
+                "category": "execution",
+                "description": "PubMed search",
+                "sandbox": True,
+                "mcp": {
+                    "source": "mcp",
+                    "server_id": "pubmed",
+                    "nested": {"tool": "search"},
+                },
+            },
+        )
+
 
 class TestListSkillFilesFiltering(unittest.TestCase):
     """Test that list_skill_files applies the filter correctly."""

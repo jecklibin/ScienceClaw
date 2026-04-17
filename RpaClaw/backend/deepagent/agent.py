@@ -34,6 +34,9 @@ from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT, DEFAULT_SU
 from backend.deepagent.engine import get_llm_model
 from backend.deepagent.local_preview_backend import LocalPreviewShellBackend
 from backend.deepagent.local_path_backend import LocalPathBackend
+from backend.deepagent.mcp_registry import build_effective_mcp_servers
+from backend.deepagent.mcp_runtime import McpSdkRuntimeFactory
+from backend.deepagent.mcp_tools_loader import load_mcp_tools
 from backend.deepagent.tools import propose_skill_save, propose_tool_save, eval_skill, grade_eval
 from backend.deepagent.full_sandbox_backend import FullSandboxBackend
 from backend.deepagent.external_tools_loader import ExternalToolsLoader
@@ -90,15 +93,46 @@ def _register_external_tools_in_sse(tools: list) -> None:
 
     protocol = get_protocol_manager()
     for tool in tools:
+        protocol.register_tool(tool.name, ToolCategory.EXECUTION, "🔧", tool.description[:80])
+
+        metadata = getattr(tool, "metadata", None)
+        mcp_meta = metadata.get("mcp") if isinstance(metadata, dict) else None
+
         if settings.storage_backend == "local":
-            protocol.register_tool(tool.name, ToolCategory.EXECUTION, "🔧", tool.description[:80])
-            extra_meta = getattr(protocol, "extra_meta", None)
-            if isinstance(extra_meta, dict):
-                extra_meta[tool.name] = {}
-            elif hasattr(protocol, "tool_registry") and hasattr(protocol.tool_registry, "_extra_meta"):
-                protocol.tool_registry._extra_meta.pop(tool.name, None)
-        else:
-            protocol.register_sandbox_tool(tool.name, tool.description[:80])
+            if hasattr(protocol, "clear_tool_extra_meta"):
+                protocol.clear_tool_extra_meta(tool.name)
+            if isinstance(mcp_meta, dict) and hasattr(protocol, "register_tool_extra_meta"):
+                protocol.register_tool_extra_meta(tool.name, {"mcp": mcp_meta})
+            continue
+
+        if isinstance(mcp_meta, dict) and hasattr(protocol, "register_tool_extra_meta"):
+            protocol.register_tool_extra_meta(tool.name, {"mcp": mcp_meta})
+        elif hasattr(protocol, "register_tool_extra_meta"):
+            protocol.register_tool_extra_meta(tool.name, {"sandbox": True})
+
+
+async def _load_mcp_tools_for_session(
+    session_id: str,
+    user_id: str | None,
+) -> list:
+    if not user_id:
+        return []
+
+    try:
+        servers = await build_effective_mcp_servers(session_id, user_id)
+    except Exception:
+        logger.warning(f"[MCP] Failed to resolve effective servers for session={session_id} user={user_id}", exc_info=True)
+        return []
+
+    if not servers:
+        return []
+
+    try:
+        runtime_factory = McpSdkRuntimeFactory()
+        return await load_mcp_tools(servers, runtime_factory=runtime_factory)
+    except Exception:
+        logger.warning(f"[MCP] Failed to discover MCP tools for session={session_id} user={user_id}", exc_info=True)
+        return []
 
 
 def reload_external_tools(
@@ -345,6 +379,7 @@ def _collect_tools(
     blocked_tools: Set[str] | None = None,
     sandbox_base_url: str | None = None,
     loader_cache_key: str | None = None,
+    mcp_tools: list | None = None,
 ) -> List:
     """合并内置工具与外部扩展工具，去重并过滤屏蔽项。
 
@@ -365,7 +400,7 @@ def _collect_tools(
         except Exception:
             logger.warning("[Agent] 动态加载外部工具失败", exc_info=True)
 
-    for t in _STATIC_TOOLS + ext_tools:
+    for t in _STATIC_TOOLS + ext_tools + list(mcp_tools or []):
         if t.name in blocked:
             logger.info(f"[Agent] 工具已屏蔽，跳过: {t.name}")
             continue
@@ -445,6 +480,8 @@ async def deep_agent(
         blocked_skills = await get_blocked_skills(user_id)
         blocked_tools = await get_blocked_tools(user_id)
 
+    mcp_tools = await _load_mcp_tools_for_session(session_id, user_id)
+
     # 1. 实例化后端：local 模式用 LocalShellBackend，云端用 FullSandboxBackend
     is_local = settings.storage_backend == "local"
     runtime_sandbox_base_url: str | None = None
@@ -492,7 +529,16 @@ async def deep_agent(
         blocked_tools=blocked_tools,
         sandbox_base_url=runtime_sandbox_base_url,
         loader_cache_key=session_id,
+        mcp_tools=mcp_tools,
     )
+
+    mcp_tools_for_sse = [
+        tool for tool in tools
+        if isinstance(getattr(tool, "metadata", None), dict)
+        and isinstance(tool.metadata.get("mcp"), dict)
+    ]
+    if mcp_tools_for_sse:
+        _register_external_tools_in_sse(mcp_tools_for_sse)
 
     sse_middleware = SSEMonitoringMiddleware(
         agent_name="DeepAgent",

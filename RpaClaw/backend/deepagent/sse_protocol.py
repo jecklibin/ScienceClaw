@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import time
 import uuid
+from copy import deepcopy
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -54,7 +55,7 @@ class ToolMeta:
         self.icon = icon
         self.description = description
 
-    def to_dict(self) -> Dict[str, str]:
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "name": self.name,
             "category": self.category.value,
@@ -160,10 +161,28 @@ class ToolRegistry:
     def register(self, tool: ToolMeta):
         self._tools[tool.name] = tool
 
+    def merge_extra_meta(self, name: str, extra_meta: Mapping[str, Any]) -> None:
+        """Merge additional metadata for a tool without exposing private storage."""
+        current = self._extra_meta.setdefault(name, {})
+        self._deep_merge_meta(current, extra_meta)
+
+    def clear_extra_meta(self, name: str) -> None:
+        self._extra_meta.pop(name, None)
+
+    @staticmethod
+    def _deep_merge_meta(target: Dict[str, Any], source: Mapping[str, Any]) -> None:
+        for key, value in source.items():
+            if key in target and isinstance(target[key], dict) and isinstance(value, Mapping):
+                ToolRegistry._deep_merge_meta(target[key], value)
+            elif isinstance(value, Mapping):
+                target[key] = deepcopy(dict(value))
+            else:
+                target[key] = deepcopy(value)
+
     def register_sandbox_tool(self, name: str, description: str):
         """注册一个在沙箱中执行的外部代理工具。"""
         self.register(ToolMeta(name, ToolCategory.EXECUTION, "🔧", description))
-        self._extra_meta[name] = {"sandbox": True}
+        self.merge_extra_meta(name, {"sandbox": True})
 
     def get(self, name: str) -> Optional[ToolMeta]:
         return self._tools.get(name)
@@ -186,7 +205,7 @@ class ToolRegistry:
             d: Dict[str, Any] = tool.to_dict()
             extra = self._extra_meta.get(name)
             if extra:
-                d.update(extra)
+                d.update(deepcopy(extra))
             return d
         return {
             "name": name,
@@ -214,13 +233,21 @@ class SSEProtocolManager:
     def now_ts(self) -> int:
         return int(time.time())
 
-    def get_tool_meta(self, tool_function: str) -> Dict[str, str]:
+    def get_tool_meta(self, tool_function: str) -> Dict[str, Any]:
         """根据工具函数名获取元数据"""
         return self.tool_registry.get_meta_dict(tool_function)
 
     def register_tool(self, name: str, category: ToolCategory, icon: str, description: str):
         """动态注册工具"""
         self.tool_registry.register(ToolMeta(name, category, icon, description))
+
+    def register_tool_extra_meta(self, name: str, extra_meta: Mapping[str, Any]):
+        """Merge extra metadata into an existing tool entry."""
+        self.tool_registry.merge_extra_meta(name, extra_meta)
+
+    def clear_tool_extra_meta(self, name: str):
+        """Remove any extra metadata for a tool."""
+        self.tool_registry.clear_extra_meta(name)
 
     def register_sandbox_tool(self, name: str, description: str):
         """注册一个沙箱执行的外部代理工具（tool_meta 会带 sandbox: true）"""
