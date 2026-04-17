@@ -43,21 +43,92 @@ async def _list_user_mcp_servers(user_id: str) -> List[Dict[str, Any]]:
     return await repo.find_many({"user_id": user_id}, sort=[("updated_at", -1)])
 
 
+def _normalize_string_map(value: Any, field_name: str) -> Dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise HTTPException(status_code=400, detail=f"{field_name} must be an object")
+
+    normalized: Dict[str, str] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not isinstance(item, str):
+            raise HTTPException(status_code=400, detail=f"{field_name} must be a string map")
+        normalized[key] = item
+    return normalized
+
+
+def _normalize_string_list(value: Any, field_name: str) -> List[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise HTTPException(status_code=400, detail=f"{field_name} must be a list of strings")
+    return list(value)
+
+
+def _normalize_timeout_ms(value: Any) -> int:
+    if value is None:
+        return 20000
+    if not isinstance(value, int) or value <= 0:
+        raise HTTPException(status_code=400, detail="endpoint_config.timeout_ms must be a positive integer")
+    return value
+
+
+def _normalize_endpoint_config(transport: str, endpoint_config: Any) -> Dict[str, Any]:
+    if not isinstance(endpoint_config, dict):
+        raise HTTPException(status_code=400, detail="endpoint_config must be an object")
+
+    normalized: Dict[str, Any] = {
+        "env": _normalize_string_map(endpoint_config.get("env"), "endpoint_config.env"),
+        "timeout_ms": _normalize_timeout_ms(endpoint_config.get("timeout_ms")),
+    }
+
+    if transport in {"streamable_http", "sse"}:
+        url = endpoint_config.get("url")
+        if not isinstance(url, str) or not url.strip():
+            raise HTTPException(status_code=400, detail="endpoint_config.url is required for HTTP/SSE MCP")
+        normalized["url"] = url.strip()
+        normalized["headers"] = _normalize_string_map(endpoint_config.get("headers"), "endpoint_config.headers")
+        return normalized
+
+    if transport == "stdio":
+        command = endpoint_config.get("command")
+        if not isinstance(command, str) or not command.strip():
+            raise HTTPException(status_code=400, detail="endpoint_config.command is required for stdio MCP")
+        normalized["command"] = command.strip()
+        normalized["args"] = _normalize_string_list(endpoint_config.get("args"), "endpoint_config.args")
+
+        cwd = endpoint_config.get("cwd", "")
+        if cwd is None:
+            cwd = ""
+        if not isinstance(cwd, str):
+            raise HTTPException(status_code=400, detail="endpoint_config.cwd must be a string")
+        normalized["cwd"] = cwd
+        return normalized
+
+    raise HTTPException(status_code=400, detail="Unsupported MCP transport")
+
+
+async def _server_key_is_accessible(server_key: str, user_id: str) -> bool:
+    scope, separator, server_id = server_key.partition(":")
+    if not separator or not server_id:
+        return False
+
+    if scope == "system":
+        return any(server.id == server_id for server in load_system_mcp_servers())
+
+    if scope == "user":
+        return any(str(doc.get("_id")) == server_id for doc in await _list_user_mcp_servers(user_id))
+
+    return False
+
+
 def _serialize_system_server(server: Any) -> Dict[str, Any]:
     endpoint_config = {
         "url": server.url,
         "command": server.command,
         "args": server.args,
         "cwd": server.cwd,
-        "headers": server.headers,
-        "env": server.env,
         "timeout_ms": server.timeout_ms,
-    }
-    credential_binding = {
-        "credential_id": server.credential_ref,
-        "headers": {},
-        "env": {},
-        "query": {},
     }
     return McpServerListItem(
         id=server.id,
@@ -70,7 +141,7 @@ def _serialize_system_server(server: Any) -> Dict[str, Any]:
         default_enabled=server.default_enabled,
         readonly=True,
         endpoint_config=endpoint_config,
-        credential_binding=credential_binding,
+        credential_binding={},
         tool_policy=server.tool_policy.model_dump(),
     ).model_dump()
 
@@ -107,6 +178,8 @@ async def create_mcp_server(
     if body.transport == "stdio" and settings.storage_backend != "local":
         raise HTTPException(status_code=400, detail="stdio MCP is only allowed in local mode")
 
+    endpoint_config = _normalize_endpoint_config(body.transport, body.endpoint_config)
+
     repo = get_repository("user_mcp_servers")
     server_id = f"mcp_{uuid.uuid4().hex[:12]}"
     now = datetime.now()
@@ -118,7 +191,7 @@ async def create_mcp_server(
         "transport": body.transport,
         "enabled": True,
         "default_enabled": body.default_enabled,
-        "endpoint_config": body.endpoint_config,
+        "endpoint_config": endpoint_config,
         "credential_binding": body.credential_binding.model_dump(),
         "tool_policy": body.tool_policy.model_dump(),
         "created_at": now,
@@ -142,6 +215,9 @@ async def update_session_override(
 
     if str(session.user_id) != str(current_user.id):
         raise HTTPException(status_code=403, detail="Access denied")
+
+    if not await _server_key_is_accessible(server_key, str(current_user.id)):
+        raise HTTPException(status_code=404, detail="MCP server not found")
 
     repo = get_repository("session_mcp_bindings")
     await repo.update_one(
