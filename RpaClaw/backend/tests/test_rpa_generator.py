@@ -718,6 +718,68 @@ class PlaywrightGeneratorTests(unittest.TestCase):
         self.assertIn("_results.update(_rpa_ai_step_1_result)", script)
         self.assertNotIn("async def run(page):", script)
 
+    def test_generate_script_preserves_multiline_import_block_with_inline_comment_before_full_ai_script_function(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "ai_script",
+                "source": "ai",
+                "description": "Round a value",
+                "value": "\n".join([
+                    "from math import (",
+                    "    floor,  # )",
+                    ")",
+                    "async def run(page):",
+                    "    return {'rounded': floor(1.5)}",
+                ]),
+                "assistant_diagnostics": {
+                    "execution_mode": "code",
+                    "upgrade_reason": "numeric_postprocess",
+                    "template": "round_value_inline_comment",
+                },
+                "url": "https://example.com",
+                "tab_id": "tab-1",
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn("from math import (", script)
+        self.assertIn("floor,  # )", script)
+        self.assertIn("async def _rpa_ai_step_1(page):", script)
+        self.assertIn("_rpa_ai_step_1_result = await _rpa_ai_step_1(current_page)", script)
+        self.assertIn("_results.update(_rpa_ai_step_1_result)", script)
+        self.assertNotIn("async def run(page):", script)
+
+    def test_generate_script_rejects_trailing_top_level_code_after_full_ai_script_function(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "ai_script",
+                "source": "ai",
+                "description": "Return a simple result",
+                "value": "\n".join([
+                    "async def run(page):",
+                    "    return {'ok': True}",
+                    "",
+                    "extra_value = 1",
+                ]),
+                "assistant_diagnostics": {
+                    "execution_mode": "code",
+                    "upgrade_reason": "trailing_code_guard",
+                    "template": "reject_trailing_code",
+                },
+                "url": "https://example.com",
+                "tab_id": "tab-1",
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn("Unsupported ai_script wrapper format", script)
+        self.assertIn("raise RuntimeError(", script)
+        self.assertNotIn("extra_value = 1", script)
+
     def test_generate_script_uses_full_function_return_value_without_injecting_result_capture(self):
         generator = PlaywrightGenerator()
         steps = [

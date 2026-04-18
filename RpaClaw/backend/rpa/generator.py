@@ -1,6 +1,8 @@
+import ast
 import json
 import logging
 import re
+from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
 
 from backend.rpa.playwright_security import get_chromium_launch_kwargs, get_context_kwargs
@@ -120,6 +122,12 @@ class StepExecutionError(Exception):
         self.original_error = original_error
         super().__init__(f"STEP_FAILED:{step_index}:{original_error}")
 '''
+
+    @dataclass(frozen=True)
+    class _RunExtractionResult:
+        prelude_lines: List[str]
+        body_lines: List[str]
+        error_message: str = ""
 
     def generate_script(self, steps: List[Dict[str, Any]], params: Dict[str, Any] = None, is_local: bool = False, test_mode: bool = False) -> str:
         params = params or {}
@@ -365,89 +373,87 @@ class StepExecutionError(Exception):
         return f"{key}_{count}"
 
     @staticmethod
-    def _extract_run_function_parts(code: str) -> Optional[Dict[str, Any]]:
-        lines = str(code or "").splitlines()
-        if not lines:
+    def _build_ai_script_wrapper_failure_lines(func_name: str, error_message: str) -> List[str]:
+        return [
+            f"    async def {func_name}(page):",
+            f"        raise RuntimeError({error_message!r})",
+            f"    {func_name}_result = await {func_name}(current_page)",
+            f"    if isinstance({func_name}_result, dict):",
+            f"        _results.update({func_name}_result)",
+            f"    elif {func_name}_result is not None:",
+            f'        _results["{func_name}"] = {func_name}_result',
+        ]
+
+    @staticmethod
+    def _slice_source_lines(source_lines: List[str], node: ast.AST) -> List[str]:
+        start_lineno = getattr(node, "lineno", 0) or 0
+        end_lineno = getattr(node, "end_lineno", start_lineno) or start_lineno
+        if start_lineno <= 0 or end_lineno <= 0:
+            return []
+        return source_lines[start_lineno - 1:end_lineno]
+
+    @classmethod
+    def _extract_run_function_parts(cls, code: str) -> Optional["PlaywrightGenerator._RunExtractionResult"]:
+        source = str(code or "")
+        if not source.strip():
             return None
 
+        if not re.search(r"(?m)^\s*(?:async\s+def|def)\s+run\s*\(", source):
+            return None
+
+        try:
+            module = ast.parse(source)
+        except SyntaxError as exc:
+            return cls._RunExtractionResult(
+                prelude_lines=[],
+                body_lines=[],
+                error_message=f"Unsupported ai_script wrapper format: invalid Python source ({exc.msg})",
+            )
+
+        source_lines = source.splitlines()
         prelude_lines: List[str] = []
-        in_docstring = False
-        docstring_delimiter = ""
-        run_index = -1
-        index = 0
 
-        while index < len(lines):
-            stripped = lines[index].strip()
+        for index, node in enumerate(module.body):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "run":
+                if module.body[index + 1:]:
+                    return cls._RunExtractionResult(
+                        prelude_lines=[],
+                        body_lines=[],
+                        error_message="Unsupported ai_script wrapper format: extra top-level statements after run()",
+                    )
+                if not node.body:
+                    return cls._RunExtractionResult(prelude_lines=prelude_lines, body_lines=[])
 
-            if in_docstring:
-                prelude_lines.append(lines[index])
-                if stripped.endswith(docstring_delimiter):
-                    in_docstring = False
-                    docstring_delimiter = ""
-                index += 1
+                first_body_lineno = getattr(node.body[0], "lineno", node.lineno + 1)
+                last_body_end_lineno = getattr(
+                    node.body[-1],
+                    "end_lineno",
+                    getattr(node.body[-1], "lineno", first_body_lineno),
+                )
+                body_lines = source_lines[first_body_lineno - 1:last_body_end_lineno]
+                return cls._RunExtractionResult(prelude_lines=prelude_lines, body_lines=body_lines)
+
+            if isinstance(node, ast.Expr) and isinstance(getattr(node, "value", None), ast.Constant) and isinstance(node.value.value, str):
+                prelude_lines.extend(cls._slice_source_lines(source_lines, node))
                 continue
 
-            if not stripped:
-                prelude_lines.append(lines[index])
-                index += 1
+            if isinstance(node, ast.Import):
+                prelude_lines.extend(cls._slice_source_lines(source_lines, node))
                 continue
 
-            if stripped.startswith("#"):
-                prelude_lines.append(lines[index])
-                index += 1
+            if isinstance(node, ast.ImportFrom):
+                if node.module == "__future__":
+                    continue
+                prelude_lines.extend(cls._slice_source_lines(source_lines, node))
                 continue
 
-            if stripped.startswith("from __future__ import "):
-                index += 1
-                continue
+            return cls._RunExtractionResult(
+                prelude_lines=[],
+                body_lines=[],
+                error_message="Unsupported ai_script wrapper format: only a module docstring, imports, and from-import statements are allowed before run()",
+            )
 
-            if stripped.startswith('"""') or stripped.startswith("'''"):
-                prelude_lines.append(lines[index])
-                docstring_delimiter = stripped[:3]
-                if not (stripped.endswith(docstring_delimiter) and stripped.count(docstring_delimiter) >= 2):
-                    in_docstring = True
-                index += 1
-                continue
-
-            if stripped.startswith("import ") or stripped.startswith("from "):
-                import_block = [lines[index]]
-                paren_depth = lines[index].count("(") - lines[index].count(")")
-                continued = lines[index].rstrip().endswith("\\")
-                index += 1
-
-                while index < len(lines) and (paren_depth > 0 or continued):
-                    import_block.append(lines[index])
-                    paren_depth += lines[index].count("(") - lines[index].count(")")
-                    continued = lines[index].rstrip().endswith("\\")
-                    index += 1
-
-                prelude_lines.extend(import_block)
-                continue
-
-            if stripped.startswith("async def run(") or stripped.startswith("def run("):
-                run_index = index
-                break
-
-            return None
-
-        if run_index < 0:
-            return None
-
-        body_lines = []
-        for line in lines[run_index + 1:]:
-            if line.startswith("    "):
-                body_lines.append(line[4:])
-            elif line.startswith("\t"):
-                body_lines.append(line[1:])
-            elif not line.strip():
-                body_lines.append("")
-            else:
-                body_lines.append(line)
-
-        return {
-            "prelude_lines": prelude_lines,
-            "body": "\n".join(body_lines).strip("\n"),
-        }
+        return None
 
     def _build_ai_script_step_lines(self, step: Dict[str, Any], step_index: int) -> List[str]:
         ai_code = step.get("value", "")
@@ -463,8 +469,12 @@ class StepExecutionError(Exception):
             converted = self._strip_locator_result_capture(converted)
             return prefix_lines + [f"    {code_line}" if code_line.strip() else "" for code_line in converted.split("\n")]
 
-        prelude_lines = parts.get("prelude_lines") or []
-        body = parts.get("body") or ""
+        if parts.error_message:
+            func_name = f"_rpa_ai_step_{step_index + 1}"
+            return prefix_lines + self._build_ai_script_wrapper_failure_lines(func_name, parts.error_message)
+
+        prelude_lines = parts.prelude_lines or []
+        body = "\n".join(parts.body_lines or [])
         converted = self._sync_to_async(body)
         converted = self._strip_locator_result_capture(converted)
         func_name = f"_rpa_ai_step_{step_index + 1}"
