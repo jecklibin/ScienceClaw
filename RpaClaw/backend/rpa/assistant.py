@@ -247,12 +247,36 @@ def _snapshot_frame_lines(snapshot: Dict[str, Any]) -> List[str]:
             f"(actionable={len(container.get('child_actionable_ids') or [])}, "
             f"content={len(container.get('child_content_ids') or [])})"
         )
+    for content_node in (snapshot.get("content_nodes") or [])[:30]:
+        text = str(content_node.get("text") or "").strip()
+        if not text:
+            continue
+        lines.append(
+            "Content: "
+            f"{content_node.get('semantic_kind', 'text')} "
+            f"{text[:120]} "
+            f"(container={content_node.get('container_id', '')})"
+        )
+    for actionable_node in (snapshot.get("actionable_nodes") or [])[:30]:
+        name = str(actionable_node.get("name") or actionable_node.get("text") or "").strip()
+        if not name:
+            continue
+        lines.append(
+            "Actionable: "
+            f"{actionable_node.get('role', actionable_node.get('tag', 'element'))} "
+            f"{name[:120]} "
+            f"(container={actionable_node.get('container_id', '')})"
+        )
     for frame in snapshot.get("frames", []):
         lines.append(f"Frame: {frame.get('frame_hint', 'main document')}")
         for collection in frame.get("collections", []):
             lines.append(
                 f"  Collection: {collection.get('kind', 'collection')} ({collection.get('item_count', 0)} items)"
             )
+            for item in (collection.get("items") or [])[:5]:
+                item_name = str(item.get("name") or item.get("text") or "").strip()
+                if item_name:
+                    lines.append(f"    Item {item.get('index', '?')}: {item_name[:120]}")
         for element in frame.get("elements", []):
             parts = [f"[{element.get('index', '?')}]"]
             if element.get("role"):

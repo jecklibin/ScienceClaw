@@ -293,6 +293,64 @@ class RPAReActAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("actionable=2", content)
         self.assertIn("content=2", content)
 
+    async def test_react_agent_observation_includes_content_nodes_for_control_flow(self):
+        snapshot = {
+            "url": "https://example.com/downloads",
+            "title": "Downloads",
+            "containers": [
+                {
+                    "container_id": "table-1",
+                    "container_kind": "table",
+                    "name": "下载列表",
+                    "child_actionable_ids": ["act-1"],
+                    "child_content_ids": ["content-1"],
+                }
+            ],
+            "content_nodes": [
+                {
+                    "node_id": "content-1",
+                    "container_id": "table-1",
+                    "semantic_kind": "cell",
+                    "text": "处理中",
+                    "frame_path": [],
+                }
+            ],
+            "actionable_nodes": [
+                {
+                    "node_id": "act-1",
+                    "container_id": "table-1",
+                    "role": "link",
+                    "name": "ContractList20260418",
+                    "frame_path": [],
+                }
+            ],
+            "frames": [
+                {
+                    "frame_hint": "main document",
+                    "frame_path": [],
+                    "elements": [],
+                    "collections": [
+                        {
+                            "kind": "repeated_items",
+                            "item_count": 2,
+                            "items": [
+                                {"index": 1, "name": "ContractList20260418", "role": "link"},
+                                {"index": 2, "name": "ContractList20260417", "role": "link"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+
+        content = ASSISTANT_MODULE.RPAReActAgent._build_observation(snapshot, 0)
+
+        self.assertIn("Content: cell", content)
+        self.assertIn("处理中", content)
+        self.assertIn("Actionable: link", content)
+        self.assertIn("ContractList20260418", content)
+        self.assertIn("Item 1: ContractList20260418", content)
+
     async def test_react_agent_executes_structured_collection_action_with_frame_context(self):
         agent = ASSISTANT_MODULE.RPAReActAgent()
         page = _FakeActionPage()
