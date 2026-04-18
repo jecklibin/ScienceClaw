@@ -378,6 +378,81 @@ class RPAReActAgentTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_react_agent_code_execution_mode_does_not_become_structured_intent(self):
+        parsed = {
+            "action": "execute",
+            "execution_mode": "code",
+            "operation": "click",
+            "description": "等待完成后下载",
+            "code": "async def run(page):\n    return {'ok': True}",
+            "upgrade_reason": "polling_loop",
+        }
+
+        intent = ASSISTANT_MODULE.RPAReActAgent._extract_structured_execute_intent(parsed, "等待完成后下载")
+
+        self.assertIsNone(intent)
+
+    async def test_react_agent_commits_code_mode_step_with_control_flow_diagnostics(self):
+        agent = ASSISTANT_MODULE.RPAReActAgent()
+        snapshot = {"url": "https://example.com", "title": "Example", "frames": []}
+        responses = [
+            json.dumps(
+                {
+                    "thought": "This needs polling page state.",
+                    "action": "execute",
+                    "execution_mode": "code",
+                    "operation": "custom",
+                    "description": "等待第一条完成后下载",
+                    "upgrade_reason": "polling_loop",
+                    "template": "poll_until_text_then_download",
+                    "interval_ms": 500,
+                    "timeout_ms": 60000,
+                    "code": "async def run(page):\n    return {'download_filename': 'report.xlsx'}",
+                    "risk": "none",
+                    "risk_reason": "",
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "thought": "done",
+                    "action": "done",
+                    "description": "done",
+                    "risk": "none",
+                    "risk_reason": "",
+                },
+                ensure_ascii=False,
+            ),
+        ]
+
+        async def fake_stream(_history, _model_config=None):
+            yield responses.pop(0)
+
+        agent._stream_llm = fake_stream
+
+        with patch.object(
+            ASSISTANT_MODULE,
+            "build_page_snapshot",
+            new=AsyncMock(return_value=snapshot),
+        ):
+            events = []
+            async for event in agent.run(
+                session_id="session-1",
+                page=_FakePage(),
+                goal="如果第一条不是完成就每隔500毫秒刷新直到完成并下载",
+                existing_steps=[],
+            ):
+                events.append(event)
+
+        step_done = next(event for event in events if event["event"] == "agent_step_done")
+        step = step_done["data"]["step"]
+        self.assertEqual(step["action"], "ai_script")
+        self.assertTrue(step["value"].startswith("async def run(page):"))
+        self.assertEqual(step["assistant_diagnostics"]["execution_mode"], "code")
+        self.assertEqual(step["assistant_diagnostics"]["upgrade_reason"], "polling_loop")
+        self.assertEqual(step["assistant_diagnostics"]["template"], "poll_until_text_then_download")
+        self.assertEqual(step["assistant_diagnostics"]["interval_ms"], 500)
+
 class RPAAssistantFrameAwareSnapshotTests(unittest.IsolatedAsyncioTestCase):
     async def test_build_page_snapshot_v2_includes_actionable_content_and_containers(self):
         main = _FakeSnapshotFrame(

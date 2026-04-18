@@ -13,6 +13,7 @@ from backend.rpa.assistant_runtime import (
     resolve_structured_intent,
     resolve_collection_target,
 )
+from backend.rpa.control_flow import build_ai_script_step, detect_upgrade_reason
 
 # Active ReAct agent instances keyed by session_id
 _active_agents: Dict[str, "RPAReActAgent"] = {}
@@ -97,6 +98,7 @@ Rules:
 5. Only output Python code for genuinely complex custom logic that cannot be expressed as one atomic structured action.
 6. If you output Python, define async def run(page): and use Playwright async API.
 7. For extract_text actions, include result_key as a short ASCII snake_case key such as latest_issue_title. Do not use Chinese, spaces, or hyphens.
+8. If the user asks for conditions, loops, polling, wait-until behavior, or runtime comparisons, output Python code instead of a structured atomic action.
 """
 
 async def _get_page_elements(page: Page) -> str:
@@ -278,6 +280,7 @@ Preferred format:
 {
   "thought": "brief reasoning about the current page and next step",
   "action": "execute|done|abort",
+  "execution_mode": "structured|code",
   "operation": "navigate|click|fill|extract_text|press",
   "description": "short action summary",
   "result_key": "short_ascii_snake_case_key_for_extracted_value",
@@ -290,6 +293,9 @@ Preferred format:
   },
   "ordinal": "first|last|1|2|3",
   "value": "text to fill or key to press when relevant",
+  "upgrade_reason": "none|polling_loop|conditional_branch|dynamic_selection|custom_logic",
+  "template": "poll_until_text_then_download|custom_playwright",
+  "code": "async def run(page): ...",
   "risk": "none|high",
   "risk_reason": "required when risk is high"
 }
@@ -305,6 +311,11 @@ Rules:
 8. Do not mark the task done just because the data is visible on the page.
 9. Execute the extraction step first and return the extracted value.
 10. For example, if the user asks to get or read a title, first run extract_text on the target element, set result_key to something like latest_issue_title, then summarize the extracted value in description.
+11. Set execution_mode=structured for one atomic browser action.
+12. Set execution_mode=code when the subtask requires if/else logic, polling, retry loops, explicit wait-until behavior, runtime comparison, or dynamic selection based on page text.
+13. For code mode, output a complete async def run(page): function using Playwright async APIs.
+14. For polling loops, include upgrade_reason=polling_loop, interval_ms, timeout_ms, and template=poll_until_text_then_download when the task waits for text then downloads.
+15. Code mode should solve only the current runtime-dependent subtask, not the entire workflow.
 """
 
 
@@ -428,21 +439,20 @@ class RPAReActAgent:
             if current_page is None:
                 yield {"event": "agent_aborted", "data": {"reason": "No active page available"}}
                 return
+            executable = self._wrap_code(code)
             if structured_intent:
                 resolved_intent = resolve_structured_intent(snapshot, structured_intent)
                 result = await execute_structured_intent(current_page, resolved_intent)
             else:
-                executable = self._wrap_code(code)
                 result = await _execute_on_page(current_page, executable)
             if result["success"]:
                 steps_done += 1
-                step_data = result.get("step") or {
-                    "action": "ai_script",
-                    "source": "ai",
-                    "value": code,
-                    "description": description,
-                    "prompt": goal,
-                }
+                step_data = result.get("step") or build_ai_script_step(
+                    prompt=goal,
+                    description=description,
+                    code=executable,
+                    parsed=parsed,
+                )
                 output = result.get("output", "")
                 # If there's meaningful output, append to description for visibility
                 if output and output != "ok" and output != "None":
@@ -473,8 +483,19 @@ Return the next JSON action."""
     @staticmethod
     def _extract_structured_execute_intent(parsed: Dict[str, Any], prompt: str) -> Optional[Dict[str, Any]]:
         action = str(parsed.get("action", "") or "").strip().lower()
+        execution_mode = str(parsed.get("execution_mode", "") or "").strip().lower()
         operation = str(parsed.get("operation", "") or "").strip().lower()
         atomic_actions = {"navigate", "click", "fill", "extract_text", "press"}
+
+        if execution_mode == "code":
+            return None
+
+        control_flow_text = " ".join(
+            str(parsed.get(key) or "")
+            for key in ("thought", "description", "prompt", "operation", "value")
+        )
+        if parsed.get("code") and detect_upgrade_reason(f"{prompt} {control_flow_text}") != "none":
+            return None
 
         if action in atomic_actions:
             operation = action
