@@ -623,6 +623,66 @@ class PlaywrightGeneratorTests(unittest.TestCase):
         self.assertIn("_results.update(_rpa_ai_step_1_result)", script)
         self.assertNotIn("async def run(page):", script)
 
+    def test_generate_script_preserves_safe_import_prelude_before_full_ai_script_function(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "ai_script",
+                "source": "ai",
+                "description": "Round a value",
+                "value": "\n".join([
+                    "import math",
+                    "",
+                    "async def run(page):",
+                    "    return {'rounded': math.floor(1.5)}",
+                ]),
+                "assistant_diagnostics": {
+                    "execution_mode": "code",
+                    "upgrade_reason": "numeric_postprocess",
+                    "template": "round_value",
+                },
+                "url": "https://example.com",
+                "tab_id": "tab-1",
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn("import math", script)
+        self.assertIn("async def _rpa_ai_step_1(page):", script)
+        self.assertIn("_rpa_ai_step_1_result = await _rpa_ai_step_1(current_page)", script)
+        self.assertIn("_results.update(_rpa_ai_step_1_result)", script)
+        self.assertNotIn("async def run(page):", script)
+
+    def test_generate_script_uses_full_function_return_value_without_injecting_result_capture(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "ai_script",
+                "source": "ai",
+                "description": "Read status and return it",
+                "value": "\n".join([
+                    "async def run(page):",
+                    "    status = await page.locator('#status').inner_text()",
+                    "    return status",
+                ]),
+                "assistant_diagnostics": {
+                    "execution_mode": "code",
+                    "upgrade_reason": "status_check",
+                    "template": "return_status",
+                },
+                "url": "https://example.com",
+                "tab_id": "tab-1",
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn("_rpa_ai_step_1_result = await _rpa_ai_step_1(current_page)", script)
+        self.assertIn('_results["_rpa_ai_step_1"] = _rpa_ai_step_1_result', script)
+        self.assertIn("status = await page.locator('#status').inner_text()", script)
+        self.assertNotIn('_results["status"] = status', script)
+
     def test_generate_script_keeps_body_only_ai_script_compatibility(self):
         generator = PlaywrightGenerator()
         steps = [

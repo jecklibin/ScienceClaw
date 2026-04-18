@@ -366,22 +366,68 @@ class StepExecutionError(Exception):
 
     @staticmethod
     def _extract_run_function_body(code: str) -> Optional[str]:
+        parts = PlaywrightGenerator._extract_run_function_parts(code)
+        if not parts:
+            return None
+        return parts["body"]
+
+    @staticmethod
+    def _extract_run_function_parts(code: str) -> Optional[Dict[str, Any]]:
         lines = str(code or "").splitlines()
         if not lines:
             return None
-        start_index = 0
-        while start_index < len(lines):
-            stripped = lines[start_index].strip()
-            if stripped and not stripped.startswith("#"):
+
+        prelude_lines: List[str] = []
+        in_docstring = False
+        docstring_delimiter = ""
+        run_index = -1
+        index = 0
+
+        while index < len(lines):
+            stripped = lines[index].strip()
+
+            if in_docstring:
+                prelude_lines.append(lines[index])
+                if stripped.endswith(docstring_delimiter):
+                    in_docstring = False
+                    docstring_delimiter = ""
+                index += 1
+                continue
+
+            if not stripped:
+                prelude_lines.append(lines[index])
+                index += 1
+                continue
+
+            if stripped.startswith("#"):
+                prelude_lines.append(lines[index])
+                index += 1
+                continue
+
+            if stripped.startswith("import ") or stripped.startswith("from "):
+                prelude_lines.append(lines[index])
+                index += 1
+                continue
+
+            if stripped.startswith('"""') or stripped.startswith("'''"):
+                prelude_lines.append(lines[index])
+                docstring_delimiter = stripped[:3]
+                if not (stripped.endswith(docstring_delimiter) and stripped.count(docstring_delimiter) >= 2):
+                    in_docstring = True
+                index += 1
+                continue
+
+            if stripped.startswith("async def run(") or stripped.startswith("def run("):
+                run_index = index
                 break
-            start_index += 1
-        if start_index >= len(lines):
+
             return None
-        first = lines[start_index].strip()
-        if not (first.startswith("async def run(") or first.startswith("def run(")):
+
+        if run_index < 0:
             return None
+
         body_lines = []
-        for line in lines[start_index + 1:]:
+        for line in lines[run_index + 1:]:
             if line.startswith("    "):
                 body_lines.append(line[4:])
             elif line.startswith("\t"):
@@ -390,27 +436,35 @@ class StepExecutionError(Exception):
                 body_lines.append("")
             else:
                 body_lines.append(line)
-        return "\n".join(body_lines).strip("\n")
+
+        return {
+            "prelude_lines": prelude_lines,
+            "body": "\n".join(body_lines).strip("\n"),
+        }
 
     def _build_ai_script_step_lines(self, step: Dict[str, Any], step_index: int) -> List[str]:
         ai_code = step.get("value", "")
         diagnostics = step.get("assistant_diagnostics") or {}
         upgrade_reason = diagnostics.get("upgrade_reason")
-        body = self._extract_run_function_body(ai_code)
+        parts = self._extract_run_function_parts(ai_code)
         prefix_lines: List[str] = []
         if upgrade_reason:
             prefix_lines.append(f"    # Advanced AI script step: {upgrade_reason}")
-        if body is None:
+        if parts is None:
             converted = self._sync_to_async(ai_code)
             converted = self._inject_result_capture(converted)
             converted = self._strip_locator_result_capture(converted)
             return prefix_lines + [f"    {code_line}" if code_line.strip() else "" for code_line in converted.split("\n")]
 
+        prelude_lines = parts.get("prelude_lines") or []
+        body = parts.get("body") or ""
         converted = self._sync_to_async(body)
-        converted = self._inject_result_capture(converted)
         converted = self._strip_locator_result_capture(converted)
         func_name = f"_rpa_ai_step_{step_index + 1}"
         lines: List[str] = list(prefix_lines)
+        lines.extend([f"    {line}" if line.strip() else "" for line in prelude_lines])
+        if prelude_lines and prelude_lines[-1].strip():
+            lines.append("")
         lines.append(f"    async def {func_name}(page):")
         for code_line in converted.split("\n"):
             lines.append(f"        {code_line}" if code_line.strip() else "")
