@@ -166,13 +166,7 @@ class StepExecutionError(Exception):
 
             # AI-generated script — embed directly with sync→async conversion
             if action == "ai_script":
-                ai_code = step.get("value", "")
-                if ai_code:
-                    converted = self._sync_to_async(ai_code)
-                    converted = self._inject_result_capture(converted)
-                    converted = self._strip_locator_result_capture(converted)
-                    for code_line in converted.split("\n"):
-                        step_lines.append(f"    {code_line}" if code_line.strip() else "")
+                step_lines.extend(self._build_ai_script_step_lines(step, step_index))
                 lines.extend(self._wrap_step_lines(step_lines, step_index, test_mode))
                 lines.append("")
                 continue
@@ -369,6 +363,55 @@ class StepExecutionError(Exception):
         if count == 1:
             return key
         return f"{key}_{count}"
+
+    @staticmethod
+    def _extract_run_function_body(code: str) -> Optional[str]:
+        lines = str(code or "").splitlines()
+        if not lines:
+            return None
+        first = lines[0].strip()
+        if not (first.startswith("async def run(") or first.startswith("def run(")):
+            return None
+        body_lines = []
+        for line in lines[1:]:
+            if line.startswith("    "):
+                body_lines.append(line[4:])
+            elif line.startswith("\t"):
+                body_lines.append(line[1:])
+            elif not line.strip():
+                body_lines.append("")
+            else:
+                body_lines.append(line)
+        return "\n".join(body_lines).strip("\n")
+
+    def _build_ai_script_step_lines(self, step: Dict[str, Any], step_index: int) -> List[str]:
+        ai_code = step.get("value", "")
+        diagnostics = step.get("assistant_diagnostics") or {}
+        upgrade_reason = diagnostics.get("upgrade_reason")
+        body = self._extract_run_function_body(ai_code)
+        if body is None:
+            converted = self._sync_to_async(ai_code)
+            converted = self._inject_result_capture(converted)
+            converted = self._strip_locator_result_capture(converted)
+            return [f"    {code_line}" if code_line.strip() else "" for code_line in converted.split("\n")]
+
+        converted = self._sync_to_async(body)
+        converted = self._inject_result_capture(converted)
+        converted = self._strip_locator_result_capture(converted)
+        func_name = f"_rpa_ai_step_{step_index + 1}"
+        lines: List[str] = []
+        if upgrade_reason:
+            lines.append(f"    # Advanced AI script step: {upgrade_reason}")
+        lines.append(f"    async def {func_name}(page):")
+        for code_line in converted.split("\n"):
+            lines.append(f"        {code_line}" if code_line.strip() else "")
+        result_var = f"{func_name}_result"
+        lines.append(f"    {result_var} = await {func_name}(current_page)")
+        lines.append(f"    if isinstance({result_var}, dict):")
+        lines.append(f"        _results.update({result_var})")
+        lines.append(f"    elif {result_var} is not None:")
+        lines.append(f'        _results["{func_name}"] = {result_var}')
+        return lines
 
     def _normalize_result_key(self, raw_key: Any) -> str:
         text = str(raw_key or "").strip().lower()

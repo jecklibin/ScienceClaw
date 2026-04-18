@@ -547,6 +547,51 @@ class PlaywrightGeneratorTests(unittest.TestCase):
         self.assertNotIn('_results["preview"] = preview', script)
 
 
+    def test_generate_script_calls_full_ai_script_function_and_merges_results(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "ai_script",
+                "source": "ai",
+                "description": "Wait for completion and download",
+                "value": "\n".join(["async def run(page):", "    return {'download_filename': 'report.xlsx'}"]),
+                "assistant_diagnostics": {
+                    "execution_mode": "code",
+                    "upgrade_reason": "polling_loop",
+                    "template": "poll_until_text_then_download",
+                },
+                "url": "https://example.com",
+                "tab_id": "tab-1",
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn("# Advanced AI script step: polling_loop", script)
+        self.assertIn("async def _rpa_ai_step_1(page):", script)
+        self.assertIn("_rpa_ai_step_1_result = await _rpa_ai_step_1(current_page)", script)
+        self.assertIn("if isinstance(_rpa_ai_step_1_result, dict):", script)
+        self.assertIn("_results.update(_rpa_ai_step_1_result)", script)
+        self.assertNotIn("async def run(page):", script)
+
+    def test_generate_script_keeps_body_only_ai_script_compatibility(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "ai_script",
+                "source": "ai",
+                "description": "Click refresh",
+                "value": 'await page.get_by_role("button", name="Refresh").click()',
+                "url": "https://example.com",
+                "tab_id": "tab-1",
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn('await page.get_by_role("button", name="Refresh").click()', script)
+
+
     def test_generate_script_keeps_result_capture_after_locator_variable_is_reassigned_to_data(self):
         generator = PlaywrightGenerator()
         steps = [
