@@ -433,9 +433,21 @@ class StepExecutionError(Exception):
                 body_lines = source_lines[first_body_lineno - 1:last_body_end_lineno]
                 return cls._RunExtractionResult(prelude_lines=prelude_lines, body_lines=body_lines)
 
-            if isinstance(node, ast.Expr) and isinstance(getattr(node, "value", None), ast.Constant) and isinstance(node.value.value, str):
+            if (
+                index == 0
+                and isinstance(node, ast.Expr)
+                and isinstance(getattr(node, "value", None), ast.Constant)
+                and isinstance(node.value.value, str)
+            ):
                 prelude_lines.extend(cls._slice_source_lines(source_lines, node))
                 continue
+
+            if isinstance(node, ast.Expr) and isinstance(getattr(node, "value", None), ast.Constant) and isinstance(node.value.value, str):
+                return cls._RunExtractionResult(
+                    prelude_lines=[],
+                    body_lines=[],
+                    error_message="Unsupported ai_script wrapper format: only a module docstring, imports, and from-import statements are allowed before run()",
+                )
 
             if isinstance(node, ast.Import):
                 prelude_lines.extend(cls._slice_source_lines(source_lines, node))

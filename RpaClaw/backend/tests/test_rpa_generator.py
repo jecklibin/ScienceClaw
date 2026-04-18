@@ -654,6 +654,69 @@ class PlaywrightGeneratorTests(unittest.TestCase):
         self.assertIn("_results.update(_rpa_ai_step_1_result)", script)
         self.assertNotIn("async def run(page):", script)
 
+    def test_generate_script_preserves_module_docstring_before_full_ai_script_function(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "ai_script",
+                "source": "ai",
+                "description": "Round a value",
+                "value": "\n".join([
+                    '"""Module docstring."""',
+                    "import math",
+                    "async def run(page):",
+                    "    return {'rounded': math.floor(1.5)}",
+                ]),
+                "assistant_diagnostics": {
+                    "execution_mode": "code",
+                    "upgrade_reason": "docstring_prelude",
+                    "template": "module_docstring",
+                },
+                "url": "https://example.com",
+                "tab_id": "tab-1",
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn('"""Module docstring."""', script)
+        self.assertIn("import math", script)
+        self.assertIn("async def _rpa_ai_step_1(page):", script)
+        self.assertIn("_rpa_ai_step_1_result = await _rpa_ai_step_1(current_page)", script)
+        self.assertIn("_results.update(_rpa_ai_step_1_result)", script)
+        self.assertNotIn("async def run(page):", script)
+
+    def test_generate_script_rejects_stray_string_literal_after_import_before_full_ai_script_function(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "ai_script",
+                "source": "ai",
+                "description": "Round a value",
+                "value": "\n".join([
+                    "import math",
+                    '"not a docstring"',
+                    "async def run(page):",
+                    "    return {'rounded': math.floor(1.5)}",
+                ]),
+                "assistant_diagnostics": {
+                    "execution_mode": "code",
+                    "upgrade_reason": "stray_string_guard",
+                    "template": "reject_stray_string",
+                },
+                "url": "https://example.com",
+                "tab_id": "tab-1",
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn("Unsupported ai_script wrapper format", script)
+        self.assertIn("raise RuntimeError(", script)
+        self.assertNotIn("not a docstring", script)
+        self.assertNotIn("return {'rounded': math.floor(1.5)}", script)
+        self.assertNotIn("math.floor(1.5)", script)
+
     def test_generate_script_skips_future_import_in_full_ai_script_prelude(self):
         generator = PlaywrightGenerator()
         steps = [
