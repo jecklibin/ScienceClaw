@@ -76,8 +76,11 @@ def normalize_ai_script_function(code: str) -> str:
     if not code:
         return "async def run(page):\n    return None"
 
-    if code.startswith("async def run(") or code.startswith("def run("):
+    if code.startswith("async def run("):
         return code
+
+    if code.startswith("def run("):
+        return "async " + code
 
     indented_body = "\n".join(
         f"    {line}" if line.strip() else ""

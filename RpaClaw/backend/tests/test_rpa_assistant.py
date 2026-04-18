@@ -1197,6 +1197,15 @@ class RPAControlFlowHelperTests(unittest.TestCase):
 
         self.assertEqual(normalize_ai_script_function(code), "async def run(page):\n      return page.url")
 
+    def test_normalize_ai_script_function_converts_sync_run_to_async(self):
+        from backend.rpa.control_flow import normalize_ai_script_function
+
+        code = "def run(page):\n    return 'ok'"
+
+        normalized = normalize_ai_script_function(code)
+        self.assertTrue(normalized.startswith("async def run(page):"))
+        self.assertIn("return 'ok'", normalized)
+
     def test_normalize_ai_script_function_wraps_bare_body(self):
         from backend.rpa.control_flow import normalize_ai_script_function
 
@@ -1233,6 +1242,8 @@ class RPAControlFlowHelperTests(unittest.TestCase):
         self.assertEqual(step["assistant_diagnostics"]["template"], "poll_until_text_then_download")
         self.assertEqual(step["assistant_diagnostics"]["interval_ms"], 500)
         self.assertEqual(step["assistant_diagnostics"]["timeout_ms"], 60000)
+        self.assertTrue(step["value"].startswith("async def run(page):"))
+        self.assertNotIn("\ndef run(", step["value"])
 
     def test_build_ai_script_step_falls_back_to_custom_logic_without_control_flow_reason(self):
         from backend.rpa.control_flow import build_ai_script_step
