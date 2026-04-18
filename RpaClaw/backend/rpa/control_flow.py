@@ -34,7 +34,7 @@ _DYNAMIC_SELECTION_PATTERNS = [
     r"\blatest\b",
     r"\bearliest\b",
     r"\bmost\b",
-    r"\bleast\b",
+    r"(?<!\bat\s)\bleast\b",
     r"最高",
     r"最低",
     r"最新",

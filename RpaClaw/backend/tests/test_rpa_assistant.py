@@ -1161,6 +1161,13 @@ class RPAControlFlowHelperTests(unittest.TestCase):
 
         self.assertEqual(detect_upgrade_reason(text), "none")
 
+    def test_detect_upgrade_reason_does_not_match_at_least_threshold_phrases(self):
+        from backend.rpa.control_flow import detect_upgrade_reason
+
+        text = "wait at least 5 seconds"
+
+        self.assertEqual(detect_upgrade_reason(text), "none")
+
     def test_build_ai_script_step_stores_normalized_function_and_diagnostics(self):
         from backend.rpa.control_flow import build_ai_script_step
 
