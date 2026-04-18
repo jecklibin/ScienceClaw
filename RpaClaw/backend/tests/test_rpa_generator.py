@@ -623,6 +623,61 @@ class PlaywrightGeneratorTests(unittest.TestCase):
         self.assertIn("_results.update(_rpa_ai_step_1_result)", script)
         self.assertNotIn("async def run(page):", script)
 
+    def test_generate_script_rejects_decorated_run_wrapper(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "ai_script",
+                "source": "ai",
+                "description": "Decorated wrapper should fail",
+                "value": "\n".join([
+                    "@decorator",
+                    "async def run(page):",
+                    "    return {'ok': True}",
+                ]),
+                "assistant_diagnostics": {
+                    "execution_mode": "code",
+                    "upgrade_reason": "decorated_wrapper_guard",
+                    "template": "reject_decorated_run",
+                },
+                "url": "https://example.com",
+                "tab_id": "tab-1",
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn("Unsupported ai_script wrapper format", script)
+        self.assertIn("raise RuntimeError(", script)
+        self.assertNotIn("return {'ok': True}", script)
+
+    def test_generate_script_rejects_non_canonical_run_signature(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "ai_script",
+                "source": "ai",
+                "description": "Wrapper with extra argument should fail",
+                "value": "\n".join([
+                    "async def run(page, timeout=5):",
+                    "    return {'ok': True}",
+                ]),
+                "assistant_diagnostics": {
+                    "execution_mode": "code",
+                    "upgrade_reason": "signature_guard",
+                    "template": "reject_run_signature",
+                },
+                "url": "https://example.com",
+                "tab_id": "tab-1",
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn("Unsupported ai_script wrapper format", script)
+        self.assertIn("raise RuntimeError(", script)
+        self.assertNotIn("return {'ok': True}", script)
+
     def test_generate_script_preserves_safe_import_prelude_before_full_ai_script_function(self):
         generator = PlaywrightGenerator()
         steps = [

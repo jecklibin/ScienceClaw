@@ -392,6 +392,28 @@ class StepExecutionError(Exception):
             return []
         return source_lines[start_lineno - 1:end_lineno]
 
+    @staticmethod
+    def _run_function_wrapper_error(node: ast.AST) -> Optional[str]:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return None
+        if node.decorator_list:
+            return "Unsupported ai_script wrapper format: run() must be an undecorated top-level function with signature run(page)"
+
+        args = node.args
+        if (
+            getattr(args, "posonlyargs", [])
+            or len(args.args) != 1
+            or args.args[0].arg != "page"
+            or args.vararg is not None
+            or args.kwonlyargs
+            or args.kwarg is not None
+            or args.defaults
+            or args.kw_defaults
+        ):
+            return "Unsupported ai_script wrapper format: run() must be an undecorated top-level function with signature run(page)"
+
+        return None
+
     @classmethod
     def _extract_run_function_parts(cls, code: str) -> Optional["PlaywrightGenerator._RunExtractionResult"]:
         source = str(code or "")
@@ -415,6 +437,13 @@ class StepExecutionError(Exception):
 
         for index, node in enumerate(module.body):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "run":
+                wrapper_error = cls._run_function_wrapper_error(node)
+                if wrapper_error:
+                    return cls._RunExtractionResult(
+                        prelude_lines=[],
+                        body_lines=[],
+                        error_message=wrapper_error,
+                    )
                 if module.body[index + 1:]:
                     return cls._RunExtractionResult(
                         prelude_lines=[],
