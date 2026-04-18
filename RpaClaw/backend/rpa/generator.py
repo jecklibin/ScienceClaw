@@ -369,11 +369,19 @@ class StepExecutionError(Exception):
         lines = str(code or "").splitlines()
         if not lines:
             return None
-        first = lines[0].strip()
+        start_index = 0
+        while start_index < len(lines):
+            stripped = lines[start_index].strip()
+            if stripped and not stripped.startswith("#"):
+                break
+            start_index += 1
+        if start_index >= len(lines):
+            return None
+        first = lines[start_index].strip()
         if not (first.startswith("async def run(") or first.startswith("def run(")):
             return None
         body_lines = []
-        for line in lines[1:]:
+        for line in lines[start_index + 1:]:
             if line.startswith("    "):
                 body_lines.append(line[4:])
             elif line.startswith("\t"):
@@ -389,19 +397,20 @@ class StepExecutionError(Exception):
         diagnostics = step.get("assistant_diagnostics") or {}
         upgrade_reason = diagnostics.get("upgrade_reason")
         body = self._extract_run_function_body(ai_code)
+        prefix_lines: List[str] = []
+        if upgrade_reason:
+            prefix_lines.append(f"    # Advanced AI script step: {upgrade_reason}")
         if body is None:
             converted = self._sync_to_async(ai_code)
             converted = self._inject_result_capture(converted)
             converted = self._strip_locator_result_capture(converted)
-            return [f"    {code_line}" if code_line.strip() else "" for code_line in converted.split("\n")]
+            return prefix_lines + [f"    {code_line}" if code_line.strip() else "" for code_line in converted.split("\n")]
 
         converted = self._sync_to_async(body)
         converted = self._inject_result_capture(converted)
         converted = self._strip_locator_result_capture(converted)
         func_name = f"_rpa_ai_step_{step_index + 1}"
-        lines: List[str] = []
-        if upgrade_reason:
-            lines.append(f"    # Advanced AI script step: {upgrade_reason}")
+        lines: List[str] = list(prefix_lines)
         lines.append(f"    async def {func_name}(page):")
         for code_line in converted.split("\n"):
             lines.append(f"        {code_line}" if code_line.strip() else "")

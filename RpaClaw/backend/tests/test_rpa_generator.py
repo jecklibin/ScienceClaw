@@ -574,6 +574,30 @@ class PlaywrightGeneratorTests(unittest.TestCase):
         self.assertIn("_results.update(_rpa_ai_step_1_result)", script)
         self.assertNotIn("async def run(page):", script)
 
+    def test_generate_script_extracts_full_ai_script_function_after_leading_blank_line(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "ai_script",
+                "source": "ai",
+                "description": "Wait for completion and download",
+                "value": "\n".join(["", "async def run(page):", "    return {'download_filename': 'report.xlsx'}"]),
+                "assistant_diagnostics": {
+                    "execution_mode": "code",
+                    "upgrade_reason": "polling_loop",
+                    "template": "poll_until_text_then_download",
+                },
+                "url": "https://example.com",
+                "tab_id": "tab-1",
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn("async def _rpa_ai_step_1(page):", script)
+        self.assertIn("_rpa_ai_step_1_result = await _rpa_ai_step_1(current_page)", script)
+        self.assertNotIn("async def run(page):", script)
+
     def test_generate_script_keeps_body_only_ai_script_compatibility(self):
         generator = PlaywrightGenerator()
         steps = [
@@ -582,6 +606,9 @@ class PlaywrightGeneratorTests(unittest.TestCase):
                 "source": "ai",
                 "description": "Click refresh",
                 "value": 'await page.get_by_role("button", name="Refresh").click()',
+                "assistant_diagnostics": {
+                    "upgrade_reason": "simple_click",
+                },
                 "url": "https://example.com",
                 "tab_id": "tab-1",
             }
@@ -589,6 +616,7 @@ class PlaywrightGeneratorTests(unittest.TestCase):
 
         script = generator.generate_script(steps, is_local=True)
 
+        self.assertIn("# Advanced AI script step: simple_click", script)
         self.assertIn('await page.get_by_role("button", name="Refresh").click()', script)
 
 
