@@ -654,6 +654,70 @@ class PlaywrightGeneratorTests(unittest.TestCase):
         self.assertIn("_results.update(_rpa_ai_step_1_result)", script)
         self.assertNotIn("async def run(page):", script)
 
+    def test_generate_script_skips_future_import_in_full_ai_script_prelude(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "ai_script",
+                "source": "ai",
+                "description": "Return a simple result",
+                "value": "\n".join([
+                    "from __future__ import annotations",
+                    "async def run(page):",
+                    "    return {'ok': True}",
+                ]),
+                "assistant_diagnostics": {
+                    "execution_mode": "code",
+                    "upgrade_reason": "future_annotations",
+                    "template": "future_import_guard",
+                },
+                "url": "https://example.com",
+                "tab_id": "tab-1",
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertNotIn("from __future__ import annotations", script)
+        self.assertIn("async def _rpa_ai_step_1(page):", script)
+        self.assertIn("_rpa_ai_step_1_result = await _rpa_ai_step_1(current_page)", script)
+        self.assertIn("_results.update(_rpa_ai_step_1_result)", script)
+        self.assertNotIn("async def run(page):", script)
+
+    def test_generate_script_preserves_parenthesized_import_block_before_full_ai_script_function(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "ai_script",
+                "source": "ai",
+                "description": "Round a value",
+                "value": "\n".join([
+                    "from math import (",
+                    "    floor,",
+                    ")",
+                    "async def run(page):",
+                    "    return {'rounded': floor(1.5)}",
+                ]),
+                "assistant_diagnostics": {
+                    "execution_mode": "code",
+                    "upgrade_reason": "numeric_postprocess",
+                    "template": "round_value_block",
+                },
+                "url": "https://example.com",
+                "tab_id": "tab-1",
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn("from math import (", script)
+        self.assertIn("    floor,", script)
+        self.assertIn(")", script)
+        self.assertIn("async def _rpa_ai_step_1(page):", script)
+        self.assertIn("_rpa_ai_step_1_result = await _rpa_ai_step_1(current_page)", script)
+        self.assertIn("_results.update(_rpa_ai_step_1_result)", script)
+        self.assertNotIn("async def run(page):", script)
+
     def test_generate_script_uses_full_function_return_value_without_injecting_result_capture(self):
         generator = PlaywrightGenerator()
         steps = [

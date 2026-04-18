@@ -365,13 +365,6 @@ class StepExecutionError(Exception):
         return f"{key}_{count}"
 
     @staticmethod
-    def _extract_run_function_body(code: str) -> Optional[str]:
-        parts = PlaywrightGenerator._extract_run_function_parts(code)
-        if not parts:
-            return None
-        return parts["body"]
-
-    @staticmethod
     def _extract_run_function_parts(code: str) -> Optional[Dict[str, Any]]:
         lines = str(code or "").splitlines()
         if not lines:
@@ -404,8 +397,7 @@ class StepExecutionError(Exception):
                 index += 1
                 continue
 
-            if stripped.startswith("import ") or stripped.startswith("from "):
-                prelude_lines.append(lines[index])
+            if stripped.startswith("from __future__ import "):
                 index += 1
                 continue
 
@@ -415,6 +407,21 @@ class StepExecutionError(Exception):
                 if not (stripped.endswith(docstring_delimiter) and stripped.count(docstring_delimiter) >= 2):
                     in_docstring = True
                 index += 1
+                continue
+
+            if stripped.startswith("import ") or stripped.startswith("from "):
+                import_block = [lines[index]]
+                paren_depth = lines[index].count("(") - lines[index].count(")")
+                continued = lines[index].rstrip().endswith("\\")
+                index += 1
+
+                while index < len(lines) and (paren_depth > 0 or continued):
+                    import_block.append(lines[index])
+                    paren_depth += lines[index].count("(") - lines[index].count(")")
+                    continued = lines[index].rstrip().endswith("\\")
+                    index += 1
+
+                prelude_lines.extend(import_block)
                 continue
 
             if stripped.startswith("async def run(") or stripped.startswith("def run("):
