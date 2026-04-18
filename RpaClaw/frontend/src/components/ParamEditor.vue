@@ -8,7 +8,7 @@
       </div>
       <div class="flex items-center gap-2">
         <button
-          v-if="mode === 'form'"
+          v-if="mode === 'form' && !isReadOnly"
           @click="addParameter"
           class="flex items-center gap-1.5 px-3 py-1.5 bg-violet-50 text-violet-600 rounded-lg text-xs font-semibold hover:bg-violet-100 transition-colors"
         >
@@ -28,13 +28,14 @@
 
     <!-- Form Mode -->
     <div v-if="mode === 'form'" class="flex-1 overflow-y-auto p-5 space-y-4 bg-[#f8f9fb]">
-      <div v-if="paramList.length === 0" class="flex flex-col items-center justify-center py-16 text-gray-400">
-        <SlidersHorizontal class="size-10 opacity-30 mb-3" />
-        <p class="text-sm">{{ t('No parameters configured') }}</p>
-        <button
-          @click="addParameter"
-          class="mt-3 flex items-center gap-1.5 px-4 py-2 bg-violet-600 text-white rounded-lg text-xs font-semibold hover:bg-violet-700 transition-colors"
-        >
+        <div v-if="paramList.length === 0" class="flex flex-col items-center justify-center py-16 text-gray-400">
+          <SlidersHorizontal class="size-10 opacity-30 mb-3" />
+          <p class="text-sm">{{ t('No parameters configured') }}</p>
+          <button
+            v-if="!isReadOnly"
+            @click="addParameter"
+            class="mt-3 flex items-center gap-1.5 px-4 py-2 bg-violet-600 text-white rounded-lg text-xs font-semibold hover:bg-violet-700 transition-colors"
+          >
           <Plus class="size-3.5" />
           {{ t('Add Parameter') }}
         </button>
@@ -57,13 +58,16 @@
             </div>
             <div>
               <input
+                v-if="!isReadOnly"
                 v-model="param.name"
                 @input="emitChange"
                 class="text-sm font-bold text-gray-900 bg-transparent border-none p-0 focus:ring-0 focus:outline-none w-40"
                 :placeholder="t('param_name')"
               />
+              <p v-else class="text-sm font-bold text-gray-900">{{ param.name }}</p>
               <div class="flex items-center gap-2 mt-0.5">
                 <select
+                  v-if="!isReadOnly"
                   v-model="param.type"
                   @change="emitChange"
                   class="text-[10px] font-semibold text-gray-400 uppercase tracking-widest bg-transparent border-none p-0 focus:ring-0 cursor-pointer"
@@ -73,10 +77,11 @@
                   <option value="number">Number</option>
                   <option value="boolean">Boolean</option>
                 </select>
+                <span v-else class="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">{{ param.type }}</span>
               </div>
             </div>
           </div>
-          <div class="flex items-center gap-2">
+          <div v-if="!isReadOnly" class="flex items-center gap-2">
             <button
               @click="param.sensitive = !param.sensitive; emitChange()"
               class="px-2 py-0.5 text-[10px] font-bold rounded-full uppercase transition-colors"
@@ -99,14 +104,18 @@
         <div class="flex gap-2">
           <div class="relative flex-1">
             <input
+              v-if="!isReadOnly"
               v-model="param.original_value"
               @input="emitChange"
               class="w-full bg-gray-50 border-none rounded-lg px-4 py-2.5 text-sm font-medium focus:ring-2 focus:ring-violet-200 transition-all"
               :type="param.sensitive && !param.showPassword ? 'password' : 'text'"
               :placeholder="param.sensitive ? '********' : t('Enter value...')"
             />
+            <div v-else class="w-full bg-gray-50 rounded-lg px-4 py-2.5 text-sm font-medium text-gray-700">
+              {{ param.sensitive ? '********' : (param.original_value || '-') }}
+            </div>
             <button
-              v-if="param.sensitive"
+              v-if="param.sensitive && !isReadOnly"
               @click="param.showPassword = !param.showPassword"
               class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-violet-600 transition-colors"
             >
@@ -115,7 +124,7 @@
             </button>
           </div>
           <button
-            v-if="param.sensitive"
+            v-if="param.sensitive && !isReadOnly"
             @click="openVaultPicker(index)"
             class="flex items-center gap-1.5 px-3 bg-white border-2 border-violet-100 rounded-lg text-xs font-semibold text-violet-600 hover:bg-violet-50 transition-all whitespace-nowrap"
           >
@@ -131,7 +140,7 @@
             {{ t('Linked to') }}
             <span class="text-violet-600">{{ param.credential_id }}</span>
           </span>
-          <button @click="param.credential_id = ''; emitChange()" class="ml-1 text-gray-400 hover:text-red-500">
+          <button v-if="!isReadOnly" @click="param.credential_id = ''; emitChange()" class="ml-1 text-gray-400 hover:text-red-500">
             <X class="size-3" />
           </button>
         </div>
@@ -139,12 +148,20 @@
         <!-- Required Checkbox -->
         <div class="mt-2 flex items-center gap-2">
           <input
+            v-if="!isReadOnly"
             type="checkbox"
             :id="`req-${index}`"
             v-model="param.required"
             @change="emitChange"
             class="rounded border-gray-300 text-violet-600 focus:ring-violet-200 size-3.5"
           />
+          <span
+            v-else
+            class="inline-flex size-3.5 items-center justify-center rounded border text-[9px]"
+            :class="param.required ? 'border-violet-300 bg-violet-50 text-violet-600' : 'border-gray-200 bg-gray-50 text-gray-300'"
+          >
+            {{ param.required ? 'Y' : '' }}
+          </span>
           <label :for="`req-${index}`" class="text-xs text-gray-500">{{ t('Required') }}</label>
         </div>
       </div>
@@ -155,7 +172,7 @@
       <MonacoEditor
         :value="textContent"
         language="json"
-        :read-only="false"
+        :read-only="isReadOnly"
         theme="vs"
         :minimap="false"
         :word-wrap="'on'"
@@ -199,7 +216,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onMounted } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import {
   SlidersHorizontal, Plus, Code2, LayoutList, Lock, User, Clock, Settings2,
@@ -224,6 +241,7 @@ interface ParamItem {
 
 const props = defineProps<{
   content: string;
+  readonly?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -231,6 +249,7 @@ const emit = defineEmits<{
 }>();
 
 const mode = ref<'form' | 'text'>('form');
+const isReadOnly = computed(() => props.readonly === true);
 const paramList = ref<ParamItem[]>([]);
 const textContent = ref('');
 let nextKey = 0;

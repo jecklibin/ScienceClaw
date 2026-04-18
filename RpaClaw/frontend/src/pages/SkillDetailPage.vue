@@ -112,10 +112,11 @@
             </div>
           </div>
 
-          <!-- ParamEditor for params.json in edit mode -->
+          <!-- ParamEditor for params.json -->
           <ParamEditor
-            v-else-if="editMode && isParamsJson"
+            v-else-if="isParamsJson"
             :content="fileContent || '{}'"
+            :readonly="!editMode"
             class="flex-1"
             @change="onContentChange"
           />
@@ -154,6 +155,7 @@ import { ArrowLeft, Folder, FileText, FileSearch, Pencil, Save } from 'lucide-vu
 import { getSkillFiles, readSkillFile, getSkills, writeSkillFile } from '../api/agent';
 import FileViewer from '../components/FileViewer.vue';
 import ParamEditor from '../components/ParamEditor.vue';
+import { pickDefaultSkillFile } from '../utils/skillDetailView';
 
 const { t } = useI18n();
 const route = useRoute();
@@ -280,6 +282,10 @@ const goBack = () => router.back();
 
 onMounted(async () => {
   await loadFiles();
+  const defaultFile = pickDefaultSkillFile(fileTree.value);
+  if (defaultFile) {
+    await selectFile(defaultFile);
+  }
   // Check if this is a builtin skill
   try {
     const skills = await getSkills();
