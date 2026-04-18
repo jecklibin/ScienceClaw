@@ -43,6 +43,13 @@ _DYNAMIC_SELECTION_PATTERNS = [
     r"最少",
 ]
 
+_VALID_UPGRADE_REASONS = {
+    "polling_loop",
+    "conditional_branch",
+    "dynamic_selection",
+    "custom_logic",
+}
+
 
 def _matches_any(text: str, patterns: list[str]) -> bool:
     return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
@@ -86,20 +93,32 @@ def build_ai_script_step(
     parsed: Dict[str, Any],
 ) -> Dict[str, Any]:
     normalized_code = normalize_ai_script_function(code)
-    detected_upgrade_reason = detect_upgrade_reason(f"{prompt}\n{description}\n{code}")
-    parsed_upgrade_reason = (parsed or {}).get("upgrade_reason")
-    upgrade_reason = parsed_upgrade_reason or detected_upgrade_reason
-    if upgrade_reason == "none":
-        upgrade_reason = "custom_logic"
+    parsed = parsed or {}
+    detection_text = "\n".join(
+        str(part).strip()
+        for part in (
+            prompt,
+            description,
+            parsed.get("thought"),
+            code,
+        )
+        if part
+    )
+    detected_upgrade_reason = detect_upgrade_reason(detection_text)
+    if detected_upgrade_reason != "none":
+        upgrade_reason = detected_upgrade_reason
+    else:
+        parsed_upgrade_reason = str(parsed.get("upgrade_reason", "")).strip()
+        upgrade_reason = parsed_upgrade_reason if parsed_upgrade_reason in _VALID_UPGRADE_REASONS else "custom_logic"
 
     assistant_diagnostics: Dict[str, Any] = {
         "execution_mode": "code",
         "upgrade_reason": upgrade_reason,
-        "template": (parsed or {}).get("template"),
+        "template": parsed.get("template"),
     }
 
     for key in ("interval_ms", "timeout_ms", "condition", "locators"):
-        if parsed and key in parsed:
+        if key in parsed:
             assistant_diagnostics[key] = parsed[key]
 
     return {

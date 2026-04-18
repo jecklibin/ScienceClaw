@@ -1154,6 +1154,20 @@ class RPAControlFlowHelperTests(unittest.TestCase):
 
         self.assertEqual(detect_upgrade_reason(text), "polling_loop")
 
+    def test_detect_upgrade_reason_identifies_conditional_branch(self):
+        from backend.rpa.control_flow import detect_upgrade_reason
+
+        text = "如果列表为空，则显示提示，否则继续处理"
+
+        self.assertEqual(detect_upgrade_reason(text), "conditional_branch")
+
+    def test_detect_upgrade_reason_identifies_dynamic_selection(self):
+        from backend.rpa.control_flow import detect_upgrade_reason
+
+        text = "选择最新的结果或最低价格的选项"
+
+        self.assertEqual(detect_upgrade_reason(text), "dynamic_selection")
+
     def test_detect_upgrade_reason_keeps_atomic_click_structured(self):
         from backend.rpa.control_flow import detect_upgrade_reason
 
@@ -1167,6 +1181,31 @@ class RPAControlFlowHelperTests(unittest.TestCase):
         text = "wait at least 5 seconds"
 
         self.assertEqual(detect_upgrade_reason(text), "none")
+
+    def test_normalize_ai_script_function_returns_empty_wrapper_for_blank_code(self):
+        from backend.rpa.control_flow import normalize_ai_script_function
+
+        self.assertEqual(
+            normalize_ai_script_function(""),
+            "async def run(page):\n    return None",
+        )
+
+    def test_normalize_ai_script_function_returns_existing_async_run_stripped(self):
+        from backend.rpa.control_flow import normalize_ai_script_function
+
+        code = "  async def run(page):\n      return page.url  \n"
+
+        self.assertEqual(normalize_ai_script_function(code), "async def run(page):\n      return page.url")
+
+    def test_normalize_ai_script_function_wraps_bare_body(self):
+        from backend.rpa.control_flow import normalize_ai_script_function
+
+        code = 'await page.get_by_role("button", name="刷新").click()\nawait page.wait_for_timeout(500)'
+
+        self.assertEqual(
+            normalize_ai_script_function(code),
+            'async def run(page):\n    await page.get_by_role("button", name="刷新").click()\n    await page.wait_for_timeout(500)',
+        )
 
     def test_build_ai_script_step_stores_normalized_function_and_diagnostics(self):
         from backend.rpa.control_flow import build_ai_script_step
@@ -1194,6 +1233,25 @@ class RPAControlFlowHelperTests(unittest.TestCase):
         self.assertEqual(step["assistant_diagnostics"]["template"], "poll_until_text_then_download")
         self.assertEqual(step["assistant_diagnostics"]["interval_ms"], 500)
         self.assertEqual(step["assistant_diagnostics"]["timeout_ms"], 60000)
+
+    def test_build_ai_script_step_falls_back_to_custom_logic_without_control_flow_reason(self):
+        from backend.rpa.control_flow import build_ai_script_step
+
+        parsed = {
+            "execution_mode": "code",
+            "upgrade_reason": "bogus_reason",
+            "template": "custom_click",
+        }
+        step = build_ai_script_step(
+            prompt="点击列表中的第一个条目",
+            description="点击列表中的第一个条目",
+            code='await page.get_by_role("button", name="提交").click()',
+            parsed=parsed,
+        )
+
+        self.assertEqual(step["assistant_diagnostics"]["upgrade_reason"], "custom_logic")
+        self.assertEqual(step["assistant_diagnostics"]["template"], "custom_click")
+        self.assertNotIn("bogus_reason", str(step["assistant_diagnostics"]))
 
 
 class RPAAssistantPromptFormattingTests(unittest.TestCase):
