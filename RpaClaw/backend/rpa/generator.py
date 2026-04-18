@@ -385,12 +385,16 @@ class StepExecutionError(Exception):
         ]
 
     @staticmethod
-    def _slice_source_lines(source_lines: List[str], node: ast.AST) -> List[str]:
+    def _source_line_numbers(node: ast.AST) -> set[int]:
         start_lineno = getattr(node, "lineno", 0) or 0
         end_lineno = getattr(node, "end_lineno", start_lineno) or start_lineno
         if start_lineno <= 0 or end_lineno <= 0:
-            return []
-        return source_lines[start_lineno - 1:end_lineno]
+            return set()
+        return set(range(start_lineno, end_lineno + 1))
+
+    @staticmethod
+    def _comment_suffix(value: Any) -> str:
+        return re.sub(r"\s+", " ", str(value or "")).strip()
 
     @staticmethod
     def _run_function_wrapper_error(node: ast.AST) -> Optional[str]:
@@ -433,7 +437,7 @@ class StepExecutionError(Exception):
             )
 
         source_lines = source.splitlines()
-        prelude_lines: List[str] = []
+        skipped_prelude_lines: set[int] = set()
 
         for index, node in enumerate(module.body):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "run":
@@ -450,6 +454,11 @@ class StepExecutionError(Exception):
                         body_lines=[],
                         error_message="Unsupported ai_script wrapper format: extra top-level statements after run()",
                     )
+                prelude_lines = [
+                    line
+                    for lineno, line in enumerate(source_lines[:node.lineno - 1], start=1)
+                    if lineno not in skipped_prelude_lines
+                ]
                 if not node.body:
                     return cls._RunExtractionResult(prelude_lines=prelude_lines, body_lines=[])
 
@@ -468,7 +477,6 @@ class StepExecutionError(Exception):
                 and isinstance(getattr(node, "value", None), ast.Constant)
                 and isinstance(node.value.value, str)
             ):
-                prelude_lines.extend(cls._slice_source_lines(source_lines, node))
                 continue
 
             if isinstance(node, ast.Expr) and isinstance(getattr(node, "value", None), ast.Constant) and isinstance(node.value.value, str):
@@ -479,13 +487,12 @@ class StepExecutionError(Exception):
                 )
 
             if isinstance(node, ast.Import):
-                prelude_lines.extend(cls._slice_source_lines(source_lines, node))
                 continue
 
             if isinstance(node, ast.ImportFrom):
                 if node.module == "__future__":
+                    skipped_prelude_lines.update(cls._source_line_numbers(node))
                     continue
-                prelude_lines.extend(cls._slice_source_lines(source_lines, node))
                 continue
 
             return cls._RunExtractionResult(
@@ -499,11 +506,14 @@ class StepExecutionError(Exception):
     def _build_ai_script_step_lines(self, step: Dict[str, Any], step_index: int) -> List[str]:
         ai_code = step.get("value", "")
         diagnostics = step.get("assistant_diagnostics") or {}
+        if not isinstance(diagnostics, dict):
+            diagnostics = {}
         upgrade_reason = diagnostics.get("upgrade_reason")
         parts = self._extract_run_function_parts(ai_code)
         prefix_lines: List[str] = []
-        if upgrade_reason:
-            prefix_lines.append(f"    # Advanced AI script step: {upgrade_reason}")
+        comment_reason = self._comment_suffix(upgrade_reason)
+        if comment_reason:
+            prefix_lines.append(f"    # Advanced AI script step: {comment_reason}")
         if parts is None:
             converted = self._sync_to_async(ai_code)
             converted = self._inject_result_capture(converted)
