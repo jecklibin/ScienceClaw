@@ -1146,6 +1146,49 @@ class RPAAssistantStructuredExecutionTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class RPAControlFlowHelperTests(unittest.TestCase):
+    def test_detect_upgrade_reason_identifies_polling_loop(self):
+        from backend.rpa.control_flow import detect_upgrade_reason
+
+        text = "如果第一个条目状态不是完成，就每隔500毫秒点击刷新，直到状态变为完成"
+
+        self.assertEqual(detect_upgrade_reason(text), "polling_loop")
+
+    def test_detect_upgrade_reason_keeps_atomic_click_structured(self):
+        from backend.rpa.control_flow import detect_upgrade_reason
+
+        text = "点击列表中的第一个条目"
+
+        self.assertEqual(detect_upgrade_reason(text), "none")
+
+    def test_build_ai_script_step_stores_normalized_function_and_diagnostics(self):
+        from backend.rpa.control_flow import build_ai_script_step
+
+        parsed = {
+            "execution_mode": "code",
+            "upgrade_reason": "polling_loop",
+            "template": "poll_until_text_then_download",
+            "interval_ms": 500,
+            "timeout_ms": 60000,
+        }
+        step = build_ai_script_step(
+            prompt="如果状态不是完成就刷新直到完成并下载",
+            description="等待完成后下载",
+            code='await page.get_by_role("button", name="刷新").click()',
+            parsed=parsed,
+        )
+
+        self.assertEqual(step["action"], "ai_script")
+        self.assertEqual(step["source"], "ai")
+        self.assertTrue(step["value"].startswith("async def run(page):"))
+        self.assertIn('await page.get_by_role("button", name="刷新").click()', step["value"])
+        self.assertEqual(step["assistant_diagnostics"]["execution_mode"], "code")
+        self.assertEqual(step["assistant_diagnostics"]["upgrade_reason"], "polling_loop")
+        self.assertEqual(step["assistant_diagnostics"]["template"], "poll_until_text_then_download")
+        self.assertEqual(step["assistant_diagnostics"]["interval_ms"], 500)
+        self.assertEqual(step["assistant_diagnostics"]["timeout_ms"], 60000)
+
+
 class RPAAssistantPromptFormattingTests(unittest.TestCase):
     def test_build_messages_lists_frames_and_collections(self):
         assistant = ASSISTANT_MODULE.RPAAssistant()
