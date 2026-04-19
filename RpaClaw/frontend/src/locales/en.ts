@@ -800,5 +800,7 @@ export default {
   'RPA MCP tool': 'RPA MCP tool',
   'No private MCP servers or RPA MCP tools yet.': 'No private MCP servers or RPA MCP tools yet.',
   'Use Add MCP to connect a server or create one from an RPA recording.': 'Use Add MCP to connect a server or create one from an RPA recording.',
-  'Search MCP servers or tools...': 'Search MCP servers or tools...'
+  'Search MCP servers or tools...': 'Search MCP servers or tools...',
+  'RPA gateway platform description': 'Unified entry for RPA MCP tools published from Tools. Agents connect here to discover and call those tools with the caller user context.',
+  'No RPA MCP tools published for gateway.': 'No RPA MCP tools have been published yet. Create one from an RPA recording in Tools first.'
 }

@@ -12,8 +12,8 @@
     # headers:
     #   Authorization: "Bearer {{ api_key }}"
   - id: rpa_gateway
-    name: RPA MCP Gateway
-    description: Converted RPA tools exposed through one central gateway
+    name: RPA Tool Gateway
+    description: Unified entry for RPA MCP tools published from Tools
     transport: streamable_http
     enabled: true
     default_enabled: false

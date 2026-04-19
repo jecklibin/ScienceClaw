@@ -2,6 +2,7 @@ type McpServerLike = {
   id?: string;
   scope?: string;
   server_key?: string;
+  description?: string;
   enabled?: boolean;
   default_enabled?: boolean;
   session_mode?: 'inherit' | 'enabled' | 'disabled';
@@ -66,6 +67,21 @@ export function buildUnifiedMcpItems<Server extends McpServerLike, RpaTool exten
       tool,
     })),
   ];
+}
+
+export function isRpaGatewayServer(server?: McpServerLike | null): boolean {
+  return Boolean(
+    server
+      && server.scope === 'system'
+      && (server.id === 'rpa_gateway' || server.server_key === 'system:rpa_gateway'),
+  );
+}
+
+export function formatMcpServerDescription(server: McpServerLike, t: (key: string) => string): string {
+  if (isRpaGatewayServer(server)) {
+    return t('RPA gateway platform description');
+  }
+  return server.description || t('No description');
 }
 
 export function computeEffectiveMcpEnabled(server: McpServerLike): boolean {

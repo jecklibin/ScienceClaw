@@ -136,7 +136,7 @@
                       <span class="badge-blue">{{ t('Platform') }}</span>
                       <span class="badge-muted">{{ server.transport }}</span>
                     </div>
-                    <p class="mt-2 line-clamp-2 text-sm leading-6 text-[var(--text-secondary)]">{{ server.description || t('No description') }}</p>
+                    <p class="mt-2 line-clamp-2 text-sm leading-6 text-[var(--text-secondary)]">{{ formatMcpServerDescription(server, t) }}</p>
                     <p class="mt-3 flex min-w-0 items-center gap-1.5 text-xs text-[var(--text-tertiary)]">
                       <Link2 :size="14" />
                       <span class="max-w-[520px] truncate font-mono">{{ formatServerEndpointText(server) }}</span>
@@ -597,7 +597,7 @@
           </div>
           <div class="max-h-[70vh] space-y-3 overflow-y-auto p-6">
             <div v-if="discoveredTools.length === 0" class="rounded-2xl border border-dashed border-slate-300 p-8 text-center text-sm text-[var(--text-tertiary)] dark:border-white/10">
-              {{ t('No tools returned by this MCP server.') }}
+              {{ isRpaGatewayServer(selectedServer) ? t('No RPA MCP tools published for gateway.') : t('No tools returned by this MCP server.') }}
             </div>
             <div v-for="tool in discoveredTools" :key="tool.name" class="rounded-2xl border border-slate-200 bg-slate-50/80 p-4 dark:border-white/10 dark:bg-white/[0.04]">
               <h4 class="text-sm font-bold text-[var(--text-primary)]">{{ tool.name }}</h4>
@@ -658,8 +658,10 @@ import {
 import { showErrorToast, showSuccessToast } from '../utils/toast';
 import {
   buildUnifiedMcpItems,
+  formatMcpServerDescription,
   formatMcpServerEndpoint,
   groupMcpServers,
+  isRpaGatewayServer,
   parseKeyValueTemplateText,
   parseHttpHeaderText,
   splitCredentialTemplateMap,

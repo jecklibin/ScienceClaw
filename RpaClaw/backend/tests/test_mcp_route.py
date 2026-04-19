@@ -579,6 +579,59 @@ def test_discover_tools_returns_marshaled_tools(monkeypatch):
     ]
 
 
+def test_discover_tools_for_rpa_gateway_uses_internal_registry(monkeypatch):
+    app = _build_app()
+    client = TestClient(app)
+
+    monkeypatch.setattr(
+        mcp_route,
+        "load_system_mcp_servers",
+        lambda: [
+            McpServerDefinition(
+                id="rpa_gateway",
+                name="RPA Tool Gateway",
+                description="Unified entry for published RPA MCP tools",
+                transport="streamable_http",
+                url="http://localhost:12001/api/v1/rpa-mcp/mcp",
+            )
+        ],
+    )
+    monkeypatch.setattr(mcp_route, "_list_user_mcp_servers", lambda user_id: [])
+
+    async def fake_rpa_gateway_tools(user_id: str):
+        assert user_id == "user-1"
+        return [
+            {
+                "name": "rpa_download_invoice",
+                "description": "Download invoice",
+                "input_schema": {"type": "object", "properties": {"month": {"type": "string"}}},
+                "output_schema": {"type": "object", "properties": {"success": {"type": "boolean"}}},
+            }
+        ]
+
+    class _RuntimeFactory:
+        def create_runtime(self, server):
+            raise AssertionError("RPA gateway discovery should not use the generic MCP SDK runtime")
+
+    monkeypatch.setattr(mcp_route, "_build_rpa_gateway_tools", fake_rpa_gateway_tools, raising=False)
+    monkeypatch.setattr(mcp_route, "McpSdkRuntimeFactory", lambda: _RuntimeFactory())
+
+    response = client.post("/api/v1/mcp/servers/system:rpa_gateway/discover-tools")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "server_key": "system:rpa_gateway",
+        "tools": [
+            {
+                "name": "rpa_download_invoice",
+                "description": "Download invoice",
+                "input_schema": {"type": "object", "properties": {"month": {"type": "string"}}},
+            }
+        ],
+        "tool_count": 1,
+    }
+
+
 def test_discover_tools_resolves_user_mcp_credentials_before_runtime(monkeypatch):
     app = _build_app()
     client = TestClient(app)

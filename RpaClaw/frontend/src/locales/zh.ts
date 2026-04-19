@@ -843,5 +843,7 @@ export default {
   'RPA MCP tool': 'RPA MCP \u5de5\u5177',
   'No private MCP servers or RPA MCP tools yet.': '\u8fd8\u6ca1\u6709\u79c1\u6709 MCP \u670d\u52a1\u6216 RPA MCP \u5de5\u5177\u3002',
   'Use Add MCP to connect a server or create one from an RPA recording.': '\u4f7f\u7528\u201c\u6dfb\u52a0 MCP\u201d\u8fde\u63a5\u670d\u52a1\uff0c\u6216\u4ece RPA \u5f55\u5236\u521b\u5efa\u5de5\u5177\u3002',
-  'Search MCP servers or tools...': '\u641c\u7d22 MCP \u670d\u52a1\u6216\u5de5\u5177...'
+  'Search MCP servers or tools...': '\u641c\u7d22 MCP \u670d\u52a1\u6216\u5de5\u5177...',
+  'RPA gateway platform description': '\u7edf\u4e00\u66b4\u9732 Tools \u4e2d\u5df2\u53d1\u5e03\u7684 RPA MCP \u5de5\u5177\uff1bAgent \u8fde\u63a5\u8fd9\u4e2a\u5165\u53e3\u540e\uff0c\u53ef\u4ee5\u53d1\u73b0\u5e76\u4ee5\u8c03\u7528\u65b9\u7684\u7528\u6237\u4e0a\u4e0b\u6587\u6267\u884c\u8fd9\u4e9b\u5de5\u5177\u3002',
+  'No RPA MCP tools published for gateway.': '\u5c1a\u672a\u53d1\u5e03 RPA MCP \u5de5\u5177\u3002\u8bf7\u5148\u5728 Tools \u4e2d\u4ece RPA \u5f55\u5236\u521b\u5efa\u5de5\u5177\u3002'
 }
