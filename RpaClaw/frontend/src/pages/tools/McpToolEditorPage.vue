@@ -12,6 +12,7 @@ import {
   type RpaMcpPreview,
 } from '@/api/rpaMcp';
 import {
+  buildRpaRecorderLocation,
   buildPreviewDraftSignature,
   focusPreviewTestSection,
   getPreviewTestStatus,
@@ -50,8 +51,6 @@ const cookieDomain = ref('');
 const previewTestSection = ref<HTMLElement | null>(null);
 const argumentValues = reactive<Record<string, unknown>>({});
 const source = computed(() => typeof route.query.source === 'string' ? route.query.source : '');
-const hasRpaSource = computed(() => Boolean(sessionId.value));
-
 const formatJsonBlock = (value: unknown) => JSON.stringify(value ?? {}, null, 2);
 
 const parseJsonObjectText = (text: string, errorMessage: string) => {
@@ -460,7 +459,7 @@ onMounted(loadPreview);
               <button
                 type="button"
                 class="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-[#8930b0] to-[#004be2] px-4 py-2 text-sm font-bold text-white"
-                @click="router.push('/rpa/recorder')"
+                @click="router.push(buildRpaRecorderLocation())"
               >
                 <Wand2 :size="16" />
                 Open RPA Recorder

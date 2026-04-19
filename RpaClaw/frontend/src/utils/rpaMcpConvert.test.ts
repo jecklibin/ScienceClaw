@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  buildRpaRecorderLocation,
   buildRpaToolEditorLocation,
   buildPreviewDraftSignature,
   focusPreviewTestSection,
@@ -21,6 +22,17 @@ describe('buildRpaToolEditorLocation', () => {
         sessionId: 'session-1',
         skillName: 'github-project-issue',
         skillDescription: 'Fetch the first issue',
+      },
+    });
+  });
+});
+
+describe('buildRpaRecorderLocation', () => {
+  it('routes Tool Studio users into the recorder with MCP creation intent', () => {
+    expect(buildRpaRecorderLocation()).toEqual({
+      path: '/rpa/recorder',
+      query: {
+        source: 'mcp-tool-studio',
       },
     });
   });

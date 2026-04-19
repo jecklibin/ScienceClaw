@@ -32,6 +32,15 @@ export function buildRpaToolEditorLocation(input: {
   };
 }
 
+export function buildRpaRecorderLocation() {
+  return {
+    path: '/rpa/recorder',
+    query: {
+      source: 'mcp-tool-studio',
+    },
+  };
+}
+
 function normalizeList(items: string[]): string[] {
   return items.map((item) => item.trim()).filter(Boolean);
 }
