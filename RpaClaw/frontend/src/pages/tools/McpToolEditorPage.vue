@@ -6,8 +6,11 @@ import { ArrowLeft, Beaker, ChevronDown, ChevronUp, Save, Shield, Wand2 } from '
 
 import {
   createRpaMcpTool,
+  getRpaMcpTool,
   previewRpaMcpTool,
   testPreviewRpaMcpTool,
+  testRpaMcpTool,
+  updateRpaMcpTool,
   type JsonSchemaObject,
   type RpaMcpExecutionResult,
   type RpaMcpPreview,
@@ -98,8 +101,14 @@ const cookieMode = ref<CookieInputMode>('cookie_header');
 const cookieText = ref('');
 const cookieDomain = ref('');
 const previewTestSection = ref<HTMLElement | null>(null);
-const argumentValues = reactive<Record<string, unknown>>({});
+type ArgumentValue = string;
+const argumentValues = reactive<Record<string, ArgumentValue>>({});
 const source = computed(() => typeof route.query.source === 'string' ? route.query.source : '');
+const savedToolId = computed(() => typeof route.params.toolId === 'string' ? route.params.toolId : '');
+const editorMode = computed(() => typeof route.query.mode === 'string' ? route.query.mode : 'edit');
+const isExistingTool = computed(() => Boolean(savedToolId.value));
+const isViewMode = computed(() => isExistingTool.value && editorMode.value === 'view');
+const canTuneRecordedSteps = computed(() => Boolean(sessionId.value) && !isExistingTool.value && !isViewMode.value);
 const formatJsonBlock = (value: unknown) => JSON.stringify(value ?? {}, null, 2);
 
 const parseLocator = (raw: unknown): ParsedLocator | null => {
@@ -352,12 +361,14 @@ const previewTestStatus = computed(() => getPreviewTestStatus({
   hasConfigChangesSinceLastTest: hasConfigChangesSinceLastTest.value,
 }));
 const previewTestStatusLabel = computed(() => {
+  if (isExistingTool.value && !testResult.value) return t('MCP Editor Saved MCP tool');
   if (previewTestStatus.value === 'success') return t('MCP Editor Preview test passed');
   if (previewTestStatus.value === 'stale') return t('MCP Editor Preview test is out of date');
   if (previewTestStatus.value === 'failed') return t('MCP Editor Preview test failed');
   return t('MCP Editor Preview test required');
 });
 const previewTestStatusDescription = computed(() => {
+  if (isExistingTool.value && !testResult.value) return t('MCP Editor Existing tools can be viewed, edited, and tested from this page.');
   if (previewTestStatus.value === 'success') return t('MCP Editor This draft can now be saved as an MCP tool.');
   if (previewTestStatus.value === 'stale') return t('MCP Editor You changed the draft after testing. Run preview test again before saving.');
   if (previewTestStatus.value === 'failed') return t('MCP Editor Fix the current draft inputs and run preview test again before saving.');
@@ -374,10 +385,18 @@ const cookieInputPlaceholder = computed(() => {
   if (cookieMode.value === 'header_value') return 'sid=abc; theme=dark';
   return '[{"name":"sid","value":"abc","domain":".example.com","path":"/"}]';
 });
-const pageTitle = computed(() => source.value === 'rpa-session' ? t('MCP Editor Create MCP Tool') : t('MCP Editor MCP Tool Editor'));
-const pageDescription = computed(() => source.value === 'rpa-session'
-  ? t('MCP Editor Publish an RPA recording as a reusable MCP tool.')
-  : t('MCP Editor Edit MCP tool metadata, schemas, preview test state, and recorded steps.'));
+const pageTitle = computed(() => {
+  if (isViewMode.value) return t('MCP Editor View MCP Tool');
+  if (isExistingTool.value) return t('MCP Editor Edit MCP Tool');
+  return source.value === 'rpa-session' ? t('MCP Editor Create MCP Tool') : t('MCP Editor MCP Tool Editor');
+});
+const pageDescription = computed(() => {
+  if (isViewMode.value) return t('MCP Editor View saved MCP tool metadata, schemas, test state, and recorded steps.');
+  if (isExistingTool.value) return t('MCP Editor Edit saved MCP tool metadata, schemas, test state, and recorded steps.');
+  return source.value === 'rpa-session'
+    ? t('MCP Editor Publish an RPA recording as a reusable MCP tool.')
+    : t('MCP Editor Edit MCP tool metadata, schemas, preview test state, and recorded steps.');
+});
 
 const loadRecordedSession = async () => {
   if (!sessionId.value) {
@@ -423,9 +442,9 @@ const loadPreview = async () => {
     clearArgumentValues();
     for (const field of getParamFields(preview.value)) {
       if (field.defaultValue !== undefined) {
-        argumentValues[field.key] = field.type === 'boolean' ? Boolean(field.defaultValue) : String(field.defaultValue);
+        argumentValues[field.key] = field.type === 'boolean' ? String(Boolean(field.defaultValue)) : String(field.defaultValue);
       } else {
-        argumentValues[field.key] = field.type === 'boolean' ? false : '';
+        argumentValues[field.key] = field.type === 'boolean' ? 'false' : '';
       }
     }
     hasSuccessfulTest.value = Boolean(preview.value.output_examples?.length);
@@ -434,6 +453,44 @@ const loadPreview = async () => {
     showErrorToast(error?.message || t('MCP Editor Failed to load MCP preview'));
   } finally {
     loading.value = false;
+  }
+};
+
+const applyToolToEditor = (tool: RpaMcpPreview) => {
+  preview.value = tool;
+  toolName.value = tool.name;
+  description.value = tool.description || '';
+  postAuthStartUrl.value = tool.post_auth_start_url || '';
+  allowedDomainsText.value = (tool.allowed_domains || []).join('\n');
+  outputSchemaText.value = formatJsonBlock(tool.output_schema || tool.recommended_output_schema || {});
+  recordedSteps.value = (tool.steps || []) as unknown as RecordedStepItem[];
+  cookieSectionOpen.value = Boolean(tool.requires_cookies);
+  cookieDomain.value = allowedCookieDomains.value[0] || '';
+  clearArgumentValues();
+  for (const field of getParamFields(tool)) {
+    if (field.defaultValue !== undefined) {
+      argumentValues[field.key] = field.type === 'boolean' ? String(Boolean(field.defaultValue)) : String(field.defaultValue);
+    } else {
+      argumentValues[field.key] = field.type === 'boolean' ? 'false' : '';
+    }
+  }
+  hasSuccessfulTest.value = true;
+  lastSuccessfulTestSignature.value = currentPreviewSignature.value;
+};
+
+const loadExistingTool = async () => {
+  if (!savedToolId.value) return;
+  loading.value = true;
+  stepsLoading.value = true;
+  try {
+    const tool = await getRpaMcpTool(savedToolId.value);
+    applyToolToEditor(tool);
+  } catch (error: any) {
+    console.error(error);
+    showErrorToast(error?.message || t('MCP Editor Failed to load MCP tool'));
+  } finally {
+    loading.value = false;
+    stepsLoading.value = false;
   }
 };
 
@@ -449,7 +506,7 @@ const buildArgumentsPayload = () => {
       continue;
     }
     if (field.type === 'boolean') {
-      payload[field.key] = Boolean(rawValue);
+      payload[field.key] = rawValue === 'true';
       continue;
     }
     if (field.type === 'number' || field.type === 'integer') {
@@ -474,7 +531,7 @@ const buildArgumentsPayload = () => {
 };
 
 const runPreviewTest = async () => {
-  if (!sessionId.value || !preview.value) return;
+  if (!preview.value) return;
   testing.value = true;
   try {
     const argumentsPayload = buildArgumentsPayload();
@@ -484,17 +541,27 @@ const runPreviewTest = async () => {
       domain: cookieMode.value === 'playwright_json' ? undefined : cookieDomain.value,
       required: Boolean(preview.value.requires_cookies),
     });
-    testResult.value = await testPreviewRpaMcpTool(sessionId.value, {
-      name: toolName.value,
-      description: description.value,
-      allowed_domains: getAllowedDomains(),
-      post_auth_start_url: postAuthStartUrl.value,
-      arguments: argumentsPayload,
-      cookies: cookies as Array<Record<string, unknown>> | undefined,
-    });
+    if (isExistingTool.value) {
+      testResult.value = await testRpaMcpTool(savedToolId.value, {
+        arguments: argumentsPayload,
+        cookies: cookies as Array<Record<string, unknown>> | undefined,
+      });
+    } else {
+      if (!sessionId.value) return;
+      testResult.value = await testPreviewRpaMcpTool(sessionId.value, {
+        name: toolName.value,
+        description: description.value,
+        allowed_domains: getAllowedDomains(),
+        post_auth_start_url: postAuthStartUrl.value,
+        arguments: argumentsPayload,
+        cookies: cookies as Array<Record<string, unknown>> | undefined,
+      });
+    }
     hasSuccessfulTest.value = Boolean(testResult.value.success);
     lastSuccessfulTestSignature.value = testResult.value.success ? currentPreviewSignature.value : null;
-    await loadPreview();
+    if (!isExistingTool.value) {
+      await loadPreview();
+    }
     showSuccessToast(testResult.value.message || t('MCP Editor Preview test completed'));
   } catch (error: any) {
     hasSuccessfulTest.value = false;
@@ -507,22 +574,34 @@ const runPreviewTest = async () => {
 };
 
 const saveTool = async () => {
-  if (!sessionId.value) return;
-  if (!hasMatchingSuccessfulTest.value) {
+  if (isViewMode.value) return;
+  if (!isExistingTool.value && !sessionId.value) return;
+  if (!isExistingTool.value && !hasMatchingSuccessfulTest.value) {
     showErrorToast(t('MCP Editor Run a successful preview test before saving this tool'));
     focusPreviewTestSection(previewTestSection.value);
     return;
   }
   saving.value = true;
   try {
-    await createRpaMcpTool(sessionId.value, {
+    const payload = {
       name: toolName.value,
       description: description.value,
       post_auth_start_url: postAuthStartUrl.value,
       allowed_domains: getAllowedDomains(),
       output_schema: parseJsonObjectText(outputSchemaText.value, t('Output schema JSON invalid')),
-    });
-    showSuccessToast(t('MCP Editor Converted tool saved'));
+      output_schema_confirmed: true,
+    };
+    if (isExistingTool.value) {
+      const updated = await updateRpaMcpTool(savedToolId.value, {
+        ...payload,
+        enabled: preview.value?.enabled ?? true,
+      });
+      applyToolToEditor(updated);
+      showSuccessToast(t('MCP Editor Tool updated'));
+    } else {
+      await createRpaMcpTool(sessionId.value, payload);
+      showSuccessToast(t('MCP Editor Converted tool saved'));
+    }
     router.push('/chat/tools');
   } catch (error: any) {
     showErrorToast(error?.message || t('MCP Editor Failed to save MCP tool'));
@@ -532,7 +611,7 @@ const saveTool = async () => {
 };
 
 const promoteLocator = async (stepIndex: number, candidateIndex: number) => {
-  if (!sessionId.value || promotingStepIndex.value !== null) return;
+  if (!canTuneRecordedSteps.value || promotingStepIndex.value !== null) return;
   promotingStepIndex.value = stepIndex;
   try {
     await apiClient.post(`/rpa/session/${sessionId.value}/step/${stepIndex}/locator`, {
@@ -550,6 +629,10 @@ const promoteLocator = async (stepIndex: number, candidateIndex: number) => {
 };
 
 onMounted(async () => {
+  if (isExistingTool.value) {
+    await loadExistingTool();
+    return;
+  }
   await Promise.all([loadRecordedSession(), loadPreview()]);
 });
 </script>
@@ -564,12 +647,21 @@ onMounted(async () => {
           {{ t('Back') }}
         </button>
         <button
+          v-if="isViewMode"
+          class="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-[#8930b0] to-[#004be2] px-5 py-2 text-sm font-bold text-white"
+          @click="router.push({ path: `/chat/tools/mcp/${savedToolId}`, query: { mode: 'edit' } })"
+        >
+          <Save :size="16" />
+          {{ t('Edit') }}
+        </button>
+        <button
+          v-else
           class="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-[#8930b0] to-[#004be2] px-5 py-2 text-sm font-bold text-white disabled:cursor-not-allowed disabled:opacity-60"
-          :disabled="saving || loading || !hasMatchingSuccessfulTest"
+          :disabled="saving || loading || (!isExistingTool && !hasMatchingSuccessfulTest)"
           @click="saveTool"
         >
           <Save :size="16" />
-          {{ saving ? t('Saving...') : t('MCP Editor Save as MCP Tool') }}
+          {{ saving ? t('Saving...') : (isExistingTool ? t('Save changes') : t('MCP Editor Save as MCP Tool')) }}
         </button>
       </div>
 
@@ -596,22 +688,22 @@ onMounted(async () => {
               <div class="grid gap-4 md:grid-cols-2">
                 <label class="block space-y-2">
                   <span class="text-sm font-semibold">{{ t('MCP Editor Tool name') }}</span>
-                  <input v-model="toolName" class="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm outline-none dark:border-white/10 dark:bg-white/5" />
+                  <input v-model="toolName" :disabled="isViewMode" class="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm outline-none disabled:cursor-not-allowed disabled:opacity-70 dark:border-white/10 dark:bg-white/5" />
                 </label>
                 <label class="block space-y-2">
                   <span class="text-sm font-semibold">{{ t('MCP Editor Post-login start URL') }}</span>
-                  <input v-model="postAuthStartUrl" class="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm outline-none dark:border-white/10 dark:bg-white/5" />
+                  <input v-model="postAuthStartUrl" :disabled="isViewMode" class="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm outline-none disabled:cursor-not-allowed disabled:opacity-70 dark:border-white/10 dark:bg-white/5" />
                 </label>
               </div>
 
               <label class="mt-4 block space-y-2">
                 <span class="text-sm font-semibold">{{ t('MCP Editor Description') }}</span>
-                <textarea v-model="description" rows="3" class="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm outline-none dark:border-white/10 dark:bg-white/5" />
+                <textarea v-model="description" :disabled="isViewMode" rows="3" class="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm outline-none disabled:cursor-not-allowed disabled:opacity-70 dark:border-white/10 dark:bg-white/5" />
               </label>
 
               <label class="mt-4 block space-y-2">
                 <span class="text-sm font-semibold">{{ t('MCP Editor Allowed domains') }}</span>
-                <textarea v-model="allowedDomainsText" rows="4" class="w-full rounded-md border border-slate-200 bg-white px-3 py-2 font-mono text-sm outline-none dark:border-white/10 dark:bg-white/5" />
+                <textarea v-model="allowedDomainsText" :disabled="isViewMode" rows="4" class="w-full rounded-md border border-slate-200 bg-white px-3 py-2 font-mono text-sm outline-none disabled:cursor-not-allowed disabled:opacity-70 dark:border-white/10 dark:bg-white/5" />
                 <span class="block text-xs text-slate-500 dark:text-slate-400">{{ t('MCP Editor Allowed domains hint') }}</span>
               </label>
             </section>
@@ -762,8 +854,8 @@ onMounted(async () => {
                             <button
                               type="button"
                               class="shrink-0 rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors"
-                              :class="candidate.selected ? 'cursor-default border-slate-200 text-slate-400 dark:border-white/10 dark:text-slate-500' : 'border-violet-300 text-violet-700 hover:bg-violet-50 dark:border-violet-400/30 dark:text-violet-200 dark:hover:bg-violet-500/10'"
-                              :disabled="candidate.selected || promotingStepIndex === idx"
+                              :class="candidate.selected || !canTuneRecordedSteps ? 'cursor-default border-slate-200 text-slate-400 dark:border-white/10 dark:text-slate-500' : 'border-violet-300 text-violet-700 hover:bg-violet-50 dark:border-violet-400/30 dark:text-violet-200 dark:hover:bg-violet-500/10'"
+                              :disabled="candidate.selected || promotingStepIndex === idx || !canTuneRecordedSteps"
                               @click.stop="promoteLocator(idx, candidateIndex)"
                             >
                               {{ promotingStepIndex === idx ? t('MCP Editor Switching...') : (candidate.selected ? t('MCP Editor Current') : t('MCP Editor Use this locator')) }}
@@ -847,8 +939,8 @@ onMounted(async () => {
               <label v-for="field in paramFields" :key="field.key" class="block space-y-2">
                 <span class="text-sm font-semibold">{{ field.key }}<template v-if="field.required"> *</template></span>
                 <select v-if="field.type === 'boolean'" v-model="argumentValues[field.key]" class="w-full rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none dark:border-white/10 dark:bg-white/5">
-                  <option :value="true">true</option>
-                  <option :value="false">false</option>
+                  <option value="true">true</option>
+                  <option value="false">false</option>
                 </select>
                 <textarea
                   v-else-if="field.type === 'array' || field.type === 'object'"
@@ -935,7 +1027,7 @@ onMounted(async () => {
                     {{ schemaSummary.outputFields }} {{ t('MCP Editor fields') }}
                   </span>
                 </div>
-                <textarea v-model="outputSchemaText" class="min-h-[260px] w-full rounded-2xl border border-slate-200 bg-slate-50 p-3 font-mono text-xs outline-none dark:border-white/10 dark:bg-[#101115]" spellcheck="false"></textarea>
+                <textarea v-model="outputSchemaText" :disabled="isViewMode" class="min-h-[260px] w-full rounded-2xl border border-slate-200 bg-slate-50 p-3 font-mono text-xs outline-none disabled:cursor-not-allowed disabled:opacity-70 dark:border-white/10 dark:bg-[#101115]" spellcheck="false"></textarea>
               </div>
             </div>
           </section>

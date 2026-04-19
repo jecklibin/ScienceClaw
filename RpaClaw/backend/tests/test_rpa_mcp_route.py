@@ -363,6 +363,30 @@ def test_update_tool_route_persists_confirmed_output_schema(monkeypatch):
     assert registry.tool.output_schema["properties"]["data"]["properties"]["invoice_total"]["type"] == "string"
 
 
+def test_update_tool_route_allows_clearing_optional_metadata(monkeypatch):
+    app = _build_rpa_mcp_app()
+    client = TestClient(app)
+    tool = _sample_tool()
+    registry = _FakeRegistry(tool)
+
+    monkeypatch.setattr(rpa_mcp_route, "RpaMcpToolRegistry", lambda: registry)
+
+    response = client.put(
+        "/api/v1/rpa-mcp/tools/tool-1",
+        json={
+            "description": "",
+            "allowed_domains": [],
+            "post_auth_start_url": "",
+            "enabled": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["description"] == ""
+    assert response.json()["data"]["allowed_domains"] == []
+    assert response.json()["data"]["post_auth_start_url"] == ""
+
+
 def test_preview_test_route_returns_execution_result_and_updates_preview_draft(monkeypatch):
     app = _build_rpa_mcp_app()
     client = TestClient(app)

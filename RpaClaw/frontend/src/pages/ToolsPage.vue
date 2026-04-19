@@ -157,115 +157,103 @@
           <div class="flex flex-col gap-3 border-b border-slate-200 pb-4 dark:border-white/10 sm:flex-row sm:items-end sm:justify-between">
             <div>
               <h2 class="text-xl font-black tracking-tight text-[var(--text-primary)]">{{ t('My MCP') }}</h2>
-              <p class="mt-1 text-sm text-[var(--text-tertiary)]">{{ t('Private MCP servers for your account.') }}</p>
+              <p class="mt-1 text-sm text-[var(--text-tertiary)]">{{ t('Manage private MCP servers and RPA-recorded MCP tools together.') }}</p>
             </div>
-            <div class="flex items-center gap-2">
-              <span class="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-[var(--text-secondary)] dark:bg-white/10">{{ t('server count summary', { count: groupedMcpServers.user.length }) }}</span>
-              <button class="inline-flex items-center gap-2 rounded-xl bg-gradient-to-br from-[#8930b0] to-[#004be2] px-4 py-2 text-sm font-bold text-white shadow-lg transition hover:-translate-y-0.5 active:translate-y-0" @click="openCreateDialog">
+            <div class="relative flex items-center gap-2">
+              <span class="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-[var(--text-secondary)] dark:bg-white/10">{{ t('mcp inventory count summary', { count: unifiedUserMcpItems.length }) }}</span>
+              <button class="inline-flex items-center gap-2 rounded-xl bg-gradient-to-br from-[#8930b0] to-[#004be2] px-4 py-2 text-sm font-bold text-white shadow-lg transition hover:-translate-y-0.5 active:translate-y-0" @click="createChoiceOpen = !createChoiceOpen">
                 <Plus :size="16" />
                 {{ t('Add MCP') }}
               </button>
+              <div v-if="createChoiceOpen" class="absolute right-0 top-full z-20 mt-2 w-72 overflow-hidden rounded-2xl border border-slate-200 bg-white p-2 text-sm shadow-xl dark:border-white/10 dark:bg-[#17181d]">
+                <button class="flex w-full items-start gap-3 rounded-xl px-3 py-3 text-left transition hover:bg-slate-50 dark:hover:bg-white/[0.06]" @click="startCreateServer">
+                  <Server :size="18" class="mt-0.5 text-blue-600 dark:text-blue-300" />
+                  <span>
+                    <span class="block font-bold text-[var(--text-primary)]">{{ t('Connect MCP server') }}</span>
+                    <span class="mt-0.5 block text-xs leading-5 text-[var(--text-tertiary)]">{{ t('Connect an existing stdio, SSE, or Streamable HTTP MCP endpoint.') }}</span>
+                  </span>
+                </button>
+                <button class="flex w-full items-start gap-3 rounded-xl px-3 py-3 text-left transition hover:bg-slate-50 dark:hover:bg-white/[0.06]" @click="startCreateRpaMcpTool">
+                  <Wrench :size="18" class="mt-0.5 text-cyan-600 dark:text-cyan-200" />
+                  <span>
+                    <span class="block font-bold text-[var(--text-primary)]">{{ t('Create from RPA recording') }}</span>
+                    <span class="mt-0.5 block text-xs leading-5 text-[var(--text-tertiary)]">{{ t('Record browser automation and publish it as an MCP tool.') }}</span>
+                  </span>
+                </button>
+              </div>
             </div>
           </div>
-          <div v-if="groupedMcpServers.user.length === 0" class="rounded-3xl border border-dashed border-slate-300 bg-white/80 p-10 text-center text-sm text-[var(--text-tertiary)] dark:border-white/10 dark:bg-white/[0.04]">
+          <div v-if="unifiedUserMcpItems.length === 0" class="rounded-3xl border border-dashed border-slate-300 bg-white/80 p-10 text-center text-sm text-[var(--text-tertiary)] dark:border-white/10 dark:bg-white/[0.04]">
             <Database class="mx-auto mb-3" :size="30" />
-            {{ t('No private MCP servers yet.') }}
+            <p>{{ t('No private MCP servers or RPA MCP tools yet.') }}</p>
+            <p class="mt-2">{{ t('Use Add MCP to connect a server or create one from an RPA recording.') }}</p>
           </div>
           <div v-else class="space-y-4">
-            <article v-for="server in groupedMcpServers.user" :key="server.server_key" class="mcp-card">
+            <article v-for="item in unifiedUserMcpItems" :key="`${item.kind}:${item.id}`" class="mcp-card">
               <div class="mcp-card-layout">
-                <div class="mcp-card-main">
+                <div v-if="item.kind === 'server'" class="mcp-card-main">
                   <div class="mcp-icon bg-slate-100 text-[var(--text-secondary)] dark:bg-white/10 dark:text-slate-200">
-                    <Terminal v-if="server.transport === 'stdio'" :size="22" />
+                    <Terminal v-if="item.server.transport === 'stdio'" :size="22" />
                     <Server v-else :size="22" />
                   </div>
                   <div class="min-w-0">
                     <div class="flex flex-wrap items-center gap-2">
-                      <h3 class="truncate text-base font-bold text-[var(--text-primary)]">{{ server.name }}</h3>
-                      <span class="badge-violet">{{ t('Private') }}</span>
-                      <span class="badge-muted">{{ server.transport }}</span>
+                      <h3 class="truncate text-base font-bold text-[var(--text-primary)]">{{ item.server.name }}</h3>
+                      <span class="badge-violet">{{ t('MCP server') }}</span>
+                      <span class="badge-muted">{{ item.server.transport }}</span>
                     </div>
-                    <p class="mt-2 line-clamp-2 text-sm leading-6 text-[var(--text-secondary)]">{{ server.description || t('No description') }}</p>
+                    <p class="mt-2 line-clamp-2 text-sm leading-6 text-[var(--text-secondary)]">{{ item.server.description || t('No description') }}</p>
                     <p class="mt-3 flex min-w-0 items-center gap-1.5 text-xs text-[var(--text-tertiary)]">
                       <Link2 :size="14" />
-                      <span class="max-w-[520px] truncate font-mono">{{ formatServerEndpointText(server) }}</span>
+                      <span class="max-w-[520px] truncate font-mono">{{ formatServerEndpointText(item.server) }}</span>
                     </p>
                   </div>
                 </div>
-                <div class="mcp-actions">
-                  <span class="status-pill" :class="server.enabled ? 'status-on' : 'status-warn'">{{ server.enabled ? t('Enabled') : t('Disabled') }}</span>
-                  <button class="action-muted" @click="openEditDialog(server)">
-                    <Pencil :size="14" class="inline" />
-                    {{ t('Edit') }}
-                  </button>
-                  <button class="action-blue" @click="runTest(server)">{{ t('Test') }}</button>
-                  <button class="action-blue" @click="openToolsDialog(server)">{{ t('Tools') }}</button>
-                  <button class="action-danger" @click="deletePrivateServer(server)">{{ t('Delete') }}</button>
-                </div>
-              </div>
-            </article>
-          </div>
-        </section>
-        <section class="space-y-4">
-          <div class="flex flex-col gap-3 border-b border-slate-200 pb-4 dark:border-white/10 sm:flex-row sm:items-end sm:justify-between">
-            <div>
-              <h2 class="text-xl font-black tracking-tight text-[var(--text-primary)]">MCP Tool Studio</h2>
-              <p class="mt-1 text-sm text-[var(--text-tertiary)]">Manage published RPA-backed tools and create new MCP tools from recordings.</p>
-            </div>
-            <div class="flex items-center gap-2">
-              <span class="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-[var(--text-secondary)] dark:bg-white/10">{{ t('server count summary', { count: rpaMcpTools.length }) }}</span>
-              <button
-                type="button"
-                class="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-[var(--text-primary)] transition hover:bg-slate-50 dark:border-white/10 dark:bg-white/[0.05] dark:hover:bg-white/[0.08]"
-                @click="router.push('/chat/tools/mcp/new')"
-              >
-                <Plus :size="16" />
-                New MCP Tool
-              </button>
-            </div>
-          </div>
-          <div v-if="rpaMcpTools.length === 0" class="rounded-3xl border border-dashed border-slate-300 bg-white/80 p-10 text-center text-sm text-[var(--text-tertiary)] dark:border-white/10 dark:bg-white/[0.04]">
-            <p>No MCP tools published yet.</p>
-            <p class="mt-2">Create one from an RPA recording to expose it through the shared gateway.</p>
-            <button
-              type="button"
-              class="mt-5 inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-[var(--text-primary)] transition hover:bg-slate-50 dark:border-white/10 dark:bg-white/[0.05] dark:hover:bg-white/[0.08]"
-              @click="router.push('/chat/tools/mcp/new')"
-            >
-              <Plus :size="16" />
-              Create from recording
-            </button>
-          </div>
-          <div v-else class="space-y-4">
-            <article v-for="tool in rpaMcpTools" :key="tool.id" class="mcp-card">
-              <div class="mcp-card-layout">
-                <div class="mcp-card-main">
+                <div v-else class="mcp-card-main">
                   <div class="mcp-icon bg-cyan-100 text-cyan-700 dark:bg-cyan-400/15 dark:text-cyan-200"><Wrench :size="22" /></div>
                   <div class="min-w-0">
                     <div class="flex flex-wrap items-center gap-2">
-                      <h3 class="truncate text-base font-bold text-[var(--text-primary)]">{{ tool.name }}</h3>
-                      <span class="badge-blue">Gateway</span>
-                      <span class="badge-muted">{{ tool.tool_name }}</span>
+                      <h3 class="truncate text-base font-bold text-[var(--text-primary)]">{{ item.tool.name }}</h3>
+                      <span class="badge-blue">{{ t('RPA MCP tool') }}</span>
+                      <span class="badge-muted">{{ item.tool.tool_name }}</span>
                     </div>
-                    <p class="mt-2 line-clamp-2 text-sm leading-6 text-[var(--text-secondary)]">{{ tool.description || t('No description') }}</p>
-                    <p class="mt-3 text-xs text-[var(--text-tertiary)]">{{ t('Allowed domains') }}: {{ tool.allowed_domains.join(', ') || '-' }}</p>
-                    <p class="mt-1 text-xs text-[var(--text-tertiary)]">{{ t('Cookie auth') }}: {{ tool.requires_cookies ? t('Required') : t('Optional') }}</p>
+                    <p class="mt-2 line-clamp-2 text-sm leading-6 text-[var(--text-secondary)]">{{ item.tool.description || t('No description') }}</p>
+                    <p class="mt-3 text-xs text-[var(--text-tertiary)]">{{ t('Allowed domains') }}: {{ item.tool.allowed_domains.join(', ') || '-' }}</p>
+                    <p class="mt-1 text-xs text-[var(--text-tertiary)]">{{ t('Cookie auth') }}: {{ item.tool.requires_cookies ? t('Required') : t('Optional') }}</p>
                     <details class="mt-3 rounded-2xl border border-slate-200 bg-slate-50/80 p-3 text-xs dark:border-white/10 dark:bg-white/[0.04]">
                       <summary class="cursor-pointer font-semibold text-[var(--text-primary)]">{{ t('Preview') }}</summary>
                       <div class="mt-3 font-semibold text-[var(--text-primary)]">{{ t('Input schema') }}</div>
-                      <pre class="mt-3 overflow-x-auto rounded-xl border border-slate-200 bg-white p-3 text-xs text-[var(--text-secondary)] dark:border-white/10 dark:bg-[#101115]"><code>{{ JSON.stringify(tool.input_schema || {}, null, 2) }}</code></pre>
+                      <pre class="mt-3 overflow-x-auto rounded-xl border border-slate-200 bg-white p-3 text-xs text-[var(--text-secondary)] dark:border-white/10 dark:bg-[#101115]"><code>{{ JSON.stringify(item.tool.input_schema || {}, null, 2) }}</code></pre>
                       <div class="mt-3 font-semibold text-[var(--text-primary)]">{{ t('Output schema') }}</div>
-                      <pre class="mt-3 overflow-x-auto rounded-xl border border-slate-200 bg-white p-3 text-xs text-[var(--text-secondary)] dark:border-white/10 dark:bg-[#101115]"><code>{{ JSON.stringify(tool.output_schema || tool.recommended_output_schema || {}, null, 2) }}</code></pre>
-                      <div class="mt-3 text-[var(--text-secondary)]">{{ t('Removed login steps') }}: {{ tool.sanitize_report?.removed_steps?.join(', ') || '-' }}</div>
-                      <div class="mt-1 text-[var(--text-secondary)]">{{ t('Sanitize warnings') }}: {{ tool.sanitize_report?.warnings?.join(' | ') || '-' }}</div>
+                      <pre class="mt-3 overflow-x-auto rounded-xl border border-slate-200 bg-white p-3 text-xs text-[var(--text-secondary)] dark:border-white/10 dark:bg-[#101115]"><code>{{ JSON.stringify(item.tool.output_schema || item.tool.recommended_output_schema || {}, null, 2) }}</code></pre>
+                      <div class="mt-3 text-[var(--text-secondary)]">{{ t('Removed login steps') }}: {{ item.tool.sanitize_report?.removed_steps?.join(', ') || '-' }}</div>
+                      <div class="mt-1 text-[var(--text-secondary)]">{{ t('Sanitize warnings') }}: {{ item.tool.sanitize_report?.warnings?.join(' | ') || '-' }}</div>
                     </details>
                   </div>
                 </div>
-                <div class="mcp-actions">
-                  <span class="status-pill" :class="tool.enabled ? 'status-on' : 'status-warn'">{{ tool.enabled ? t('Enabled') : t('Disabled') }}</span>
-                  <button class="action-muted" @click="toggleRpaMcpTool(tool)">{{ tool.enabled ? t('Disable') : t('Enable') }}</button>
-                  <button class="action-blue" @click="openGatewayToolTestDialog(tool)">{{ t('Test') }}</button>
-                  <button class="action-danger" @click="deleteGatewayTool(tool)">{{ t('Delete') }}</button>
+                <div v-if="item.kind === 'server'" class="mcp-actions">
+                  <span class="status-pill" :class="item.server.enabled ? 'status-on' : 'status-warn'">{{ item.server.enabled ? t('Enabled') : t('Disabled') }}</span>
+                  <button class="action-muted" @click="openEditDialog(item.server)">
+                    <Pencil :size="14" class="inline" />
+                    {{ t('Edit') }}
+                  </button>
+                  <button class="action-blue" @click="runTest(item.server)">{{ t('Test') }}</button>
+                  <button class="action-blue" @click="openToolsDialog(item.server)">{{ t('Tools') }}</button>
+                  <button class="action-danger" @click="deletePrivateServer(item.server)">{{ t('Delete') }}</button>
+                </div>
+                <div v-else class="mcp-actions">
+                  <span class="status-pill" :class="item.tool.enabled ? 'status-on' : 'status-warn'">{{ item.tool.enabled ? t('Enabled') : t('Disabled') }}</span>
+                  <button class="action-muted" @click="openGatewayToolView(item.tool)">
+                    <Eye :size="14" class="inline" />
+                    {{ t('View') }}
+                  </button>
+                  <button class="action-muted" @click="openGatewayToolEdit(item.tool)">
+                    <Pencil :size="14" class="inline" />
+                    {{ t('Edit') }}
+                  </button>
+                  <button class="action-muted" @click="toggleRpaMcpTool(item.tool)">{{ item.tool.enabled ? t('Disable') : t('Enable') }}</button>
+                  <button class="action-blue" @click="openGatewayToolTestDialog(item.tool)">{{ t('Test') }}</button>
+                  <button class="action-danger" @click="deleteGatewayTool(item.tool)">{{ t('Delete') }}</button>
                 </div>
               </div>
             </article>
@@ -487,8 +475,8 @@
                 <label v-for="field in gatewayParamFields" :key="field.key" class="field">
                   <span>{{ field.key }}<template v-if="field.required"> *</template></span>
                   <select v-if="field.type === 'boolean'" v-model="gatewayArgumentValues[field.key]" class="tools-input">
-                    <option :value="true">true</option>
-                    <option :value="false">false</option>
+                    <option value="true">true</option>
+                    <option value="false">false</option>
                   </select>
                   <textarea
                     v-else-if="field.type === 'array' || field.type === 'object'"
@@ -669,6 +657,7 @@ import {
 } from '../api/mcp';
 import { showErrorToast, showSuccessToast } from '../utils/toast';
 import {
+  buildUnifiedMcpItems,
   formatMcpServerEndpoint,
   groupMcpServers,
   parseKeyValueTemplateText,
@@ -689,6 +678,7 @@ const extLoading = ref(false);
 const mcpServers = ref<McpServerItem[]>([]);
 const credentials = ref<Credential[]>([]);
 const formOpen = ref(false);
+const createChoiceOpen = ref(false);
 const editingServer = ref<McpServerItem | null>(null);
 const savingForm = ref(false);
 const showAdvancedQuery = ref(false);
@@ -704,7 +694,8 @@ const gatewayCookieSectionOpen = ref(false);
 const gatewayCookieMode = ref<CookieInputMode>('cookie_header');
 const gatewayCookieText = ref('');
 const gatewayCookieDomain = ref('');
-const gatewayArgumentValues = reactive<Record<string, unknown>>({});
+type GatewayArgumentValue = string;
+const gatewayArgumentValues = reactive<Record<string, GatewayArgumentValue>>({});
 
 type GatewayParamField = {
   key: string;
@@ -748,14 +739,24 @@ const filteredMcpServers = computed(() => {
   );
 });
 
+const filteredRpaMcpTools = computed(() => {
+  const query = searchQuery.value.trim().toLowerCase();
+  if (!query) return rpaMcpTools.value;
+  return rpaMcpTools.value.filter((tool) =>
+    [tool.name, tool.description, tool.tool_name, ...(tool.allowed_domains || [])]
+      .some((value) => value?.toLowerCase().includes(query)),
+  );
+});
+
 const groupedMcpServers = computed(() => groupMcpServers(filteredMcpServers.value));
+const unifiedUserMcpItems = computed(() => buildUnifiedMcpItems(groupedMcpServers.value.user, filteredRpaMcpTools.value));
 const activeSummary = computed(() => (
   activeTab.value === 'external'
     ? t('external tools count summary', { count: externalTools.value.length })
-    : `${mcpServers.value.length} MCP servers · ${rpaMcpTools.value.length} MCP tools`
+    : t('mcp inventory count summary', { count: mcpServers.value.length + rpaMcpTools.value.length })
 ));
 const searchPlaceholder = computed(() => (
-  activeTab.value === 'external' ? t('Search tools...') : 'Search MCP servers or tools...'
+  activeTab.value === 'external' ? t('Search tools...') : t('Search MCP servers or tools...')
 ));
 
 const clearGatewayArgumentValues = () => {
@@ -911,15 +912,34 @@ const deleteExternalTool = async (tool: ExternalToolItem) => {
 };
 
 const openCreateDialog = () => {
+  createChoiceOpen.value = false;
   editingServer.value = null;
   resetForm();
   formOpen.value = true;
 };
 
+const startCreateServer = () => {
+  openCreateDialog();
+};
+
+const startCreateRpaMcpTool = () => {
+  createChoiceOpen.value = false;
+  router.push('/chat/tools/mcp/new');
+};
+
 const openEditDialog = (server: McpServerItem) => {
+  createChoiceOpen.value = false;
   editingServer.value = server;
   applyServerToForm(server);
   formOpen.value = true;
+};
+
+const openGatewayToolView = (tool: RpaMcpToolItem) => {
+  router.push({ path: `/chat/tools/mcp/${encodeURIComponent(tool.id)}`, query: { mode: 'view' } });
+};
+
+const openGatewayToolEdit = (tool: RpaMcpToolItem) => {
+  router.push({ path: `/chat/tools/mcp/${encodeURIComponent(tool.id)}`, query: { mode: 'edit' } });
 };
 
 const closeFormDialog = () => {
@@ -1081,10 +1101,10 @@ const openGatewayToolTestDialog = (tool: RpaMcpToolItem) => {
   clearGatewayArgumentValues();
   for (const field of getGatewayParamFields(tool)) {
     if (field.defaultValue !== undefined) {
-      gatewayArgumentValues[field.key] = field.type === 'boolean' ? Boolean(field.defaultValue) : String(field.defaultValue);
+      gatewayArgumentValues[field.key] = field.type === 'boolean' ? String(Boolean(field.defaultValue)) : String(field.defaultValue);
       continue;
     }
-    gatewayArgumentValues[field.key] = field.type === 'boolean' ? false : '';
+    gatewayArgumentValues[field.key] = field.type === 'boolean' ? 'false' : '';
   }
 };
 
@@ -1111,7 +1131,7 @@ const buildGatewayTestArguments = () => {
       continue;
     }
     if (field.type === 'boolean') {
-      payload[field.key] = Boolean(rawValue);
+      payload[field.key] = rawValue === 'true';
       continue;
     }
     if (field.type === 'number' || field.type === 'integer') {

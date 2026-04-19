@@ -251,17 +251,18 @@ async def update_rpa_mcp_tool(tool_id: str, body: UpdateToolRequest, current_use
     tool = await registry.get_owned(tool_id, str(current_user.id))
     if not tool:
         raise HTTPException(status_code=404, detail='RPA MCP tool not found')
-    if body.name:
+    fields_set = body.model_fields_set
+    if "name" in fields_set:
         tool.name = body.name
         tool.tool_name = RpaMcpConverter()._tool_name(body.name)
-    if body.description:
+    if "description" in fields_set:
         tool.description = body.description
     tool.enabled = body.enabled
-    if body.allowed_domains:
+    if "allowed_domains" in fields_set:
         tool.allowed_domains = body.allowed_domains
-    if body.post_auth_start_url:
+    if "post_auth_start_url" in fields_set:
         tool.post_auth_start_url = body.post_auth_start_url
-    if body.output_schema:
+    if "output_schema" in fields_set:
         tool.output_schema = body.output_schema
     if body.output_schema_confirmed is not None:
         tool.output_schema_confirmed = body.output_schema_confirmed
