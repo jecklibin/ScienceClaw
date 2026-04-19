@@ -1,7 +1,12 @@
-﻿from types import SimpleNamespace
+from types import SimpleNamespace
+
+import anyio
+import httpx
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
 
 from backend.route import rpa_mcp as rpa_mcp_route
 
@@ -52,6 +57,10 @@ class _FakeRegistry:
         assert tool_name == self.tool.tool_name
         assert user_id == "user-1"
         return self.tool
+
+    async def list_enabled_for_user(self, user_id):
+        assert user_id == "user-1"
+        return [self.tool]
 
     async def save(self, tool):
         self.tool = tool
@@ -330,6 +339,43 @@ def test_gateway_call_builds_runtime_executor(monkeypatch):
     assert structured["arguments"] == {"month": "2026-03"}
     assert structured["has_pw_loop_runner"] is True
     assert response.json()["result"]["outputSchema"]["properties"]["data"]["type"] == "object"
+
+
+def test_gateway_supports_streamable_http_mcp_sdk(monkeypatch):
+    app = _build_rpa_mcp_app()
+    tool = _sample_tool()
+    connector = _FakeConnector()
+
+    monkeypatch.setattr(rpa_mcp_route, "RpaMcpToolRegistry", lambda: _FakeRegistry(tool))
+    monkeypatch.setattr(rpa_mcp_route, "RpaMcpExecutor", lambda **kwargs: _FakeRouteExecutor(**kwargs))
+    monkeypatch.setattr(rpa_mcp_route, "get_cdp_connector", lambda: connector)
+
+    async def fake_get_session(session_id):
+        return SimpleNamespace(id=session_id, sandbox_session_id="sandbox-1")
+
+    monkeypatch.setattr(rpa_mcp_route.rpa_manager, "get_session", fake_get_session)
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as http_client:
+            async with streamable_http_client(
+                "http://testserver/api/v1/rpa-mcp/mcp",
+                http_client=http_client,
+                terminate_on_close=False,
+            ) as (read_stream, write_stream, _get_session_id):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+                    tools = await session.list_tools()
+                    result = await session.call_tool("rpa_download_invoice", {"month": "2026-03"})
+        return tools, result
+
+    tools, result = anyio.run(scenario)
+
+    assert tools.tools[0].name == "rpa_download_invoice"
+    assert tools.tools[0].inputSchema == {"type": "object", "properties": {}, "required": []}
+    assert result.structuredContent["data"]["browser"] == {"session_id": "sandbox-1", "user_id": "user-1"}
+    assert result.structuredContent["data"]["arguments"] == {"month": "2026-03"}
+    assert result.isError is False
 
 
 def test_update_tool_route_persists_confirmed_output_schema(monkeypatch):

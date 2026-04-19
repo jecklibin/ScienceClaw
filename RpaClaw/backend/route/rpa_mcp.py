@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from backend.config import settings
@@ -141,6 +142,54 @@ async def _build_gateway_tools(user_id: str) -> list[dict[str, Any]]:
         }
         for tool in tools
     ]
+
+
+def _is_json_rpc_request(body: dict[str, Any]) -> bool:
+    return body.get("jsonrpc") == "2.0"
+
+
+def _json_rpc_result(request_id: Any, result: dict[str, Any]) -> JSONResponse:
+    return JSONResponse({"jsonrpc": "2.0", "id": request_id, "result": result})
+
+
+def _json_rpc_error(request_id: Any, code: int, message: str) -> JSONResponse:
+    return JSONResponse(
+        {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}},
+        status_code=200,
+    )
+
+
+def _mcp_initialize_result() -> dict[str, Any]:
+    return {
+        "protocolVersion": "2025-06-18",
+        "capabilities": {
+            "tools": {"listChanged": False},
+        },
+        "serverInfo": {
+            "name": "RPA Tool Gateway",
+            "version": "0.1.0",
+        },
+        "instructions": (
+            "Provides RPA MCP tools published from RpaClaw Tools. "
+            "If a tool requires browser identity, pass Playwright cookies in the tool arguments."
+        ),
+    }
+
+
+def _mcp_call_result_payload(result: dict[str, Any], output_schema: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "content": [
+            {
+                "type": "text",
+                "text": json.dumps(result, ensure_ascii=False),
+            }
+        ],
+        "structuredContent": result,
+        "isError": not bool(result.get("success", True)),
+    }
+    if output_schema:
+        payload["outputSchema"] = output_schema
+    return payload
 
 
 async def _resolve_tool_browser_session_id(tool: RpaMcpToolDefinition) -> str | None:
@@ -291,22 +340,58 @@ async def test_rpa_mcp_tool(tool_id: str, body: TestToolRequest, current_user: U
     return ApiResponse(data=result)
 
 
-@router.post('/rpa-mcp/mcp')
-async def rpa_mcp_gateway(body: dict[str, Any], current_user: User = Depends(require_user)) -> dict[str, Any]:
+@router.post('/rpa-mcp/mcp', response_model=None)
+async def rpa_mcp_gateway(
+    body: dict[str, Any],
+    current_user: User = Depends(require_user),
+) -> dict[str, Any] | JSONResponse | Response:
     method = body.get('method')
     params = body.get('params') or {}
+    request_id = body.get('id')
+    is_json_rpc = _is_json_rpc_request(body)
+    if is_json_rpc and method == 'initialize':
+        return _json_rpc_result(request_id, _mcp_initialize_result())
+    if is_json_rpc and method == 'notifications/initialized':
+        return Response(status_code=202)
+    if is_json_rpc and method == 'ping':
+        return _json_rpc_result(request_id, {})
     if method == 'tools/list':
-        return {"result": {"tools": await _maybe_await(_build_gateway_tools(str(current_user.id)))}}
+        result = {"tools": await _maybe_await(_build_gateway_tools(str(current_user.id)))}
+        if is_json_rpc:
+            return _json_rpc_result(request_id, result)
+        return {"result": result}
     if method == 'tools/call':
         tool_name = str(params.get('name') or '')
         arguments = dict(params.get('arguments') or {})
         tool = await RpaMcpToolRegistry().get_by_tool_name(tool_name, str(current_user.id))
         if not tool:
+            if is_json_rpc:
+                return _json_rpc_error(request_id, -32602, 'RPA MCP tool not found')
             raise HTTPException(status_code=404, detail='RPA MCP tool not found')
         try:
             executor = _build_rpa_mcp_executor(current_user_id=str(current_user.id))
             result = await executor.execute(tool, arguments)
         except InvalidCookieError as exc:
+            if is_json_rpc:
+                return _json_rpc_result(
+                    request_id,
+                    _mcp_call_result_payload(
+                        {
+                            "success": False,
+                            "message": str(exc),
+                            "data": {},
+                            "downloads": [],
+                            "artifacts": [],
+                            "error": {"message": str(exc)},
+                        },
+                        tool.output_schema,
+                    ),
+                )
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"result": {"content": [], "structuredContent": result, "outputSchema": tool.output_schema}}
+        payload = _mcp_call_result_payload(result, tool.output_schema)
+        if is_json_rpc:
+            return _json_rpc_result(request_id, payload)
+        return {"result": payload}
+    if is_json_rpc:
+        return _json_rpc_error(request_id, -32601, 'Unsupported MCP method')
     raise HTTPException(status_code=400, detail='Unsupported MCP method')
