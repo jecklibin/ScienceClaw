@@ -160,6 +160,30 @@ const getValidationClass = (status?: string) => {
   return VALIDATION_CLASS_MAP[status] || 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300';
 };
 
+const isAdvancedScriptStep = (step: any): boolean => (
+  step?.action === 'ai_script'
+  && step?.assistant_diagnostics?.execution_mode === 'code'
+);
+
+const getAdvancedReasonLabel = (step: any): string => {
+  const labels: Record<string, string> = {
+    polling_loop: '轮询等待',
+    conditional_branch: '条件分支',
+    dynamic_selection: '动态选择',
+    custom_logic: '自定义逻辑',
+  };
+  return labels[step?.assistant_diagnostics?.upgrade_reason || ''] || '高级脚本';
+};
+
+const getAdvancedSummary = (step: any): string => {
+  const diagnostics = step?.assistant_diagnostics || {};
+  const parts: string[] = [];
+  if (diagnostics.template) parts.push(`模板 ${diagnostics.template}`);
+  if (diagnostics.interval_ms) parts.push(`间隔 ${diagnostics.interval_ms}ms`);
+  if (diagnostics.timeout_ms) parts.push(`超时 ${diagnostics.timeout_ms}ms`);
+  return parts.join(' · ') || '运行时逻辑步骤';
+};
+
 const loadSessionDiagnostics = async () => {
   if (!sessionId.value) return;
   try {
@@ -542,6 +566,13 @@ onBeforeUnmount(() => {
             <h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100">
               {{ step.description || step.action }}
             </h3>
+            <div
+              v-if="isAdvancedScriptStep(step)"
+              class="mt-2 rounded-lg border border-purple-100 bg-purple-50 p-2 text-[11px] text-purple-800 dark:border-purple-900/50 dark:bg-purple-950/20 dark:text-purple-200"
+            >
+              <span class="font-semibold">{{ getAdvancedReasonLabel(step) }}:</span>
+              <span class="ml-1">{{ getAdvancedSummary(step) }}</span>
+            </div>
             <p class="mt-2 break-all text-[11px] text-gray-500 dark:text-gray-400">
               <span class="font-semibold text-gray-600 dark:text-gray-400">Locator:</span>
               <span class="ml-1 font-mono">{{ formatLocator(step.target) }}</span>

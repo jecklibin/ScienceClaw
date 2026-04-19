@@ -60,6 +60,7 @@ interface StepItem {
   label?: string;
   sensitive?: boolean;
   url?: string;
+  assistant_diagnostics?: Record<string, any>;
 }
 
 interface ParamItem {
@@ -175,6 +176,31 @@ const getActionLabel = (action: string) => {
     download: '下载',
   };
   return map[action] || action;
+};
+
+const isAdvancedScriptStep = (step: StepItem): boolean => (
+  step.action === 'ai_script'
+  && step.assistant_diagnostics?.execution_mode === 'code'
+);
+
+const getAdvancedReasonLabel = (step: StepItem): string => {
+  const reason = step.assistant_diagnostics?.upgrade_reason || '';
+  const labels: Record<string, string> = {
+    polling_loop: '轮询等待',
+    conditional_branch: '条件分支',
+    dynamic_selection: '动态选择',
+    custom_logic: '自定义逻辑',
+  };
+  return labels[reason] || '高级脚本';
+};
+
+const getAdvancedSummary = (step: StepItem): string => {
+  const diagnostics = step.assistant_diagnostics || {};
+  const parts: string[] = [];
+  if (diagnostics.template) parts.push(`模板 ${diagnostics.template}`);
+  if (diagnostics.interval_ms) parts.push(`间隔 ${diagnostics.interval_ms}ms`);
+  if (diagnostics.timeout_ms) parts.push(`超时 ${diagnostics.timeout_ms}ms`);
+  return parts.join(' · ') || '运行时读取页面状态并执行 Playwright 脚本';
 };
 
 const getActionColor = (action: string) => {
@@ -577,6 +603,22 @@ onMounted(() => {
                 @click.stop
               >
                 <div class="grid gap-3 rounded-2xl bg-white dark:bg-[#272728] p-4 ring-1 ring-[#831bd7]/10">
+                  <div
+                    v-if="isAdvancedScriptStep(step)"
+                    class="rounded-2xl border border-purple-100 bg-purple-50/70 p-3 text-xs text-purple-800 dark:border-purple-900/50 dark:bg-purple-950/20 dark:text-purple-200"
+                  >
+                    <div class="flex flex-wrap items-center gap-2">
+                      <span class="rounded-full bg-purple-600 px-2 py-0.5 text-[10px] font-bold text-white">
+                        {{ getAdvancedReasonLabel(step) }}
+                      </span>
+                      <span>{{ getAdvancedSummary(step) }}</span>
+                    </div>
+                    <pre
+                      v-if="step.value"
+                      class="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded-xl bg-white/80 p-3 font-mono text-[11px] text-gray-700 dark:bg-black/20 dark:text-gray-200"
+                    >{{ step.value }}</pre>
+                  </div>
+
                   <div class="grid gap-2 text-sm text-gray-600 dark:text-gray-400">
                     <div class="grid gap-1 sm:grid-cols-[92px_minmax(0,1fr)]">
                       <span class="text-xs font-bold uppercase tracking-wide text-gray-400 dark:text-gray-500">主定位器</span>
