@@ -564,43 +564,10 @@
               <pre class="mt-4 overflow-x-auto rounded-xl border border-slate-200 bg-white p-3 text-xs text-[var(--text-secondary)] dark:border-white/10 dark:bg-[#101115]"><code>{{ JSON.stringify(gatewayTestResult, null, 2) }}</code></pre>
             </section>
 
-            <section v-if="gatewayTestResult" class="dialog-section">
-              <div class="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <h4 class="dialog-title !mb-1">{{ t('Recommended output schema') }}</h4>
-                  <p class="text-xs text-[var(--text-tertiary)]">{{ gatewayTestTool?.output_schema_confirmed ? t('Output schema confirmed') : t('Confirm output schema after successful test') }}</p>
-                </div>
-                <span class="status-pill" :class="gatewayTestTool?.output_schema_confirmed ? 'status-on' : 'status-warn'">
-                  {{ gatewayTestTool?.output_schema_confirmed ? t('Confirmed') : t('Recommended') }}
-                </span>
-              </div>
-              <textarea
-                v-model="gatewayOutputSchemaText"
-                class="tools-input mt-4 min-h-[220px] resize-y font-mono text-xs"
-                spellcheck="false"
-              ></textarea>
-              <div class="mt-4">
-                <div class="mb-2 text-xs font-semibold text-[var(--text-primary)]">{{ t('Schema preview') }}</div>
-                <pre class="overflow-x-auto rounded-xl border border-slate-200 bg-white p-3 text-xs text-[var(--text-secondary)] dark:border-white/10 dark:bg-[#101115]"><code>{{ JSON.stringify(gatewayCurrentOutputSchema, null, 2) }}</code></pre>
-              </div>
-              <div v-if="gatewayTestResult.output_inference_report" class="mt-4">
-                <div class="mb-2 text-xs font-semibold text-[var(--text-primary)]">{{ t('Inference report') }}</div>
-                <pre class="overflow-x-auto rounded-xl border border-slate-200 bg-white p-3 text-xs text-[var(--text-secondary)] dark:border-white/10 dark:bg-[#101115]"><code>{{ JSON.stringify(gatewayTestResult.output_inference_report, null, 2) }}</code></pre>
-              </div>
-            </section>
           </div>
 
           <div class="flex items-center justify-end gap-3 border-t border-slate-200 bg-white px-6 py-5 dark:border-white/10 dark:bg-white/[0.055]">
             <button class="action-muted" @click="closeGatewayToolTestDialog">{{ t('Cancel') }}</button>
-            <button
-              v-if="gatewayTestResult"
-              class="action-blue disabled:cursor-not-allowed disabled:opacity-60"
-              :disabled="gatewaySavingOutputSchema"
-              @click="saveGatewayOutputSchema"
-            >
-              <Loader2 v-if="gatewaySavingOutputSchema" class="animate-spin" :size="16" />
-              {{ gatewaySavingOutputSchema ? t('Saving...') : t('Save output schema') }}
-            </button>
             <button class="inline-flex items-center gap-2 rounded-xl bg-gradient-to-br from-[#8930b0] to-[#004be2] px-5 py-2 text-sm font-bold text-white shadow-lg transition disabled:cursor-not-allowed disabled:opacity-60" :disabled="gatewayTestSubmitting" @click="submitGatewayToolTest">
               <Loader2 v-if="gatewayTestSubmitting" class="animate-spin" :size="16" />
               {{ gatewayTestSubmitting ? t('Sending...') : t('Run gateway test') }}
@@ -668,7 +635,6 @@ import {
   listRpaMcpTools,
   testRpaMcpTool,
   updateRpaMcpTool,
-  type JsonSchemaObject,
   type RpaMcpExecutionResult,
   type RpaMcpToolItem,
 } from '../api/rpaMcp';
@@ -713,14 +679,12 @@ const discoveredTools = ref<McpToolDiscoveryItem[]>([]);
 const rpaMcpTools = ref<RpaMcpToolItem[]>([]);
 const gatewayTestDialogOpen = ref(false);
 const gatewayTestSubmitting = ref(false);
-const gatewaySavingOutputSchema = ref(false);
 const gatewayTestTool = ref<RpaMcpToolItem | null>(null);
 const gatewayTestResult = ref<RpaMcpExecutionResult | null>(null);
 const gatewayCookieSectionOpen = ref(false);
 const gatewayCookieMode = ref<CookieInputMode>('cookie_header');
 const gatewayCookieText = ref('');
 const gatewayCookieDomain = ref('');
-const gatewayOutputSchemaText = ref('');
 const gatewayArgumentValues = reactive<Record<string, unknown>>({});
 
 type GatewayParamField = {
@@ -729,20 +693,6 @@ type GatewayParamField = {
   description: string;
   required: boolean;
   defaultValue?: unknown;
-};
-
-const formatJsonBlock = (value: unknown) => JSON.stringify(value ?? {}, null, 2);
-
-const parseJsonObjectText = (text: string, errorMessage: string) => {
-  try {
-    const parsed = JSON.parse(text);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error(errorMessage);
-    }
-    return parsed as JsonSchemaObject;
-  } catch {
-    throw new Error(errorMessage);
-  }
 };
 
 const form = reactive({
@@ -838,17 +788,6 @@ const gatewayCookieInputPlaceholder = computed(() => {
   }
   return '[{"name":"sid","value":"abc","domain":".example.com","path":"/"}]';
 });
-const gatewayCurrentOutputSchema = computed(() => {
-  if (gatewayOutputSchemaText.value.trim()) {
-    try {
-      return JSON.parse(gatewayOutputSchemaText.value);
-    } catch {
-      return gatewayTestResult.value?.recommended_output_schema || gatewayTestTool.value?.output_schema || {};
-    }
-  }
-  return gatewayTestResult.value?.recommended_output_schema || gatewayTestTool.value?.output_schema || {};
-});
-
 const resetForm = () => {
   form.name = '';
   form.description = '';
@@ -1100,13 +1039,6 @@ const toggleRpaMcpTool = async (tool: RpaMcpToolItem) => {
   }
 };
 
-const syncGatewayToolState = (updated: RpaMcpToolItem) => {
-  rpaMcpTools.value = rpaMcpTools.value.map((item) => item.id === updated.id ? updated : item);
-  if (gatewayTestTool.value?.id === updated.id) {
-    gatewayTestTool.value = updated;
-  }
-};
-
 const deleteGatewayTool = async (tool: RpaMcpToolItem) => {
   if (!window.confirm(t('Delete MCP server confirm', { name: tool.name }))) return;
   try {
@@ -1127,7 +1059,6 @@ const openGatewayToolTestDialog = (tool: RpaMcpToolItem) => {
   gatewayCookieMode.value = 'cookie_header';
   gatewayCookieText.value = '';
   gatewayCookieDomain.value = getGatewayAllowedCookieDomains(tool)[0] || '';
-  gatewayOutputSchemaText.value = formatJsonBlock(tool.output_schema || tool.recommended_output_schema || {});
   clearGatewayArgumentValues();
   for (const field of getGatewayParamFields(tool)) {
     if (field.defaultValue !== undefined) {
@@ -1146,7 +1077,6 @@ const closeGatewayToolTestDialog = () => {
   gatewayCookieMode.value = 'cookie_header';
   gatewayCookieText.value = '';
   gatewayCookieDomain.value = '';
-  gatewayOutputSchemaText.value = '';
   clearGatewayArgumentValues();
 };
 
@@ -1205,53 +1135,12 @@ const submitGatewayToolTest = async () => {
     }
     const result = await testRpaMcpTool(gatewayTestTool.value.id, payload);
     gatewayTestResult.value = result;
-    gatewayOutputSchemaText.value = formatJsonBlock(result.recommended_output_schema || result.output_schema || gatewayTestTool.value.output_schema || {});
-    const refreshedTool = await updateRpaMcpTool(gatewayTestTool.value.id, {
-      name: gatewayTestTool.value.name,
-      description: gatewayTestTool.value.description,
-      enabled: gatewayTestTool.value.enabled,
-      allowed_domains: gatewayTestTool.value.allowed_domains,
-      post_auth_start_url: gatewayTestTool.value.post_auth_start_url,
-    });
-    syncGatewayToolState(refreshedTool);
     showSuccessToast(result.message || t('Test message sent'));
   } catch (error: any) {
     console.error(error);
     showErrorToast(error?.message ? t(error.message) : t('Test failed'));
   } finally {
     gatewayTestSubmitting.value = false;
-  }
-};
-
-const saveGatewayOutputSchema = async () => {
-  if (!gatewayTestTool.value) return;
-  gatewaySavingOutputSchema.value = true;
-  try {
-    const outputSchema = parseJsonObjectText(gatewayOutputSchemaText.value, t('Output schema JSON invalid'));
-    const updated = await updateRpaMcpTool(gatewayTestTool.value.id, {
-      name: gatewayTestTool.value.name,
-      description: gatewayTestTool.value.description,
-      enabled: gatewayTestTool.value.enabled,
-      allowed_domains: gatewayTestTool.value.allowed_domains,
-      post_auth_start_url: gatewayTestTool.value.post_auth_start_url,
-      output_schema: outputSchema,
-      output_schema_confirmed: true,
-    });
-    syncGatewayToolState(updated);
-    if (gatewayTestResult.value) {
-      gatewayTestResult.value = {
-        ...gatewayTestResult.value,
-        output_schema: outputSchema,
-        output_schema_confirmed: true,
-      };
-    }
-    gatewayOutputSchemaText.value = formatJsonBlock(outputSchema);
-    showSuccessToast(t('Output schema saved'));
-  } catch (error: any) {
-    console.error(error);
-    showErrorToast(error?.message || t('Failed to save output schema'));
-  } finally {
-    gatewaySavingOutputSchema.value = false;
   }
 };
 const deletePrivateServer = async (server: McpServerItem) => {

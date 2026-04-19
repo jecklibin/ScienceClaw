@@ -58,6 +58,19 @@ class _FakeRegistry:
         return tool
 
 
+class _FakePreviewTestRegistry:
+    def __init__(self):
+        self.docs = {}
+
+    async def get(self, session_id, user_id, config_signature):
+        doc = self.docs.get((session_id, user_id, config_signature))
+        return dict(doc) if doc else None
+
+    async def save(self, session_id, user_id, config_signature, payload):
+        self.docs[(session_id, user_id, config_signature)] = dict(payload)
+        return dict(payload)
+
+
 def _build_rpa_mcp_app():
     app = FastAPI()
     app.include_router(rpa_mcp_route.router, prefix="/api/v1")
@@ -118,6 +131,31 @@ class _FakeConverter:
             "source": {"type": "rpa_skill", "session_id": kwargs["session_id"], "skill_name": kwargs["skill_name"]},
             "enabled": True,
         })
+
+    def infer_output_from_execution(self, tool, result):
+        return (
+            {
+                "type": "object",
+                "properties": {
+                    "success": {"type": "boolean"},
+                    "message": {"type": "string"},
+                    "data": {
+                        "type": "object",
+                        "properties": {
+                            "browser": {"type": "object"},
+                            "arguments": {"type": "object"},
+                            "has_pw_loop_runner": {"type": "boolean"},
+                        },
+                        "additionalProperties": False,
+                    },
+                    "downloads": {"type": "array", "items": {"type": "object"}},
+                    "artifacts": {"type": "array", "items": {"type": "object"}},
+                    "error": {"type": ["object", "null"]},
+                },
+                "required": ["success", "data", "downloads", "artifacts"],
+            },
+            {"test_result_keys": ["arguments", "browser", "has_pw_loop_runner"]},
+        )
 
 
 class _FakeRouteExecutor:
@@ -212,9 +250,11 @@ def _fake_gateway_tools(user_id: str):
 def test_preview_route_returns_sanitize_report(monkeypatch):
     app = _build_rpa_mcp_app()
     client = TestClient(app)
+    draft_registry = _FakePreviewTestRegistry()
 
     monkeypatch.setattr(rpa_mcp_route, "get_rpa_session_steps", _fake_steps)
     monkeypatch.setattr(rpa_mcp_route, "RpaMcpConverter", lambda: _FakeConverter())
+    monkeypatch.setattr(rpa_mcp_route, "RpaMcpPreviewDraftRegistry", lambda: draft_registry)
 
     response = client.post(
         "/api/v1/rpa-mcp/session/session-1/preview",
@@ -261,8 +301,8 @@ def test_test_tool_route_builds_runtime_executor(monkeypatch):
     assert data["browser"] == {"session_id": "sandbox-1", "user_id": "user-1"}
     assert data["arguments"] == {"cookies": [], "month": "2026-03"}
     assert data["has_pw_loop_runner"] is True
-    assert response.json()["data"]["recommended_output_schema"]["properties"]["data"]["properties"]["browser"]["type"] == "object"
-    assert response.json()["data"]["output_examples"][0]["data"]["browser"]["session_id"] == "sandbox-1"
+    assert "recommended_output_schema" not in response.json()["data"]
+    assert "output_examples" not in response.json()["data"]
 
 
 def test_gateway_call_builds_runtime_executor(monkeypatch):
@@ -321,3 +361,176 @@ def test_update_tool_route_persists_confirmed_output_schema(monkeypatch):
     assert response.status_code == 200
     assert response.json()["data"]["output_schema_confirmed"] is True
     assert registry.tool.output_schema["properties"]["data"]["properties"]["invoice_total"]["type"] == "string"
+
+
+def test_preview_test_route_returns_execution_result_and_updates_preview_draft(monkeypatch):
+    app = _build_rpa_mcp_app()
+    client = TestClient(app)
+    connector = _FakeConnector()
+    draft_registry = _FakePreviewTestRegistry()
+
+    monkeypatch.setattr(rpa_mcp_route, "get_rpa_session_steps", _fake_steps)
+    monkeypatch.setattr(rpa_mcp_route, "RpaMcpConverter", lambda: _FakeConverter())
+    monkeypatch.setattr(rpa_mcp_route, "RpaMcpExecutor", lambda **kwargs: _FakeRouteExecutor(**kwargs))
+    monkeypatch.setattr(rpa_mcp_route, "get_cdp_connector", lambda: connector)
+    monkeypatch.setattr(rpa_mcp_route, "RpaMcpPreviewDraftRegistry", lambda: draft_registry)
+
+    async def fake_get_session(session_id):
+        return SimpleNamespace(id=session_id, sandbox_session_id="sandbox-1", user_id="user-1")
+
+    monkeypatch.setattr(rpa_mcp_route.rpa_manager, "get_session", fake_get_session)
+
+    response = client.post(
+        "/api/v1/rpa-mcp/session/session-1/test-preview",
+        json={
+            "name": "download_invoice",
+            "description": "Download invoice",
+            "arguments": {"month": "2026-03"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["data"]["browser"] == {"session_id": "sandbox-1", "user_id": "user-1"}
+    assert "recommended_output_schema" not in response.json()["data"]
+    stored = next(iter(draft_registry.docs.values()))
+    assert stored["recommended_output_schema"]["properties"]["data"]["properties"]["browser"]["type"] == "object"
+    assert stored["test_result"]["data"]["arguments"]["month"] == "2026-03"
+
+
+def test_preview_route_surfaces_latest_inferred_schema_for_matching_draft(monkeypatch):
+    app = _build_rpa_mcp_app()
+    client = TestClient(app)
+    draft_registry = _FakePreviewTestRegistry()
+    converter = _FakeConverter()
+
+    monkeypatch.setattr(rpa_mcp_route, "get_rpa_session_steps", _fake_steps)
+    monkeypatch.setattr(rpa_mcp_route, "RpaMcpConverter", lambda: converter)
+    monkeypatch.setattr(rpa_mcp_route, "RpaMcpPreviewDraftRegistry", lambda: draft_registry)
+
+    config_signature = rpa_mcp_route._preview_config_signature(
+        session_id="session-1",
+        user_id="user-1",
+        name="download_invoice",
+        description="Download invoice",
+        allowed_domains=["example.com"],
+        post_auth_start_url="https://example.com/dashboard",
+    )
+    draft_registry.docs[("session-1", "user-1", config_signature)] = {
+        "recommended_output_schema": {
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "message": {"type": "string"},
+                "data": {"type": "object", "properties": {"browser": {"type": "object"}}, "additionalProperties": False},
+                "downloads": {"type": "array", "items": {"type": "object"}},
+                "artifacts": {"type": "array", "items": {"type": "object"}},
+                "error": {"type": ["object", "null"]},
+            },
+            "required": ["success", "data", "downloads", "artifacts"],
+        },
+        "output_examples": [{"success": True}],
+        "output_inference_report": {"test_result_keys": ["browser"]},
+        "tested": True,
+    }
+
+    response = client.post(
+        "/api/v1/rpa-mcp/session/session-1/preview",
+        json={
+            "name": "download_invoice",
+            "description": "Download invoice",
+            "allowed_domains": ["example.com"],
+            "post_auth_start_url": "https://example.com/dashboard",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["recommended_output_schema"]["properties"]["data"]["properties"]["browser"]["type"] == "object"
+    assert response.json()["data"]["output_examples"] == [{"success": True}]
+
+
+def test_create_tool_requires_matching_successful_preview_test(monkeypatch):
+    app = _build_rpa_mcp_app()
+    client = TestClient(app)
+    converter = _FakeConverter()
+    registry = _FakeRegistry(_sample_tool())
+    draft_registry = _FakePreviewTestRegistry()
+
+    monkeypatch.setattr(rpa_mcp_route, "get_rpa_session_steps", _fake_steps)
+    monkeypatch.setattr(rpa_mcp_route, "RpaMcpConverter", lambda: converter)
+    monkeypatch.setattr(rpa_mcp_route, "RpaMcpToolRegistry", lambda: registry)
+    monkeypatch.setattr(rpa_mcp_route, "RpaMcpPreviewDraftRegistry", lambda: draft_registry)
+
+    response = client.post(
+        "/api/v1/rpa-mcp/session/session-1/tools",
+        json={"name": "download_invoice", "description": "Download invoice"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "A successful preview test is required before saving the tool"
+
+
+def test_create_tool_uses_successful_preview_test_artifacts(monkeypatch):
+    app = _build_rpa_mcp_app()
+    client = TestClient(app)
+    converter = _FakeConverter()
+    tool = _sample_tool()
+    registry = _FakeRegistry(tool)
+    draft_registry = _FakePreviewTestRegistry()
+
+    monkeypatch.setattr(rpa_mcp_route, "get_rpa_session_steps", _fake_steps)
+    monkeypatch.setattr(rpa_mcp_route, "RpaMcpConverter", lambda: converter)
+    monkeypatch.setattr(rpa_mcp_route, "RpaMcpToolRegistry", lambda: registry)
+    monkeypatch.setattr(rpa_mcp_route, "RpaMcpPreviewDraftRegistry", lambda: draft_registry)
+
+    config_signature = rpa_mcp_route._preview_config_signature(
+        session_id="session-1",
+        user_id="user-1",
+        name="download_invoice",
+        description="Download invoice",
+        allowed_domains=["example.com"],
+        post_auth_start_url="https://example.com/dashboard",
+    )
+    draft_registry.docs[("session-1", "user-1", config_signature)] = {
+        "recommended_output_schema": {
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "message": {"type": "string"},
+                "data": {"type": "object", "properties": {"browser": {"type": "object"}}, "additionalProperties": False},
+                "downloads": {"type": "array", "items": {"type": "object"}},
+                "artifacts": {"type": "array", "items": {"type": "object"}},
+                "error": {"type": ["object", "null"]},
+            },
+            "required": ["success", "data", "downloads", "artifacts"],
+        },
+        "output_examples": [{"success": True, "data": {"browser": {"session_id": "sandbox-1"}}}],
+        "output_inference_report": {"test_result_keys": ["browser"]},
+        "tested": True,
+    }
+
+    response = client.post(
+        "/api/v1/rpa-mcp/session/session-1/tools",
+        json={
+            "name": "download_invoice",
+            "description": "Download invoice",
+            "allowed_domains": ["example.com"],
+            "post_auth_start_url": "https://example.com/dashboard",
+            "output_schema": {
+                "type": "object",
+                "properties": {
+                    "success": {"type": "boolean"},
+                    "message": {"type": "string"},
+                    "data": {"type": "object", "properties": {"browser": {"type": "object"}, "arguments": {"type": "object"}}, "additionalProperties": False},
+                    "downloads": {"type": "array", "items": {"type": "object"}},
+                    "artifacts": {"type": "array", "items": {"type": "object"}},
+                    "error": {"type": ["object", "null"]},
+                },
+                "required": ["success", "data", "downloads", "artifacts"],
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["output_schema_confirmed"] is True
+    assert registry.tool.output_schema["properties"]["data"]["properties"]["arguments"]["type"] == "object"
+    assert registry.tool.output_examples[0]["data"]["browser"]["session_id"] == "sandbox-1"

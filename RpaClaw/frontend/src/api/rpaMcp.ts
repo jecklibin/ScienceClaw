@@ -18,11 +18,6 @@ export interface RpaMcpExecutionResult {
   downloads: Array<Record<string, unknown>>;
   artifacts: Array<Record<string, unknown>>;
   error?: Record<string, unknown> | null;
-  recommended_output_schema?: JsonSchemaObject;
-  output_schema?: JsonSchemaObject;
-  output_schema_confirmed?: boolean;
-  output_examples?: Array<Record<string, unknown>>;
-  output_inference_report?: Record<string, unknown>;
 }
 
 export interface RpaMcpPreview {
@@ -55,8 +50,23 @@ export interface RpaMcpToolItem extends RpaMcpPreview {
   enabled: boolean;
 }
 
-export async function previewRpaMcpTool(sessionId: string, payload: { name: string; description?: string }) {
+export async function previewRpaMcpTool(sessionId: string, payload: { name: string; description?: string; allowed_domains?: string[]; post_auth_start_url?: string }) {
   const response = await apiClient.post<ApiResponse<RpaMcpPreview>>(`/rpa-mcp/session/${encodeURIComponent(sessionId)}/preview`, payload);
+  return response.data.data;
+}
+
+export async function testPreviewRpaMcpTool(
+  sessionId: string,
+  payload: {
+    name: string;
+    description?: string;
+    allowed_domains?: string[];
+    post_auth_start_url?: string;
+    cookies?: Array<Record<string, unknown>>;
+    arguments?: Record<string, unknown>;
+  },
+) {
+  const response = await apiClient.post<ApiResponse<RpaMcpExecutionResult>>(`/rpa-mcp/session/${encodeURIComponent(sessionId)}/test-preview`, payload);
   return response.data.data;
 }
 

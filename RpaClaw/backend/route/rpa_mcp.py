@@ -1,6 +1,7 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import inspect
+import json
 import uuid
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from backend.rpa.manager import rpa_manager
 from backend.rpa.mcp_converter import RpaMcpConverter
 from backend.rpa.mcp_executor import InvalidCookieError, RpaMcpExecutor
 from backend.rpa.mcp_models import RpaMcpToolDefinition
+from backend.rpa.mcp_preview_registry import RpaMcpPreviewDraftRegistry
 from backend.rpa.mcp_registry import RpaMcpToolRegistry
 from backend.user.dependencies import User, require_user
 
@@ -29,13 +31,12 @@ class ApiResponse(BaseModel):
 class PreviewRequest(BaseModel):
     name: str
     description: str = ""
-
-
-class SaveToolRequest(BaseModel):
-    name: str
-    description: str = ""
     allowed_domains: list[str] = Field(default_factory=list)
     post_auth_start_url: str = ""
+
+
+class SaveToolRequest(PreviewRequest):
+    output_schema: dict[str, Any] = Field(default_factory=dict)
 
 
 class UpdateToolRequest(BaseModel):
@@ -49,6 +50,11 @@ class UpdateToolRequest(BaseModel):
 
 
 class TestToolRequest(BaseModel):
+    cookies: list[dict[str, Any]] = Field(default_factory=list)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class PreviewTestRequest(PreviewRequest):
     cookies: list[dict[str, Any]] = Field(default_factory=list)
     arguments: dict[str, Any] = Field(default_factory=dict)
 
@@ -72,7 +78,22 @@ async def get_rpa_session_steps(session_id: str, user_id: str) -> dict[str, Any]
     }
 
 
-async def _preview_payload(session_id: str, user_id: str, body: PreviewRequest | SaveToolRequest):
+def _preview_config_signature(*, session_id: str, user_id: str, name: str, description: str, allowed_domains: list[str], post_auth_start_url: str) -> str:
+    return json.dumps(
+        {
+            "session_id": session_id,
+            "user_id": user_id,
+            "name": name,
+            "description": description,
+            "allowed_domains": allowed_domains,
+            "post_auth_start_url": post_auth_start_url,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+async def _preview_payload(session_id: str, user_id: str, body: PreviewRequest | SaveToolRequest | PreviewTestRequest):
     payload = await _maybe_await(get_rpa_session_steps(session_id, user_id))
     preview = RpaMcpConverter().preview(
         user_id=user_id,
@@ -83,6 +104,29 @@ async def _preview_payload(session_id: str, user_id: str, body: PreviewRequest |
         steps=payload.get('steps', []),
         params=payload.get('params', {}),
     )
+    if not isinstance(preview, RpaMcpToolDefinition) and hasattr(preview, "model_dump"):
+        preview_payload = preview.model_dump(mode='python')
+        preview_payload.setdefault("user_id", user_id)
+        preview_payload.setdefault("source", {"type": "rpa_skill", "session_id": session_id, "skill_name": payload.get('skill_name', '')})
+        preview = RpaMcpToolDefinition(**preview_payload)
+    if body.allowed_domains:
+        preview.allowed_domains = body.allowed_domains
+    if body.post_auth_start_url:
+        preview.post_auth_start_url = body.post_auth_start_url
+    config_signature = _preview_config_signature(
+        session_id=session_id,
+        user_id=user_id,
+        name=preview.name,
+        description=preview.description,
+        allowed_domains=preview.allowed_domains,
+        post_auth_start_url=preview.post_auth_start_url,
+    )
+    draft = await _maybe_await(RpaMcpPreviewDraftRegistry().get(session_id, user_id, config_signature))
+    if draft and draft.get("tested"):
+        preview.recommended_output_schema = draft.get("recommended_output_schema") or preview.recommended_output_schema
+        preview.output_schema = draft.get("recommended_output_schema") or preview.output_schema
+        preview.output_examples = draft.get("output_examples") or []
+        preview.output_inference_report = draft.get("output_inference_report") or {}
     return preview
 
 
@@ -132,14 +176,59 @@ async def preview_rpa_mcp_tool(session_id: str, body: PreviewRequest, current_us
     return ApiResponse(data=preview.model_dump(mode='python'))
 
 
+@router.post('/rpa-mcp/session/{session_id}/test-preview', response_model=ApiResponse)
+async def test_preview_rpa_mcp_tool(session_id: str, body: PreviewTestRequest, current_user: User = Depends(require_user)) -> ApiResponse:
+    preview = await _preview_payload(session_id, str(current_user.id), body)
+    try:
+        executor = _build_rpa_mcp_executor(current_user_id=str(current_user.id))
+        result = await executor.execute(preview, {"cookies": body.cookies, **body.arguments})
+    except InvalidCookieError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if result.get("success"):
+        recommended_output_schema, output_inference_report = RpaMcpConverter().infer_output_from_execution(preview, result)
+        config_signature = _preview_config_signature(
+            session_id=session_id,
+            user_id=str(current_user.id),
+            name=preview.name,
+            description=preview.description,
+            allowed_domains=preview.allowed_domains,
+            post_auth_start_url=preview.post_auth_start_url,
+        )
+        await RpaMcpPreviewDraftRegistry().save(
+            session_id,
+            str(current_user.id),
+            config_signature,
+            {
+                "tested": True,
+                "recommended_output_schema": recommended_output_schema,
+                "output_examples": [result],
+                "output_inference_report": output_inference_report,
+                "test_result": result,
+            },
+        )
+    return ApiResponse(data=result)
+
+
 @router.post('/rpa-mcp/session/{session_id}/tools', response_model=ApiResponse)
 async def create_rpa_mcp_tool(session_id: str, body: SaveToolRequest, current_user: User = Depends(require_user)) -> ApiResponse:
     preview = await _preview_payload(session_id, str(current_user.id), body)
-    if body.allowed_domains:
-        preview.allowed_domains = body.allowed_domains
-    if body.post_auth_start_url:
-        preview.post_auth_start_url = body.post_auth_start_url
+    config_signature = _preview_config_signature(
+        session_id=session_id,
+        user_id=str(current_user.id),
+        name=preview.name,
+        description=preview.description,
+        allowed_domains=preview.allowed_domains,
+        post_auth_start_url=preview.post_auth_start_url,
+    )
+    draft = await RpaMcpPreviewDraftRegistry().get(session_id, str(current_user.id), config_signature)
+    if not draft or not draft.get("tested"):
+        raise HTTPException(status_code=400, detail='A successful preview test is required before saving the tool')
     preview.id = f"rpa_mcp_{uuid.uuid4().hex[:12]}"
+    preview.recommended_output_schema = draft.get("recommended_output_schema") or preview.recommended_output_schema
+    preview.output_examples = draft.get("output_examples") or []
+    preview.output_inference_report = draft.get("output_inference_report") or {}
+    preview.output_schema = body.output_schema or preview.recommended_output_schema
+    preview.output_schema_confirmed = True
     saved = await RpaMcpToolRegistry().save(preview)
     return ApiResponse(data=saved.model_dump(mode='python'))
 
@@ -192,8 +281,7 @@ async def delete_rpa_mcp_tool(tool_id: str, current_user: User = Depends(require
 
 @router.post('/rpa-mcp/tools/{tool_id}/test', response_model=ApiResponse)
 async def test_rpa_mcp_tool(tool_id: str, body: TestToolRequest, current_user: User = Depends(require_user)) -> ApiResponse:
-    registry = RpaMcpToolRegistry()
-    tool = await registry.get_owned(tool_id, str(current_user.id))
+    tool = await RpaMcpToolRegistry().get_owned(tool_id, str(current_user.id))
     if not tool:
         raise HTTPException(status_code=404, detail='RPA MCP tool not found')
     try:
@@ -201,23 +289,6 @@ async def test_rpa_mcp_tool(tool_id: str, body: TestToolRequest, current_user: U
         result = await executor.execute(tool, {"cookies": body.cookies, **body.arguments})
     except InvalidCookieError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if result.get("success"):
-        converter = RpaMcpConverter()
-        recommended_output_schema, output_inference_report = converter.infer_output_from_execution(tool, result)
-        tool.recommended_output_schema = recommended_output_schema
-        tool.output_examples = [result]
-        tool.output_inference_report = output_inference_report
-        if not tool.output_schema_confirmed:
-            tool.output_schema = recommended_output_schema
-        tool = await registry.save(tool)
-        result = {
-            **result,
-            "recommended_output_schema": tool.recommended_output_schema,
-            "output_schema": tool.output_schema,
-            "output_schema_confirmed": tool.output_schema_confirmed,
-            "output_examples": tool.output_examples,
-            "output_inference_report": tool.output_inference_report,
-        }
     return ApiResponse(data=result)
 
 
