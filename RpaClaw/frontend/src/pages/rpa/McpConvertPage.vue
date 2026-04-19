@@ -11,7 +11,12 @@ import {
   type RpaMcpExecutionResult,
   type RpaMcpPreview,
 } from '@/api/rpaMcp';
-import { focusPreviewTestSection, getPreviewTestStatus } from '@/utils/rpaMcpConvert';
+import {
+  buildPreviewDraftSignature,
+  focusPreviewTestSection,
+  getPreviewTestStatus,
+  hasMatchingPreviewTest,
+} from '@/utils/rpaMcpConvert';
 import { convertCookieInputToPlaywrightCookies, type CookieInputMode } from '@/utils/rpaMcpTest';
 import { showErrorToast, showSuccessToast } from '@/utils/toast';
 
@@ -32,6 +37,7 @@ const testing = ref(false);
 const preview = ref<RpaMcpPreview | null>(null);
 const testResult = ref<RpaMcpExecutionResult | null>(null);
 const hasSuccessfulTest = ref(false);
+const lastSuccessfulTestSignature = ref<string | null>(null);
 const toolName = ref('');
 const description = ref('');
 const postAuthStartUrl = ref('');
@@ -99,19 +105,35 @@ const getAllowedCookieDomains = () => {
 
 const paramFields = computed(() => getParamFields(preview.value));
 const allowedCookieDomains = computed(() => getAllowedCookieDomains());
-const previewTestStatus = computed(() => getPreviewTestStatus(hasSuccessfulTest.value, testResult.value));
+const currentPreviewSignature = computed(() => buildPreviewDraftSignature({
+  sessionId: sessionId.value,
+  name: toolName.value,
+  description: description.value,
+  allowedDomains: getAllowedDomains(),
+  postAuthStartUrl: postAuthStartUrl.value,
+}));
+const hasMatchingSuccessfulTest = computed(() => hasMatchingPreviewTest(currentPreviewSignature.value, lastSuccessfulTestSignature.value));
+const hasConfigChangesSinceLastTest = computed(() => Boolean(lastSuccessfulTestSignature.value) && !hasMatchingSuccessfulTest.value);
+const previewTestStatus = computed(() => getPreviewTestStatus({
+  hasMatchingSuccessfulTest: hasMatchingSuccessfulTest.value,
+  testResult: testResult.value,
+  hasConfigChangesSinceLastTest: hasConfigChangesSinceLastTest.value,
+}));
 const previewTestStatusLabel = computed(() => {
   if (previewTestStatus.value === 'success') return 'Preview test passed';
+  if (previewTestStatus.value === 'stale') return 'Preview test is out of date';
   if (previewTestStatus.value === 'failed') return 'Preview test failed';
   return 'Preview test required';
 });
 const previewTestStatusDescription = computed(() => {
   if (previewTestStatus.value === 'success') return 'This draft can now be saved as an MCP tool.';
+  if (previewTestStatus.value === 'stale') return 'You changed the draft after testing. Run preview test again before saving.';
   if (previewTestStatus.value === 'failed') return 'Fix the current draft inputs and run preview test again before saving.';
   return 'Run a preview test on this page before saving the tool.';
 });
 const previewTestStatusClass = computed(() => {
   if (previewTestStatus.value === 'success') return 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-200';
+  if (previewTestStatus.value === 'stale') return 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200';
   if (previewTestStatus.value === 'failed') return 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200';
   return 'border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-500/20 dark:bg-sky-500/10 dark:text-sky-200';
 });
@@ -154,6 +176,7 @@ const loadPreview = async () => {
       }
     }
     hasSuccessfulTest.value = Boolean(preview.value.output_examples?.length);
+    lastSuccessfulTestSignature.value = hasSuccessfulTest.value ? currentPreviewSignature.value : null;
   } catch (error: any) {
     showErrorToast(error?.message || 'Failed to load MCP preview');
   } finally {
@@ -217,10 +240,12 @@ const runPreviewTest = async () => {
       cookies: cookies as Array<Record<string, unknown>> | undefined,
     });
     hasSuccessfulTest.value = Boolean(testResult.value.success);
+    lastSuccessfulTestSignature.value = testResult.value.success ? currentPreviewSignature.value : null;
     await loadPreview();
     showSuccessToast(testResult.value.message || 'Preview test completed');
   } catch (error: any) {
     hasSuccessfulTest.value = false;
+    lastSuccessfulTestSignature.value = null;
     console.error(error);
     showErrorToast(error?.message || 'Preview test failed');
   } finally {
@@ -230,7 +255,7 @@ const runPreviewTest = async () => {
 
 const saveTool = async () => {
   if (!sessionId.value) return;
-  if (!hasSuccessfulTest.value) {
+  if (!hasMatchingSuccessfulTest.value) {
     showErrorToast('Run a successful preview test before saving this tool');
     focusPreviewTestSection(previewTestSection.value);
     return;
@@ -266,7 +291,7 @@ onMounted(loadPreview);
         </button>
         <button
           class="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-[#8930b0] to-[#004be2] px-5 py-2 text-sm font-bold text-white disabled:cursor-not-allowed disabled:opacity-60"
-          :disabled="saving || loading || !hasSuccessfulTest"
+          :disabled="saving || loading || !hasMatchingSuccessfulTest"
           @click="saveTool"
         >
           <Save :size="16" />
