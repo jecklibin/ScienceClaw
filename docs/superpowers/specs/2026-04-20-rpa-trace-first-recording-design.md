@@ -26,7 +26,65 @@ Skill generation time: analyze traces, generalize, generate stable code, test, a
 Replay time: run mostly deterministic Playwright code, with runtime AI only where semantic reasoning is truly required.
 ```
 
-## 2. Design Goals
+## 2. Lessons From Previous Attempts
+
+This design intentionally incorporates the failures from the previous two redesigns.
+
+### 2.1 Runtime AI instruction patch on top of the old step model
+
+What worked:
+
+- It identified a real need: some steps require runtime semantic reasoning and cannot be safely compiled into fixed Playwright code at recording time.
+- It clarified the useful distinction between deterministic page-data logic and runtime semantic judgment.
+- It proved that recording-time execution must still happen; saving a rule without operating the browser breaks the user's recording flow.
+
+What failed:
+
+- Step classification was scattered across LLM prompts, local keyword rules, coercion helpers, and repair logic.
+- Local heuristics started to become the semantic source of truth.
+- Coercion sometimes rewrote user intent and dropped important constraints.
+- Recording-time success and exported Skill success diverged.
+- Same-page actions and extraction results were easy to misclassify as success or failure.
+- Generated code quality was inconsistent, especially with free-form JavaScript.
+
+Lesson:
+
+```text
+Adding one more step type does not solve the architecture problem if recording, execution, validation, and export still lack a simple shared lifecycle.
+```
+
+### 2.2 Recording-time Contract-first pipeline
+
+What worked:
+
+- It made semantic boundaries explicit.
+- It introduced structured outputs, blackboard-style dataflow, and replay validation.
+- It made manual and AI steps easier to reason about in a common model.
+
+What failed:
+
+- It moved too much complexity into the interactive recording path.
+- A single user command could trigger repeated snapshot capture, multiple LLM calls, compile/execute/validate cycles, repair attempts, and done checks.
+- Selector failures could be amplified by Playwright default timeouts.
+- Deterministic operators were too few, so simple tasks were split into too many steps.
+- The user experience became slower and less reliable than the upstream baseline.
+
+Lesson:
+
+```text
+Strong abstractions are useful after recording, but they are too expensive as the default live recording control loop.
+```
+
+### 2.3 Design rule derived from both failures
+
+The new design must preserve this boundary:
+
+```text
+Recording path: direct, bounded, trace-producing.
+Compilation path: heavier reasoning, generalization, replay testing, and repair.
+```
+
+## 3. Design Goals
 
 - Preserve the upstream direct RPA assistant experience during recording.
 - Make natural-language browser operations fast enough for interactive use.
@@ -38,15 +96,17 @@ Replay time: run mostly deterministic Playwright code, with runtime AI only wher
 - Generate Skills that are more stable than raw traces by applying post-hoc generalization and replay testing.
 - Keep architecture simple enough to debug and evolve.
 
-## 3. Non-goals
+## 4. Non-goals
 
 - Do not reintroduce Contract-first as the default recording-time control loop.
 - Do not run multiple Planner/Compiler/Validator LLM rounds for every interactive natural-language command.
 - Do not force every recorded step into a perfect final abstraction during recording.
 - Do not make local keyword rules the primary semantic classifier.
+- Do not make full DeepAgent the default recording-time controller.
+- Do not freely generate complex JavaScript for browser DOM operations when Python Playwright can do the job.
 - Do not optimize every possible RPA scenario in the first implementation. The first implementation must fully support the target scenarios listed in this document and leave clear extension points for later.
 
-## 4. Recommended Architecture
+## 5. Recommended Architecture
 
 The architecture is split into two stages.
 
@@ -88,13 +148,85 @@ Failure repair loop
 skill.py + optional trace/manifest metadata
 ```
 
-Compilation may use heavier reasoning, because it does not block the live recording interaction. This is where URL generalization, dataflow inference, validation generation, and replay repair belong.
+Compilation may use heavier reasoning because it does not block the live recording interaction. This is where URL generalization, dataflow inference, validation generation, and replay repair belong.
 
-## 5. Trace Model
+## 6. Agent Strategy
+
+The system should not choose an agent framework because it is powerful. It should choose the smallest control loop that satisfies the job.
+
+### 6.1 RecordingRuntimeAgent
+
+RecordingRuntimeAgent is a lightweight, recording-time browser operator.
+
+It should be custom-built or narrowly wrapped around the existing upstream RPA assistant path. It should not be a full DeepAgent loop.
+
+Responsibilities:
+
+- Accept one natural-language command.
+- Read a lightweight page snapshot and current `runtime_results`.
+- Generate one browser action or one Python Playwright script.
+- Execute it immediately.
+- Record an accepted trace if it succeeds.
+- Record failed attempts only as diagnostics.
+
+It may use Micro-ReAct:
+
+```text
+Plan once
+-> execute once
+-> if execution fails, observe the error and minimal page state
+-> repair once
+-> execute once
+-> accept trace or fail gracefully
+```
+
+Hard limits:
+
+- Normal successful command: at most one LLM call.
+- Failed command: at most one repair LLM call.
+- No open-ended ReAct loop.
+- No separate LLM done-check after every accepted trace.
+- No multi-step autonomous SOP planning during recording.
+- Failed attempts never appear as primary timeline steps.
+
+### 6.2 Python Playwright first
+
+Generated recording-time scripts should default to Python Playwright.
+
+Reason:
+
+- Prior attempts showed that free-form LLM-generated JavaScript frequently caused syntax, escaping, and Python/JavaScript mixing errors.
+- Python Playwright is easier to validate, repair, and reuse in final Skill code.
+
+Policy:
+
+- Prefer Python Playwright locator APIs for navigation, extraction, ranking, filling, and clicking.
+- Avoid free-form complex JavaScript generated by the LLM.
+- Allow JavaScript only for small read-only DOM extraction snippets or system-owned templates.
+- Do not put complex business logic inside `page.evaluate(...)` unless there is a measured performance reason and the snippet is simple.
+
+This is not a JavaScript ban. It is a ban on uncontrolled JavaScript generation in the recording loop.
+
+### 6.3 SkillCompilationAgent
+
+Skill compilation should default to a deterministic orchestrator plus targeted LLM calls, not DeepAgent.
+
+Default compilation components:
+
+- Trace analyzer.
+- Dataflow resolver.
+- Generalizer.
+- Script generator.
+- Replay tester.
+- Targeted repair prompt when replay fails.
+
+DeepAgent is optional for advanced post-hoc repair only when the deterministic compilation pipeline cannot diagnose or repair a failure. It must not become the default recording-time controller.
+
+## 7. Trace Model
 
 The recorder should store accepted traces separately from low-level diagnostics.
 
-### 5.1 Common Trace Fields
+### 7.1 Common Trace Fields
 
 Every accepted trace should include:
 
@@ -109,7 +241,7 @@ Every accepted trace should include:
 - `after_page`: URL, title, optional snapshot summary
 - `diagnostics_ref` for failed attempts or raw details
 
-### 5.2 Manual Action Trace
+### 7.2 Manual Action Trace
 
 Manual actions should record:
 
@@ -122,7 +254,7 @@ Manual actions should record:
 
 The primary timeline should display only the accepted manual action, not internal event noise.
 
-### 5.3 AI Operation Trace
+### 7.3 AI Operation Trace
 
 Natural-language operations should record:
 
@@ -135,7 +267,7 @@ Natural-language operations should record:
 
 The recording-time generated code may contain concrete URLs or selectors. That is acceptable because generalization happens later.
 
-### 5.4 Data Capture Trace
+### 7.4 Data Capture Trace
 
 Whenever a step extracts structured data, store a data capture trace:
 
@@ -151,21 +283,21 @@ Example:
 {
   "trace_type": "data_capture",
   "source": "ai",
-  "user_instruction": "抓取客户名称、邮箱、电话",
+  "user_instruction": "Extract customer name, email, and phone",
   "output_key": "customer_info",
   "output": {
-    "name": "张三",
-    "email": "zhangsan@example.com",
+    "name": "Alice Zhang",
+    "email": "alice@example.com",
     "phone": "13800000000"
   },
   "source_page": {
     "url": "https://example.test/customer/1",
-    "title": "客户详情"
+    "title": "Customer Detail"
   }
 }
 ```
 
-### 5.5 Dataflow Trace
+### 7.5 Dataflow Trace
 
 Cross-page workflows require a first-class dataflow trace. When a value is filled into a target page, the recorder should try to link the filled value to prior runtime results.
 
@@ -188,10 +320,10 @@ Example:
     "url": "https://example.test/create-order"
   },
   "target_field": {
-    "label": "客户名称",
+    "label": "Customer Name",
     "locator_candidates": []
   },
-  "value": "张三",
+  "value": "Alice Zhang",
   "source_ref_candidates": ["customer_info.name"],
   "selected_source_ref": "customer_info.name",
   "confidence": "exact_value_match"
@@ -200,7 +332,7 @@ Example:
 
 If no confident source ref exists, the trace should keep the literal value and mark the mapping as unresolved. The compilation UI can later ask for confirmation if needed.
 
-## 6. Runtime Results Store
+## 8. Runtime Results Store
 
 Recording should maintain a lightweight `runtime_results` object for the current session.
 
@@ -208,7 +340,7 @@ It is not a heavy contract blackboard. Its responsibilities are:
 
 - Store structured outputs from accepted data capture traces.
 - Allow later natural-language commands to reference previously captured data.
-- Support immediate A-to-B workflows, such as "把刚才抓到的信息填到当前表单".
+- Support immediate A-to-B workflows, such as "fill the current form with the data captured earlier".
 - Provide candidate refs for dataflow trace inference.
 
 Example:
@@ -220,34 +352,36 @@ Example:
     "url": "https://github.com/openai/openai-agents-python"
   },
   "customer_info": {
-    "name": "张三",
-    "email": "zhangsan@example.com"
+    "name": "Alice Zhang",
+    "email": "alice@example.com"
   }
 }
 ```
 
-## 7. Natural-language Recording Rules
+## 9. Natural-language Recording Rules
 
 Natural-language commands are recording-time browser assistance, not final Skill compilation.
 
 Rules:
 
-- Prefer the upstream direct assistant/ReAct path for operating the browser.
+- Prefer the upstream direct assistant/ReAct path for operating the browser, bounded by Micro-ReAct limits.
 - A single user instruction should normally use one LLM planning/code-generation call.
 - One bounded repair is allowed for execution errors caused by generated code syntax or obvious selector failure.
 - Failed attempts are diagnostics, not accepted traces.
 - If the operation succeeds, record the successful action/code/result trace.
 - Do not run a separate done-check LLM call after every accepted trace.
 - Do not force recording-time steps into final generalized Skill code.
+- Default to Python Playwright when generating scripts.
+- Avoid free-form complex JavaScript.
 
 Recommended behavior for common examples:
 
-- "打开 star 数量最多的项目": generate and run one script that parses the current list, finds the max star count, and navigates to the selected URL. Record the script, selected target, and after URL.
-- "打开和 Python 最相关的项目": use runtime semantic judgment once, navigate, and record selected target with reason.
-- "收集当前仓库前 10 个 PR": run deterministic extraction, record array output and source page.
-- "把刚才抓取的数据填到当前表单": consume `runtime_results`, fill fields, and record dataflow mappings.
+- "Open the project with the highest star count": generate and run one Python Playwright script that parses the current list, finds the max star count, and navigates to the selected URL. Record the script, selected target, and after URL.
+- "Open the project most related to Python": use runtime semantic judgment once, navigate, and record selected target with reason.
+- "Collect the first 10 PRs in the current repository": run deterministic extraction, record array output and source page.
+- "Fill the current form with the data captured earlier": consume `runtime_results`, fill fields, and record dataflow mappings.
 
-## 8. Left-side Timeline UX
+## 10. Left-side Timeline UX
 
 The recorder left panel should show accepted traces, not internal agent attempts.
 
@@ -265,23 +399,23 @@ Each card should show a concise human-readable summary.
 Examples:
 
 ```text
-01 手动打开页面
-打开 https://github.com/trending
+01 Manual navigation
+Open https://github.com/trending
 
-02 AI 操作
-打开 star 数量最多的项目
-结果：openai/openai-agents-python
+02 AI operation
+Open the project with the highest star count
+Result: openai/openai-agents-python
 
-03 手动操作
-进入 Pull requests 页面
+03 Manual operation
+Enter the Pull requests page
 
-04 AI 提取数据
-收集前 10 个 PR
-输出：top10_prs，10 条记录
+04 AI data capture
+Collect the first 10 PRs
+Output: top10_prs, 10 records
 
-05 数据填写
-customer_info.name → 客户名称
-customer_info.email → 邮箱
+05 Data fill
+customer_info.name -> Customer Name
+customer_info.email -> Email
 ```
 
 Expanded details may show:
@@ -296,7 +430,7 @@ Expanded details may show:
 
 The default collapsed timeline should remain simple and confidence-building.
 
-## 9. Post-hoc Skill Compilation
+## 11. Post-hoc Skill Compilation
 
 Compilation should transform traces into a replayable Skill.
 
@@ -314,11 +448,11 @@ Compilation tasks:
 Examples:
 
 - A recorded literal URL `https://github.com/openai/openai-agents-python/pulls` can become `{selected_project.url}/pulls` when `selected_project.url` was captured in a prior trace.
-- A literal filled value `"张三"` can become `customer_info["name"]` when it exactly matches a prior captured field.
+- A literal filled value `"Alice Zhang"` can become `customer_info["name"]` when it exactly matches a prior captured field.
 - A natural-language trace that selected the highest star count can become a deterministic script that parses star counts during replay.
 - A semantic trace that selected the most relevant project can remain a runtime AI instruction, but must output structured JSON for downstream steps.
 
-## 10. Validation Strategy
+## 12. Validation Strategy
 
 Validation should be strongest during replay and Skill generation, not during interactive recording.
 
@@ -337,7 +471,7 @@ Generation/replay-time validation:
 - Extracted text is not generic page chrome such as "Navigation Menu".
 - Runtime AI outputs match the required structured schema.
 
-## 11. Error Handling
+## 13. Error Handling
 
 Recording:
 
@@ -357,7 +491,7 @@ Replay:
 - Fail loudly on validation errors that would produce false success.
 - Surface step index, trace source, and repair hint.
 
-## 12. Migration From Current State
+## 14. Migration From Current State
 
 The new implementation should start from the upstream-style RPA path.
 
@@ -373,6 +507,8 @@ Do not keep as default recording path:
 - Recording-time Contract-first Planner/Compiler/Validator loop.
 - Multi-step contract repair for every natural-language instruction.
 - Heavy snapshot/re-plan/done-check cycle after every accepted action.
+- Full DeepAgent as the default recording-time controller.
+- Free-form LLM-generated JavaScript as the default browser scripting style.
 
 Add:
 
@@ -382,7 +518,7 @@ Add:
 - Left-side trace timeline.
 - Post-hoc Skill compiler and replay repair loop.
 
-## 13. Target Scenarios For First Complete Implementation
+## 15. Target Scenarios For First Complete Implementation
 
 The first implementation should fully support these scenarios:
 
@@ -393,13 +529,13 @@ The first implementation should fully support these scenarios:
 
 2. Deterministic natural-language operation:
    - User opens GitHub Trending.
-   - User says "打开 star 数量最多的项目".
+   - User says "open the project with the highest star count".
    - Recording completes quickly with one accepted AI trace.
    - Generated Skill does not hard-code the selected repo URL; it recomputes from the current page.
 
 3. Semantic natural-language operation:
    - User opens GitHub Trending.
-   - User says "打开和 Python 最相关的项目".
+   - User says "open the project most related to Python".
    - Recording records selected target and reason.
    - Generated Skill preserves runtime semantic selection only for this step.
 
@@ -417,7 +553,7 @@ The first implementation should fully support these scenarios:
    - Trace records source data and target field mappings.
    - Generated Skill fills B using extracted values, not recording-time literals.
 
-## 14. Architectural Trade-offs
+## 16. Architectural Trade-offs
 
 This design intentionally accepts less abstraction during recording in exchange for better interactive experience.
 
@@ -438,7 +574,22 @@ Costs:
 
 The trade-off is deliberate: slow work belongs after recording, not in the user's interactive loop.
 
-## 15. Open Extension Points
+## 17. Guardrails
+
+These guardrails are mandatory because prior attempts failed by letting complexity creep back into the recording path.
+
+- RecordingRuntimeAgent is Micro-ReAct only, not an open-ended ReAct or DeepAgent loop.
+- Normal successful natural-language recording commands should use one LLM call.
+- Execution failure may trigger at most one repair LLM call.
+- Python Playwright is the default generated scripting style.
+- Free-form complex JavaScript from the LLM is avoided by default.
+- JavaScript is allowed only for small read-only extraction snippets or system-owned templates.
+- Failed attempts are diagnostics, never primary timeline steps.
+- Skill compilation defaults to deterministic orchestration plus targeted LLM calls.
+- DeepAgent is optional for advanced post-hoc repair, not the default compilation path.
+- Any new abstraction must either shorten the recording path or improve replay reliability; otherwise it should not be added.
+
+## 18. Open Extension Points
 
 The design leaves room for:
 
