@@ -1287,6 +1287,13 @@ class RPAControlFlowHelperTests(unittest.TestCase):
 
         self.assertEqual(detect_upgrade_reason(text), "polling_loop")
 
+    def test_motivating_prompt_is_classified_as_polling_loop(self):
+        from backend.rpa.control_flow import detect_upgrade_reason
+
+        prompt = "如果列表中的一个条目状态不是完成状态，就每隔500毫秒点击下刷新，直到状态变为完成，然后点击下第一个条目的名称进行下载"
+
+        self.assertEqual(detect_upgrade_reason(prompt), "polling_loop")
+
     def test_detect_upgrade_reason_identifies_conditional_branch(self):
         from backend.rpa.control_flow import detect_upgrade_reason
 

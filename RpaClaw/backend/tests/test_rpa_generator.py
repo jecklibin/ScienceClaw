@@ -962,6 +962,52 @@ class PlaywrightGeneratorTests(unittest.TestCase):
         self.assertIn("status = await page.locator('#status').inner_text()", script)
         self.assertNotIn('_results["status"] = status', script)
 
+    def test_generate_script_preserves_polling_timeout_and_download_wrapper_in_ai_script(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "ai_script",
+                "source": "ai",
+                "description": "Wait until first item completes and download",
+                "value": "\n".join(
+                    [
+                        "async def run(page):",
+                        "    interval_ms = 500",
+                        "    timeout_ms = 60000",
+                        "    elapsed_ms = 0",
+                        "    while elapsed_ms <= timeout_ms:",
+                        "        status_text = '完成'",
+                        "        if '完成' in status_text:",
+                        "            break",
+                        "        await page.get_by_role('button', name='刷新').click()",
+                        "        await page.wait_for_timeout(interval_ms)",
+                        "        elapsed_ms += interval_ms",
+                        "    else:",
+                        "        raise TimeoutError('condition_timeout')",
+                        "    async with page.expect_download() as download_info:",
+                        "        await page.get_by_role('link').first.click()",
+                        "    download = await download_info.value",
+                        "    return {'download_filename': download.suggested_filename}",
+                    ]
+                ),
+                "assistant_diagnostics": {
+                    "execution_mode": "code",
+                    "upgrade_reason": "polling_loop",
+                    "template": "poll_until_text_then_download",
+                },
+                "url": "https://example.com",
+                "tab_id": "tab-1",
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn("interval_ms = 500", script)
+        self.assertIn("timeout_ms = 60000", script)
+        self.assertIn("raise TimeoutError('condition_timeout')", script)
+        self.assertIn("async with page.expect_download() as download_info:", script)
+        self.assertIn("_results.update(_rpa_ai_step_1_result)", script)
+
     def test_generate_script_keeps_body_only_ai_script_compatibility(self):
         generator = PlaywrightGenerator()
         steps = [
