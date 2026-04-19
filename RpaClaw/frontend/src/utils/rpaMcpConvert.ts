@@ -16,6 +16,22 @@ export interface PreviewTestStatusInput {
   hasConfigChangesSinceLastTest: boolean;
 }
 
+export function buildRpaToolEditorLocation(input: {
+  sessionId: string;
+  skillName?: string;
+  skillDescription?: string;
+}) {
+  return {
+    path: '/chat/tools/mcp/new',
+    query: {
+      source: 'rpa-session',
+      sessionId: input.sessionId,
+      skillName: input.skillName || '',
+      skillDescription: input.skillDescription || '',
+    },
+  };
+}
+
 function normalizeList(items: string[]): string[] {
   return items.map((item) => item.trim()).filter(Boolean);
 }

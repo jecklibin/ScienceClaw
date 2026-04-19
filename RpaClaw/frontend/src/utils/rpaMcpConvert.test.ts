@@ -1,11 +1,30 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  buildRpaToolEditorLocation,
   buildPreviewDraftSignature,
   focusPreviewTestSection,
   getPreviewTestStatus,
   hasMatchingPreviewTest,
 } from './rpaMcpConvert';
+
+describe('buildRpaToolEditorLocation', () => {
+  it('routes MCP publishing into the Tools domain with session context', () => {
+    expect(buildRpaToolEditorLocation({
+      sessionId: 'session-1',
+      skillName: 'github-project-issue',
+      skillDescription: 'Fetch the first issue',
+    })).toEqual({
+      path: '/chat/tools/mcp/new',
+      query: {
+        source: 'rpa-session',
+        sessionId: 'session-1',
+        skillName: 'github-project-issue',
+        skillDescription: 'Fetch the first issue',
+      },
+    });
+  });
+});
 
 describe('getPreviewTestStatus', () => {
   it('returns untested before any preview test runs', () => {
