@@ -39,6 +39,12 @@ export interface RpaMcpPreview {
   output_inference_report?: Record<string, unknown>;
   sanitize_report: {
     removed_steps: number[];
+    removed_step_details?: Array<{
+      index: number;
+      action?: string;
+      description?: string;
+      url?: string;
+    }>;
     removed_params: string[];
     warnings: string[];
   };

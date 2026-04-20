@@ -783,6 +783,8 @@ export default {
   'MCP Editor Sanitize report': 'Sanitize report',
   'MCP Editor Sanitize report hint': 'Login actions are removed before the tool is shared.',
   'MCP Editor Removed login steps': 'Removed login steps',
+  'MCP Editor Removed from MCP tool': 'Removed in MCP',
+  'MCP Editor Removed step number': 'Step {number}',
   'MCP Editor Removed params': 'Removed params',
   'MCP Editor Warnings': 'Warnings',
   'MCP Editor None': 'None',

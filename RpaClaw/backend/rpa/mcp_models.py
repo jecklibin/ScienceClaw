@@ -50,6 +50,7 @@ class RpaMcpSource(BaseModel):
 
 class RpaMcpSanitizeReport(BaseModel):
     removed_steps: list[int] = Field(default_factory=list)
+    removed_step_details: list[dict[str, Any]] = Field(default_factory=list)
     removed_params: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 

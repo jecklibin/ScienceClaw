@@ -345,6 +345,20 @@ const schemaSummary = computed(() => buildSchemaSummary({
   input_schema: preview.value?.input_schema,
   output_schema: preview.value?.output_schema,
 }));
+const removedStepIndexSet = computed(() => new Set(preview.value?.sanitize_report?.removed_steps || []));
+const removedStepDetails = computed(() => {
+  const details = preview.value?.sanitize_report?.removed_step_details || [];
+  if (details.length) return details;
+  return (preview.value?.sanitize_report?.removed_steps || []).map((index) => {
+    const step = recordedSteps.value[index];
+    return {
+      index,
+      action: step?.action || '',
+      description: step ? getStepTitle(step) : '',
+      url: step?.url || '',
+    };
+  });
+});
 const showCookieSection = computed(() => shouldShowCookieSection(preview.value, cookieSectionOpen.value));
 const currentPreviewSignature = computed(() => buildPreviewDraftSignature({
   sessionId: sessionId.value,
@@ -397,6 +411,8 @@ const pageDescription = computed(() => {
     ? t('MCP Editor Publish an RPA recording as a reusable MCP tool.')
     : t('MCP Editor Edit MCP tool metadata, schemas, preview test state, and recorded steps.');
 });
+
+const isRemovedStep = (index: number) => removedStepIndexSet.value.has(index);
 
 const loadRecordedSession = async () => {
   if (!sessionId.value) {
@@ -732,13 +748,13 @@ onMounted(async () => {
                   v-for="(step, idx) in recordedSteps"
                   :key="step.id"
                   class="overflow-hidden rounded-lg border bg-white shadow-sm transition-all dark:bg-white/[0.04]"
-                  :class="expandedStepIndex === idx ? 'border-violet-300 shadow-lg shadow-violet-500/10 dark:border-violet-400/30' : 'border-slate-200 dark:border-white/10'"
+                  :class="isRemovedStep(idx) ? 'border-rose-200 bg-rose-50/70 dark:border-rose-400/30 dark:bg-rose-500/10' : (expandedStepIndex === idx ? 'border-violet-300 shadow-lg shadow-violet-500/10 dark:border-violet-400/30' : 'border-slate-200 dark:border-white/10')"
                 >
                   <div class="cursor-pointer px-4 py-4 sm:px-5" @click="toggleStep(idx)">
                     <div class="flex items-start gap-4">
                       <div
                         class="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl text-xs font-extrabold"
-                        :class="expandedStepIndex === idx ? 'bg-violet-600 text-white' : 'bg-slate-100 text-slate-500 dark:bg-white/10 dark:text-slate-400'"
+                        :class="isRemovedStep(idx) ? 'bg-rose-100 text-rose-700 dark:bg-rose-500/20 dark:text-rose-200' : (expandedStepIndex === idx ? 'bg-violet-600 text-white' : 'bg-slate-100 text-slate-500 dark:bg-white/10 dark:text-slate-400')"
                       >
                         {{ String(idx + 1).padStart(2, '0') }}
                       </div>
@@ -763,6 +779,12 @@ onMounted(async () => {
                             class="rounded-full bg-violet-50 px-2.5 py-1 text-[10px] font-semibold text-violet-700 ring-1 ring-violet-100 dark:bg-violet-500/10 dark:text-violet-200 dark:ring-violet-400/20"
                           >
                             {{ getFrameHint(step) }}
+                          </span>
+                          <span
+                            v-if="isRemovedStep(idx)"
+                            class="rounded-full bg-rose-100 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-rose-700 ring-1 ring-rose-200 dark:bg-rose-500/15 dark:text-rose-200 dark:ring-rose-400/20"
+                          >
+                            {{ t('MCP Editor Removed from MCP tool') }}
                           </span>
                         </div>
 
@@ -1045,7 +1067,23 @@ onMounted(async () => {
             <div v-if="preview" class="mt-4 space-y-3 text-sm">
               <div>
                 <p class="font-semibold">{{ t('MCP Editor Removed login steps') }}</p>
-                <p class="text-slate-500 dark:text-slate-400">{{ preview.sanitize_report.removed_steps.join(', ') || t('MCP Editor None') }}</p>
+                <div v-if="removedStepDetails.length" class="mt-2 space-y-2">
+                  <div
+                    v-for="detail in removedStepDetails"
+                    :key="detail.index"
+                    class="rounded-2xl border border-rose-100 bg-rose-50 px-3 py-2 text-rose-800 dark:border-rose-400/20 dark:bg-rose-500/10 dark:text-rose-100"
+                  >
+                    <div class="flex flex-wrap items-center gap-2">
+                      <span class="rounded-full bg-white/70 px-2 py-0.5 text-[10px] font-bold dark:bg-white/10">
+                        {{ t('MCP Editor Removed step number', { number: Number(detail.index) + 1 }) }}
+                      </span>
+                      <span class="text-xs font-semibold uppercase tracking-wide">{{ getActionLabel(detail.action || '') }}</span>
+                    </div>
+                    <p class="mt-1 text-sm font-semibold">{{ detail.description || '-' }}</p>
+                    <p v-if="detail.url" class="mt-1 break-all font-mono text-[11px] opacity-75">{{ detail.url }}</p>
+                  </div>
+                </div>
+                <p v-else class="text-slate-500 dark:text-slate-400">{{ t('MCP Editor None') }}</p>
               </div>
               <div>
                 <p class="font-semibold">{{ t('MCP Editor Removed params') }}</p>

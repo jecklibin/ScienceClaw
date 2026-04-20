@@ -826,6 +826,8 @@ export default {
   'MCP Editor Sanitize report': '清理报告',
   'MCP Editor Sanitize report hint': '工具对外共享前，登录行为会被移除。',
   'MCP Editor Removed login steps': '已移除的登录步骤',
+  'MCP Editor Removed from MCP tool': 'MCP 中移除',
+  'MCP Editor Removed step number': '步骤 {number}',
   'MCP Editor Removed params': '已移除的参数',
   'MCP Editor Warnings': '警告',
   'MCP Editor None': '无',

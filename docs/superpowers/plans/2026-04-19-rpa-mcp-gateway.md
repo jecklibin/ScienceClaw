@@ -420,7 +420,7 @@ class RpaMcpConverter:
 
 Implementation details to include in the file:
 
-- `_detect_login_range()` should treat `sensitive=true`, `{{credential}}`, labels matching `password`, and buttons matching `login/sign in/鐧诲綍` as strong login signals.
+- `_detect_login_range()` should treat `sensitive=true`, `{{credential}}`, labels matching `password/密码`, and buttons matching `login/sign in/登录` as strong login signals.
 - `_strip_login_steps()` should remove the detected contiguous range and emit a warning if the range is missing or uncertain.
 - `_strip_login_params()` should remove keys whose original values appear in removed login fill steps, plus sensitive/credential-bound params.
 - `_collect_domains()` should gather unique URL hosts from recorded steps and return the registrable host strings used in `allowed_domains`.
