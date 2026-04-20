@@ -1,4 +1,4 @@
-servers:
+﻿servers:
   - id: pubmed
     name: PubMed MCP
     description: PubMed search access
@@ -11,3 +11,11 @@ servers:
     # to `headers` by the backend.
     # headers:
     #   Authorization: "Bearer {{ api_key }}"
+  - id: rpa_gateway
+    name: RPA Tool Gateway
+    description: Unified entry for RPA MCP tools published from Tools
+    transport: streamable_http
+    enabled: true
+    default_enabled: false
+    url: http://localhost:12001/api/v1/rpa-mcp/mcp
+

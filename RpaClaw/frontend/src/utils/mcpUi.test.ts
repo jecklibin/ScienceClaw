@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
   computeEffectiveMcpEnabled,
+  buildUnifiedMcpItems,
+  formatMcpServerDescription,
   groupMcpServers,
   hasCredentialTemplate,
   isMcpToolMeta,
@@ -29,6 +31,51 @@ describe('groupMcpServers', () => {
     expect(result.user.map((server) => server.server_key)).toEqual([
       'user:notion',
     ]);
+  });
+});
+
+describe('buildUnifiedMcpItems', () => {
+  it('merges user MCP servers and RPA MCP tools into one render list', () => {
+    const items = buildUnifiedMcpItems(
+      [
+        { id: 'server_1', server_key: 'user:notion', name: 'Notion' },
+        { id: 'server_2', server_key: 'user:github', name: 'GitHub' },
+      ],
+      [
+        { id: 'rpa_mcp_1', tool_name: 'fetch_issue', name: 'Fetch issue' },
+      ],
+    );
+
+    expect(items).toEqual([
+      { kind: 'server', id: 'server_1', server: { id: 'server_1', server_key: 'user:notion', name: 'Notion' } },
+      { kind: 'server', id: 'server_2', server: { id: 'server_2', server_key: 'user:github', name: 'GitHub' } },
+      { kind: 'rpa_tool', id: 'rpa_mcp_1', tool: { id: 'rpa_mcp_1', tool_name: 'fetch_issue', name: 'Fetch issue' } },
+    ]);
+  });
+});
+
+describe('formatMcpServerDescription', () => {
+  it('explains the internal RPA gateway in user-facing language', () => {
+    expect(
+      formatMcpServerDescription(
+        {
+          id: 'rpa_gateway',
+          server_key: 'system:rpa_gateway',
+          scope: 'system',
+          description: 'Converted RPA tools exposed through one central gateway',
+        },
+        (key) => `translated:${key}`,
+      ),
+    ).toBe('translated:RPA gateway platform description');
+  });
+
+  it('uses the configured description for normal MCP servers', () => {
+    expect(
+      formatMcpServerDescription(
+        { id: 'pubmed', scope: 'system', description: 'PubMed search access' },
+        (key) => key,
+      ),
+    ).toBe('PubMed search access');
   });
 });
 

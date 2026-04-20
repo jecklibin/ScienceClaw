@@ -3,8 +3,8 @@ import { createRouter, createWebHistory, RouterView } from 'vue-router'
 import App from './App.vue'
 import './assets/global.css'
 import './assets/theme.css'
-import 'highlight.js/styles/github-dark.css'  // 代码高亮样式
-import 'katex/dist/katex.min.css'  // KaTeX 数学公式样式
+import 'highlight.js/styles/github-dark.css'
+import 'katex/dist/katex.min.css'
 import './utils/toast'
 import i18n from './composables/useI18n'
 import { getStoredToken, getCachedAuthProvider } from './api/auth'
@@ -24,6 +24,8 @@ import CredentialsPage from './pages/CredentialsPage.vue'
 import RecorderPage from './pages/rpa/RecorderPage.vue'
 import ConfigurePage from './pages/rpa/ConfigurePage.vue'
 import TestPage from './pages/rpa/TestPage.vue'
+import McpConvertPage from './pages/rpa/McpConvertPage.vue'
+import McpToolEditorPage from './pages/tools/McpToolEditorPage.vue'
 import { configure } from "vue-gtag";
 
 configure({
@@ -66,6 +68,16 @@ export const router = createRouter({
           meta: { requiresAuth: true }
         },
         {
+          path: 'tools/mcp/new',
+          component: McpToolEditorPage,
+          meta: { requiresAuth: true }
+        },
+        {
+          path: 'tools/mcp/:toolId',
+          component: McpToolEditorPage,
+          meta: { requiresAuth: true }
+        },
+        {
           path: 'tools/:toolName',
           component: ToolDetailPage,
           meta: { requiresAuth: true }
@@ -98,6 +110,10 @@ export const router = createRouter({
         {
           path: 'test',
           component: TestPage,
+        },
+        {
+          path: 'convert-mcp',
+          component: McpConvertPage,
         }
       ]
     },

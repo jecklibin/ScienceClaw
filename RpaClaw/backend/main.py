@@ -25,6 +25,7 @@ from backend.route.statistics import router as statistics_router
 from backend.route.rpa import router as rpa_router
 from backend.route.credential import router as credential_router
 from backend.route.mcp import router as mcp_router
+from backend.route.rpa_mcp import router as rpa_mcp_router
 from backend.route.runtime_proxy import router as runtime_proxy_router
 from backend.runtime.session_runtime_manager import get_session_runtime_manager
 from backend.models import init_system_models
@@ -157,6 +158,7 @@ def create_app() -> FastAPI:
     app.include_router(runtime_proxy_router, prefix="/api/v1")
     app.include_router(credential_router, prefix="/api/v1")
     app.include_router(mcp_router, prefix="/api/v1")
+    app.include_router(rpa_mcp_router, prefix="/api/v1")
 
     logger.info("FastAPI initialized with /api/v1 endpoints")
     return app
