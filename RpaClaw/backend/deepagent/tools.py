@@ -6,6 +6,7 @@ DeepAgents 内置工具集。
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 
@@ -55,6 +56,97 @@ def propose_tool_save(tool_name: str, replaces: str = "") -> str:
         msg += f" This will replace the existing tool '{replaces}'."
     msg += " Waiting for user confirmation."
     return msg
+
+
+def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_dir: str):
+    """Create session-bound tools used by recording-creator."""
+
+    @tool
+    def start_recording_run(message: str, kind: str = "rpa", publish_target: str = "") -> str:
+        """Start a conversational RPA/MCP recording run for the current chat session.
+
+        Args:
+            message: User-facing recording goal, such as "录制业务流程技能".
+            kind: Recording kind: rpa, mcp, or mixed.
+            publish_target: Optional target: skill or tool.
+
+        Returns:
+            JSON payload with recording_event=recording_run_started. The frontend opens the recorder workbench from it.
+        """
+        from backend.recording.intent import detect_recording_intent
+        from backend.recording.service import recording_orchestrator
+
+        intent = detect_recording_intent(message)
+        resolved_kind = kind if kind in {"rpa", "mcp", "mixed"} else (intent.kind if intent else "rpa")
+        run = recording_orchestrator.create_run(
+            session_id=session_id,
+            user_id=str(user_id),
+            kind=resolved_kind,
+        )
+        if publish_target in {"skill", "tool"}:
+            run.save_intent = publish_target
+            run.publish_target = publish_target
+        elif intent and intent.save_intent:
+            run.save_intent = intent.save_intent
+        segment = recording_orchestrator.start_segment(
+            run,
+            kind=resolved_kind,
+            intent=message,
+            requires_workbench=True,
+        )
+        return json.dumps(
+            {
+                "recording_event": "recording_run_started",
+                "run": run.model_dump(mode="json"),
+                "segment": segment.model_dump(mode="json"),
+                "open_workbench": True,
+            },
+            ensure_ascii=False,
+        )
+
+    @tool
+    def begin_recording_test(run_id: str) -> str:
+        """Move an existing recording run into testing state and return a test payload."""
+        from backend.recording.service import recording_orchestrator
+        from backend.recording.testing import build_test_payload
+
+        run = recording_orchestrator.get_run(run_id)
+        if run.session_id != session_id or run.user_id != str(user_id):
+            return "Error: recording run not found for this session."
+        recording_orchestrator.begin_testing(run)
+        payload = _run_async(build_test_payload(run))
+        return json.dumps(
+            {
+                "recording_event": "recording_test_started",
+                "run": run.model_dump(mode="json"),
+                "test_payload": payload,
+            },
+            ensure_ascii=False,
+        )
+
+    @tool
+    def prepare_recording_publish(run_id: str, publish_target: str = "skill") -> str:
+        """Prepare staged files for a tested recording run before calling propose_skill_save/propose_tool_save."""
+        from backend.recording.publishing import build_publish_artifacts
+        from backend.recording.service import recording_orchestrator
+
+        run = recording_orchestrator.get_run(run_id)
+        if run.session_id != session_id or run.user_id != str(user_id):
+            return "Error: recording run not found for this session."
+        recording_orchestrator.mark_ready_to_publish(run, publish_target)
+        prepared = _run_async(build_publish_artifacts(run, workspace_dir=workspace_dir))
+        return json.dumps(
+            {
+                "recording_event": "recording_publish_prepared",
+                "run": run.model_dump(mode="json"),
+                "prompt_kind": prepared.prompt_kind,
+                "staging_paths": prepared.staging_paths,
+                "summary": prepared.summary,
+            },
+            ensure_ascii=False,
+        )
+
+    return [start_recording_run, begin_recording_test, prepare_recording_publish]
 
 
 @tool

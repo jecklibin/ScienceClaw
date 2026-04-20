@@ -53,6 +53,11 @@ from backend.models import get_model_config
 from backend.config import settings
 from backend.browser_preview import browser_preview_registry
 from backend.rpa.screencast import ScreencastService
+from backend.recording.intent import detect_recording_intent
+from backend.recording.models import RecordingArtifact
+from backend.recording.service import artifact_registry, recording_orchestrator
+from backend.recording import publishing as recording_publishing
+from backend.recording import testing as recording_testing
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -116,6 +121,20 @@ class ChatRequest(BaseModel):
     model_config_id: Optional[str] = Field(default=None, description="Model config ID to use (overrides session default)")
 
 
+class CreateRecordingRunRequest(BaseModel):
+    message: str = Field(..., description="Original user message used to start a recording run")
+
+
+class CompleteRecordingSegmentRequest(BaseModel):
+    rpa_session_id: Optional[str] = Field(default=None, description="Backing RPA session ID for locator repair")
+    steps: List[Dict[str, Any]] = Field(default_factory=list, description="Normalized step list for this segment")
+    artifacts: List[Dict[str, Any]] = Field(default_factory=list, description="Artifacts produced by this segment")
+
+
+class PublishRecordingRunRequest(BaseModel):
+    publish_target: str = Field(default="skill", description="Publish target: skill or tool")
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 内部辅助函数
 # ═══════════════════════════════════════════════════════════════════
@@ -134,6 +153,16 @@ def _wrap_event(event: str, data: Dict[str, Any]) -> Dict[str, Any]:
 
 def _json_dumps(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _serialize_recording_obj(obj: Any) -> Dict[str, Any]:
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump(mode="json")
+    result: Dict[str, Any] = {}
+    for key in ("id", "status", "kind", "intent", "session_id", "user_id", "type", "active_segment_id", "save_intent"):
+        if hasattr(obj, key):
+            result[key] = getattr(obj, key)
+    return result
 
 
 def _session_to_list_item(session) -> ListSessionItem:
@@ -1850,6 +1879,195 @@ async def _agent_background_worker(
         _agent_tasks.pop(session_id, None)
         _agent_queues.pop(session_id, None)
         logger.info(f"[AgentWorker] session={session_id} completed")
+
+
+@router.post("/{session_id}/recordings", response_model=ApiResponse)
+async def create_recording_run(
+    session_id: str,
+    body: CreateRecordingRunRequest,
+    current_user: User = Depends(require_user),
+) -> ApiResponse:
+    try:
+        session = await async_get_science_session(session_id)
+        if session.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Access denied")
+    except ScienceSessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    intent = detect_recording_intent(body.message)
+    if intent is None:
+        raise HTTPException(status_code=400, detail="No recording intent detected")
+
+    run = recording_orchestrator.create_run(
+        session_id=session_id,
+        user_id=str(current_user.id),
+        kind=intent.kind,
+    )
+    run.save_intent = intent.save_intent
+    segment = recording_orchestrator.start_segment(
+        run,
+        kind=intent.kind,
+        intent=body.message,
+        requires_workbench=intent.requires_workbench,
+    )
+
+    return ApiResponse(data={
+        "run_id": getattr(run, "id", ""),
+        "segment_id": getattr(segment, "id", ""),
+        "open_workbench": intent.requires_workbench,
+    })
+
+
+@router.post("/{session_id}/recordings/{run_id}/segments/{segment_id}/complete", response_model=ApiResponse)
+async def complete_recording_segment(
+    session_id: str,
+    run_id: str,
+    segment_id: str,
+    body: CompleteRecordingSegmentRequest,
+    current_user: User = Depends(require_user),
+) -> ApiResponse:
+    try:
+        session = await async_get_science_session(session_id)
+        if session.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Access denied")
+    except ScienceSessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    try:
+        run = recording_orchestrator.get_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Recording run not found") from exc
+
+    if run.session_id != session_id or run.user_id != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    segment = next((item for item in run.segments if item.id == segment_id), None)
+    if segment is None:
+        raise HTTPException(status_code=404, detail="Recording segment not found")
+
+    segment.steps = body.steps
+    if body.rpa_session_id:
+        segment.exports["rpa_session_id"] = body.rpa_session_id
+
+    for artifact_data in body.artifacts:
+        artifact = RecordingArtifact(
+            id=str(shortuuid.uuid()),
+            run_id=run.id,
+            segment_id=segment.id,
+            name=str(artifact_data.get("name") or "artifact"),
+            type=str(artifact_data.get("type") or "text"),
+            path=artifact_data.get("path"),
+            value=artifact_data.get("value"),
+            mime_type=artifact_data.get("mime_type"),
+            labels=list(artifact_data.get("labels") or []),
+            producer_step_id=artifact_data.get("producer_step_id"),
+        )
+        artifact_registry.register(run, segment, artifact)
+
+    recording_orchestrator.complete_segment(run, segment)
+    summary = recording_orchestrator.build_segment_summary(segment)
+    if body.rpa_session_id:
+        summary["session_id"] = body.rpa_session_id
+
+    completed_data = {
+        "event_id": _new_event_id(),
+        "timestamp": _now_ts(),
+        "segment": _serialize_recording_obj(segment),
+        "summary": summary,
+    }
+    _append_session_event(session, _wrap_event("recording_segment_completed", completed_data))
+    await session.save()
+
+    return ApiResponse(data={
+        "run": _serialize_recording_obj(run),
+        "segment": _serialize_recording_obj(segment),
+        "summary": summary,
+    })
+
+
+@router.post("/{session_id}/recordings/{run_id}/test", response_model=ApiResponse)
+async def test_recording_run(
+    session_id: str,
+    run_id: str,
+    current_user: User = Depends(require_user),
+) -> ApiResponse:
+    try:
+        session = await async_get_science_session(session_id)
+        if session.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Access denied")
+    except ScienceSessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    try:
+        run = recording_orchestrator.get_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Recording run not found") from exc
+
+    if run.session_id != session_id or run.user_id != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    recording_orchestrator.begin_testing(run)
+    test_payload = await recording_testing.build_test_payload(run)
+    event_data = {
+        "event_id": _new_event_id(),
+        "timestamp": _now_ts(),
+        "run": _serialize_recording_obj(run),
+        "test_payload": test_payload,
+    }
+    _append_session_event(session, _wrap_event("recording_test_started", event_data))
+    await session.save()
+
+    return ApiResponse(data={
+        "run": _serialize_recording_obj(run),
+        "test_payload": test_payload,
+    })
+
+
+@router.post("/{session_id}/recordings/{run_id}/publish", response_model=ApiResponse)
+async def publish_recording_run(
+    session_id: str,
+    run_id: str,
+    body: PublishRecordingRunRequest,
+    current_user: User = Depends(require_user),
+) -> ApiResponse:
+    try:
+        session = await async_get_science_session(session_id)
+        if session.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Access denied")
+    except ScienceSessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    try:
+        run = recording_orchestrator.get_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Recording run not found") from exc
+
+    if run.session_id != session_id or run.user_id != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    try:
+        recording_orchestrator.mark_ready_to_publish(run, body.publish_target)
+        prepared = await recording_publishing.build_publish_artifacts(run, workspace_dir=str(_WORKSPACE_DIR))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    event_data = {
+        "event_id": _new_event_id(),
+        "timestamp": _now_ts(),
+        "run": _serialize_recording_obj(run),
+        "prompt_kind": prepared.prompt_kind,
+        "staging_paths": prepared.staging_paths,
+        "summary": prepared.summary,
+    }
+    _append_session_event(session, _wrap_event("recording_publish_prepared", event_data))
+    await session.save()
+
+    return ApiResponse(data={
+        "run": _serialize_recording_obj(run),
+        "prompt_kind": prepared.prompt_kind,
+        "staging_paths": prepared.staging_paths,
+        "summary": prepared.summary,
+    })
 
 
 @router.post("/{session_id}/chat")

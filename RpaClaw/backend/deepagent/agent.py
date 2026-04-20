@@ -38,7 +38,13 @@ from backend.deepagent.local_path_backend import LocalPathBackend
 from backend.deepagent.mcp_registry import build_effective_mcp_servers
 from backend.deepagent.mcp_runtime import McpSdkRuntimeFactory
 from backend.deepagent.mcp_tools_loader import load_mcp_tools
-from backend.deepagent.tools import propose_skill_save, propose_tool_save, eval_skill, grade_eval
+from backend.deepagent.tools import (
+    propose_skill_save,
+    propose_tool_save,
+    eval_skill,
+    grade_eval,
+    create_recording_lifecycle_tools,
+)
 from backend.deepagent.full_sandbox_backend import FullSandboxBackend
 from backend.deepagent.external_tools_loader import ExternalToolsLoader
 from backend.deepagent.mongo_skill_backend import MongoSkillBackend
@@ -414,6 +420,7 @@ def _collect_tools(
     sandbox_base_url: str | None = None,
     loader_cache_key: str | None = None,
     mcp_tools: list | None = None,
+    context_tools: list | None = None,
 ) -> List:
     """合并内置工具与外部扩展工具，去重并过滤屏蔽项。
 
@@ -434,7 +441,7 @@ def _collect_tools(
         except Exception:
             logger.warning("[Agent] 动态加载外部工具失败", exc_info=True)
 
-    for t in _STATIC_TOOLS + ext_tools + list(mcp_tools or []):
+    for t in _STATIC_TOOLS + list(context_tools or []) + ext_tools + list(mcp_tools or []):
         if t.name in blocked:
             logger.info(f"[Agent] 工具已屏蔽，跳过: {t.name}")
             continue
@@ -558,12 +565,19 @@ async def deep_agent(
         if ctx.get("success"):
             sandbox_info = ctx.get("data")
 
+    recording_tools = create_recording_lifecycle_tools(
+        session_id=session_id,
+        user_id=user_id or "default_user",
+        workspace_dir=local_workspace,
+    )
+
     # ── 检测 Tools 目录变更并按需重新加载 ──
     tools = _collect_tools(
         blocked_tools=blocked_tools,
         sandbox_base_url=runtime_sandbox_base_url,
         loader_cache_key=session_id,
         mcp_tools=mcp_tools,
+        context_tools=recording_tools,
     )
 
     mcp_tools_for_sse = [
@@ -717,10 +731,11 @@ NEVER use `npx skills`. Use `skills` directly. When installing: `HOME={sandbox_w
 ## Task Resources
 - **Existing skill?** → `read_file` the SKILL.md and follow it. Check `{external_path_for_prompt}` for local installs first.
 - **PDF processing?** → `read_file("{builtin_path_for_prompt}pdf/SKILL.md")`. For form filling, also read FORMS.md.
+- **Record an RPA skill, business workflow skill, or MCP tool** → `read_file("{builtin_path_for_prompt}recording-creator/SKILL.md")`. Use this for conversational recording, multi-segment workflow capture, artifact handoff, testing, repair, and publish preparation.
 - **Create a tool** → `read_file("{builtin_path_for_prompt}tool-creator/SKILL.md")`. NEVER write to /app/Tools/ directly.
 - **Create a skill** → `read_file("{builtin_path_for_prompt}skill-creator/SKILL.md")`. NEVER write to `{external_path_for_prompt}` directly.
 - **Find ecosystem skill** → `read_file("{builtin_path_for_prompt}find-skills/SKILL.md")`. After 2-3 failures, create from scratch.
-Always use `write_file` to workspace then `propose_skill_save` / `propose_tool_save`.
+Always use `write_file` to workspace then `propose_skill_save` / `propose_tool_save`; recorded skills/tools must also complete the recording-creator test/repair/publish workflow first.
 """
     GENERAL_PURPOSE_SUBAGENT["system_prompt"] = DEFAULT_SUBAGENT_PROMPT + _subagent_policy
 

@@ -526,6 +526,11 @@ class RPASessionManager:
 
         async def on_download(download):
             suggested = download.suggested_filename
+            download_path = None
+            try:
+                download_path = await download.path()
+            except Exception:
+                logger.debug("download path not available during recording for session=%s", session_id)
             # Wait briefly for the click step to be recorded before upgrading it
             await asyncio.sleep(0.3)
             tab_meta = self._tab_meta.get(session_id, {}).get(tab_id)
@@ -540,6 +545,7 @@ class RPASessionManager:
                     "download",
                     {
                         "filename": suggested,
+                        "path": download_path,
                         "tab_id": tab_id,
                         "opener_tab_id": opener_tab_id,
                     },
@@ -554,6 +560,13 @@ class RPASessionManager:
                 "url": getattr(page, "url", ""),
                 "timestamp": int(datetime.now().timestamp() * 1000),
                 "tab_id": tab_id,
+                "signals": {
+                    "download": {
+                        "filename": suggested,
+                        "path": download_path,
+                        "tab_id": tab_id,
+                    }
+                },
             }
             await self._handle_event(session_id, evt)
 

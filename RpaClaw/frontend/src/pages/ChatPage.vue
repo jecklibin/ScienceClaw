@@ -39,6 +39,12 @@
 
       <div class="mx-auto w-full max-w-full sm:max-w-[768px] sm:min-w-[390px] flex flex-col flex-1">
         <div class="flex flex-col w-full gap-[12px] pb-[80px] pt-[12px] flex-1 overflow-y-auto">
+          <RecordingArtifactList :artifacts="recordingStore.artifacts.value" />
+          <RecordingSegmentCard
+            v-for="summary in recordingStore.summaries.value"
+            :key="summary.segment_id"
+            :summary="summary"
+          />
           <template v-for="(group, index) in groupedMessages" :key="group.id">
             <!-- Process groups: compact reasoning indicator -->
             <div v-if="group.type === 'process'" class="flex items-start py-1 my-1">
@@ -188,6 +194,15 @@
       <ToolPanel ref="toolPanel" :size="toolPanelSize" :sessionId="sessionId" :realTime="realTime" 
       :isShare="false"
       @jumpToRealTime="jumpToRealTime" />
+      <RecordingWorkbench
+        :visible="recordingStore.workbenchOpen.value"
+        :chat-session-id="sessionId || ''"
+        :run-id="recordingStore.run.value?.id || ''"
+        :segment-id="recordingStore.activeSegment.value?.id || ''"
+        :intent="recordingStore.activeSegment.value?.intent"
+        @close="recordingStore.closeWorkbench()"
+        @segment-complete="handleRecordingSegmentComplete"
+      />
     </SimpleBar>
   </div>
 </template>
@@ -234,6 +249,16 @@ import ProcessMessage from '../components/ProcessMessage.vue';
 import ActivityPanel from '../components/ActivityPanel.vue';
 import type { ActivityItem } from '../components/ActivityPanel.vue';
 import McpSessionSelector from '../components/McpSessionSelector.vue';
+import RecordingWorkbench from '@/components/RecordingWorkbench.vue';
+import RecordingSegmentCard from '@/components/RecordingSegmentCard.vue';
+import RecordingArtifactList from '@/components/RecordingArtifactList.vue';
+import { createRecordingRunStore } from '@/composables/useRecordingRun';
+import type {
+  RecordingPublishPreparedPayload,
+  RecordingRunStartedPayload,
+  RecordingSegmentCompletedPayload,
+  RecordingTestStartedPayload,
+} from '@/types/recording';
 
 const router = useRouter()
 const { t, locale } = useI18n()
@@ -301,6 +326,7 @@ const {
 } = toRefs(state);
 
 const { groupedMessages } = useMessageGrouper(messages);
+const recordingStore = createRecordingRunStore();
 
 // 最后一个 process 组的索引（推理失败时会先 push 一条 assistant 消息，此时最后一组不是 process，需用此判断当前轮次的 process 组）
 const lastProcessGroupIndex = computed(() => {
@@ -485,6 +511,17 @@ const handleToolEvent = (toolData: ToolEventData) => {
       toolContent.content = JSON.parse(toolContent.content);
     } catch (e) {
       // Ignore parse error, keep as string
+    }
+  }
+
+  if (realTime.value && toolContent.content && typeof toolContent.content === 'object') {
+    const recordingContent = toolContent.content as any;
+    if (recordingContent.recording_event === 'recording_run_started') {
+      handleRecordingRunStarted(recordingContent as RecordingRunStartedPayload);
+    } else if (recordingContent.recording_event === 'recording_test_started') {
+      handleRecordingTestStarted(recordingContent as RecordingTestStartedPayload);
+    } else if (recordingContent.recording_event === 'recording_publish_prepared') {
+      handleRecordingPublishPrepared(recordingContent as RecordingPublishPreparedPayload);
     }
   }
 
@@ -766,6 +803,29 @@ const handlePlanEvent = (planData: PlanEventData) => {
   }
 }
 
+const handleRecordingRunStarted = (payload: RecordingRunStartedPayload) => {
+  recordingStore.onRunStarted(payload);
+}
+
+const handleRecordingSegmentComplete = (payload: RecordingSegmentCompletedPayload) => {
+  recordingStore.onSegmentCompleted(payload);
+}
+
+const handleRecordingTestStarted = (payload: RecordingTestStartedPayload) => {
+  recordingStore.onTestStarted(payload);
+}
+
+const handleRecordingPublishPrepared = (payload: RecordingPublishPreparedPayload) => {
+  recordingStore.onPublishPrepared(payload);
+  const prompt = recordingStore.publishPrompt.value;
+  if (!prompt) return;
+  if (prompt.kind === 'skill') {
+    pendingSkillSave.value = prompt.name;
+  } else {
+    pendingToolSave.value = prompt.name;
+  }
+}
+
 // Main event handler function
 const handleEvent = (event: AgentSSEEvent) => {
   const eid = event.data?.event_id;
@@ -776,6 +836,14 @@ const handleEvent = (event: AgentSSEEvent) => {
     handleMessageChunkEvent(event.data);
   } else if (event.event === 'message_chunk_done') {
     handleMessageChunkDoneEvent();
+  } else if ((event as any).event === 'recording_run_started') {
+    handleRecordingRunStarted((event as any).data as RecordingRunStartedPayload);
+  } else if ((event as any).event === 'recording_segment_completed') {
+    handleRecordingSegmentComplete((event as any).data as RecordingSegmentCompletedPayload);
+  } else if ((event as any).event === 'recording_test_started') {
+    handleRecordingTestStarted((event as any).data as RecordingTestStartedPayload);
+  } else if ((event as any).event === 'recording_publish_prepared') {
+    handleRecordingPublishPrepared((event as any).data as RecordingPublishPreparedPayload);
   } else if (event.event === 'message') {
     handleMessageEvent(event.data as MessageEventData);
   } else if (event.event === 'tool') {
