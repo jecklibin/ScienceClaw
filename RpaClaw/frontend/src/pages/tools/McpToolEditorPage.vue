@@ -103,6 +103,7 @@ const testResult = ref<RpaMcpExecutionResult | null>(null);
 const hasSuccessfulTest = ref(false);
 const lastSuccessfulTestSignature = ref<string | null>(null);
 const recordedSteps = ref<RecordedStepItem[]>([]);
+const recordedStepsMode = ref<'source-session' | 'tool-steps'>('tool-steps');
 const stepsLoading = ref(false);
 const promotingStepIndex = ref<number | null>(null);
 const expandedStepIndex = ref<number | null>(null);
@@ -518,6 +519,7 @@ const schemaSourceLabel = computed(() => {
 });
 const semanticWarnings = computed(() => preview.value?.semantic_inference?.warnings || []);
 const removedStepIndexSet = computed(() => new Set(preview.value?.sanitize_report?.removed_steps || []));
+const canHighlightRemovedSteps = computed(() => recordedStepsMode.value === 'source-session');
 const removedStepDetails = computed(() => {
   const details = preview.value?.sanitize_report?.removed_step_details || [];
   if (details.length) return details;
@@ -585,21 +587,28 @@ const pageDescription = computed(() => {
     : t('MCP Editor Edit MCP tool metadata, schemas, preview test state, and recorded steps.');
 });
 
-const isRemovedStep = (index: number) => removedStepIndexSet.value.has(index);
+const isRemovedStep = (index: number) => canHighlightRemovedSteps.value && removedStepIndexSet.value.has(index);
 
-const loadRecordedSession = async () => {
-  if (!sessionId.value) {
-    recordedSteps.value = [];
+const loadRecordedSession = async (sourceSessionId?: string, options: { silent?: boolean } = {}) => {
+  const targetSessionId = sourceSessionId || sessionId.value;
+  if (!targetSessionId) {
+    recordedSteps.value = preview.value?.steps ? (preview.value.steps as unknown as RecordedStepItem[]) : [];
+    recordedStepsMode.value = 'tool-steps';
     return;
   }
   stepsLoading.value = true;
   try {
-    const resp = await apiClient.get(`/rpa/session/${sessionId.value}`);
+    const resp = await apiClient.get(`/rpa/session/${targetSessionId}`);
     const session = resp.data.session;
     recordedSteps.value = (session.steps || []) as RecordedStepItem[];
+    recordedStepsMode.value = 'source-session';
   } catch (error: any) {
     console.error(error);
-    showErrorToast(error?.message || t('MCP Editor Failed to load recorded steps'));
+    recordedSteps.value = preview.value?.steps ? (preview.value.steps as unknown as RecordedStepItem[]) : [];
+    recordedStepsMode.value = 'tool-steps';
+    if (!options.silent) {
+      showErrorToast(error?.message || t('MCP Editor Failed to load recorded steps'));
+    }
   } finally {
     stepsLoading.value = false;
   }
@@ -668,6 +677,7 @@ const applyToolToEditor = (tool: RpaMcpPreview) => {
   allowedDomainsText.value = (tool.allowed_domains || []).join('\n');
   outputSchemaText.value = formatJsonBlock(tool.output_schema || tool.recommended_output_schema || {});
   recordedSteps.value = (tool.steps || []) as unknown as RecordedStepItem[];
+  recordedStepsMode.value = 'tool-steps';
   cookieSectionOpen.value = Boolean(tool.requires_cookies);
   cookieDomain.value = allowedCookieDomains.value[0] || '';
   hydrateEditableParams(tool);
@@ -683,12 +693,20 @@ const loadExistingTool = async () => {
   try {
     const tool = await getRpaMcpTool(savedToolId.value);
     applyToolToEditor(tool);
+    const sourceSessionId = typeof tool.source?.session_id === 'string' ? tool.source.session_id : '';
+    if (sourceSessionId) {
+      await loadRecordedSession(sourceSessionId, { silent: true });
+    } else {
+      stepsLoading.value = false;
+    }
   } catch (error: any) {
     console.error(error);
     showErrorToast(error?.message || t('MCP Editor Failed to load MCP tool'));
   } finally {
     loading.value = false;
-    stepsLoading.value = false;
+    if (recordedStepsMode.value !== 'source-session') {
+      stepsLoading.value = false;
+    }
   }
 };
 
