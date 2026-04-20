@@ -11,6 +11,16 @@ export interface JsonSchemaObject {
   [key: string]: unknown;
 }
 
+export type RpaMcpSchemaSource = 'ai_inferred' | 'rule_inferred' | 'user_edited' | string;
+
+export interface RpaMcpSemanticInference {
+  source: RpaMcpSchemaSource;
+  confidence?: number | null;
+  warnings?: string[];
+  model?: string;
+  generated_at?: string;
+}
+
 export interface RpaMcpExecutionResult {
   success: boolean;
   message?: string;
@@ -37,6 +47,8 @@ export interface RpaMcpPreview {
   output_schema_confirmed?: boolean;
   output_examples?: Array<Record<string, unknown>>;
   output_inference_report?: Record<string, unknown>;
+  schema_source?: RpaMcpSchemaSource;
+  semantic_inference?: RpaMcpSemanticInference;
   sanitize_report: {
     removed_steps: number[];
     removed_step_details?: Array<{

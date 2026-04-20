@@ -345,6 +345,13 @@ const schemaSummary = computed(() => buildSchemaSummary({
   input_schema: preview.value?.input_schema,
   output_schema: preview.value?.output_schema,
 }));
+const schemaSourceLabel = computed(() => {
+  const source = preview.value?.schema_source || preview.value?.semantic_inference?.source || 'rule_inferred';
+  if (source === 'ai_inferred') return t('MCP Editor AI inferred');
+  if (source === 'user_edited') return t('MCP Editor User edited');
+  return t('MCP Editor Rule inferred');
+});
+const semanticWarnings = computed(() => preview.value?.semantic_inference?.warnings || []);
 const removedStepIndexSet = computed(() => new Set(preview.value?.sanitize_report?.removed_steps || []));
 const removedStepDetails = computed(() => {
   const details = preview.value?.sanitize_report?.removed_step_details || [];
@@ -604,6 +611,9 @@ const saveTool = async () => {
       description: description.value,
       post_auth_start_url: postAuthStartUrl.value,
       allowed_domains: getAllowedDomains(),
+      input_schema: preview.value?.input_schema || {},
+      params: preview.value?.params || {},
+      schema_source: preview.value?.schema_source || preview.value?.semantic_inference?.source || 'rule_inferred',
       output_schema: parseJsonObjectText(outputSchemaText.value, t('Output schema JSON invalid')),
       output_schema_confirmed: true,
     };
@@ -1033,6 +1043,19 @@ onMounted(async () => {
             <h2 class="text-base font-black">{{ t('MCP Editor API & Schemas') }}</h2>
             <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">{{ t('MCP Editor Schema hint') }}</p>
             <div v-if="preview" class="mt-4 space-y-4">
+              <div class="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 dark:border-white/10 dark:bg-white/[0.03]">
+                <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                  <span class="rounded-full bg-white px-2.5 py-1 font-bold text-slate-700 ring-1 ring-slate-200 dark:bg-white/10 dark:text-slate-200 dark:ring-white/10">
+                    {{ schemaSourceLabel }}
+                  </span>
+                  <span v-if="preview.semantic_inference?.confidence !== null && preview.semantic_inference?.confidence !== undefined">
+                    {{ t('MCP Editor Confidence') }} {{ Math.round(Number(preview.semantic_inference.confidence) * 100) }}%
+                  </span>
+                </div>
+                <ul v-if="semanticWarnings.length" class="mt-2 list-disc pl-5 text-xs text-amber-700 dark:text-amber-200">
+                  <li v-for="warning in semanticWarnings" :key="warning">{{ warning }}</li>
+                </ul>
+              </div>
               <div>
                 <div class="mb-2 flex items-center justify-between gap-3">
                   <p class="text-sm font-semibold">{{ t('MCP Editor Input Schema') }}</p>
