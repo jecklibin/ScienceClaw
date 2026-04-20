@@ -3,15 +3,23 @@ import { describe, expect, it } from 'vitest'
 import { createRecordingRunStore } from '@/composables/useRecordingRun'
 
 describe('recording lifecycle store', () => {
-  it('opens shared recorder shell for active interactive segment and closes it on completion', () => {
-    const store = createRecordingRunStore()
+  it('routes interactive segments to the full-screen recorder instead of opening an embedded workbench', () => {
+    const store = createRecordingRunStore('chat-1')
 
     store.onRunStarted({
       run: { id: 'run-1', status: 'recording', type: 'rpa' },
       segment: { id: 'seg-1', status: 'recording', kind: 'rpa', intent: '下载 PDF' },
       open_workbench: true,
     })
-    expect(store.workbenchOpen.value).toBe(true)
+    expect(store.workbenchOpen.value).toBe(false)
+    expect(store.fullPageRecorderRoute.value).toMatchObject({
+      path: '/rpa/recorder',
+      query: {
+        chatSessionId: 'chat-1',
+        runId: 'run-1',
+        segmentId: 'seg-1',
+      },
+    })
 
     store.onSegmentCompleted({
       segment: { id: 'seg-1', status: 'completed' },

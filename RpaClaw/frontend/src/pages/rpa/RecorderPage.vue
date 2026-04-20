@@ -3,6 +3,8 @@ import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { Camera, Terminal, CheckCircle, Radio, Send, Wand2, Bot, Code, X, House, FolderOpen, Globe } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
+import { completeRecordingSegment } from '@/api/recording';
+import { deriveArtifactsFromRpaSteps, mapRpaStepsToRecordingSteps, type RpaStep } from '@/utils/recording';
 import { getBackendWsUrl } from '@/utils/sandbox';
 import {
   getFrameSizeFromMetadata,
@@ -558,6 +560,35 @@ const stopRecording = async () => {
   if (timerInterval.value) clearInterval(timerInterval.value);
   if (pollInterval) clearInterval(pollInterval);
 
+  const chatSessionId = route.query.chatSessionId as string | undefined;
+  const runId = route.query.runId as string | undefined;
+  const segmentId = route.query.segmentId as string | undefined;
+  const returnTo = (route.query.returnTo as string | undefined) || (chatSessionId ? `/chat/${chatSessionId}` : '/chat');
+
+  if (sessionId.value && chatSessionId && runId && segmentId) {
+    try {
+      const response = await apiClient.get(`/rpa/session/${sessionId.value}`);
+      const rawSteps: RpaStep[] = response.data.session?.steps || [];
+      await completeRecordingSegment(
+        chatSessionId,
+        runId,
+        segmentId,
+        {
+          rpa_session_id: sessionId.value,
+          steps: mapRpaStepsToRecordingSteps(rawSteps),
+          artifacts: deriveArtifactsFromRpaSteps(rawSteps),
+        },
+      );
+    } catch (err: any) {
+      console.error('Failed to complete conversational recording segment:', err);
+      error.value = `无法完成对话录制段：${err.response?.data?.detail || err.message || '未知错误'}`;
+      isRecording.value = true;
+      startTimer();
+      startPollingSteps();
+      return;
+    }
+  }
+
   if (sessionId.value) {
     try {
       await apiClient.post(`/rpa/session/${sessionId.value}/stop`);
@@ -565,7 +596,11 @@ const stopRecording = async () => {
       console.error('Failed to stop session:', err);
     }
   }
-  router.push(`/rpa/configure?sessionId=${sessionId.value}`);
+  if (chatSessionId && runId && segmentId) {
+    router.push(returnTo);
+  } else {
+    router.push(`/rpa/configure?sessionId=${sessionId.value}`);
+  }
 };
 
 const goToHome = () => {

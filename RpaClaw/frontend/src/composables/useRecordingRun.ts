@@ -11,12 +11,16 @@ import type {
   RecordingPublishPreparedPayload,
 } from '@/types/recording'
 
-export function createRecordingRunStore() {
+export function createRecordingRunStore(chatSessionId?: string) {
   const run = ref<RecordingRun | null>(null)
   const activeSegment = ref<RecordingSegment | null>(null)
   const artifacts = ref<RecordingArtifact[]>([])
   const summaries = ref<RecordingSegmentSummary[]>([])
   const workbenchOpen = ref(false)
+  const fullPageRecorderRoute = ref<{
+    path: string
+    query: Record<string, string>
+  } | null>(null)
   const publishPrompt = ref<{ kind: 'skill' | 'tool'; name: string; stagingPaths: string[] } | null>(null)
 
   const canContinue = computed(() => !!run.value && !activeSegment.value)
@@ -25,12 +29,25 @@ export function createRecordingRunStore() {
   const onRunStarted = (payload: RecordingRunStartedPayload) => {
     run.value = payload.run
     activeSegment.value = payload.segment
-    workbenchOpen.value = payload.open_workbench
+    workbenchOpen.value = false
+    fullPageRecorderRoute.value = payload.open_workbench
+      ? {
+          path: '/rpa/recorder',
+          query: {
+            sandboxId: `recording-${payload.run.id}`,
+            chatSessionId: chatSessionId || '',
+            runId: payload.run.id,
+            segmentId: payload.segment.id,
+            returnTo: chatSessionId ? `/chat/${chatSessionId}` : '/chat',
+          },
+        }
+      : null
   }
 
   const onSegmentCompleted = (payload: RecordingSegmentCompletedPayload) => {
     activeSegment.value = null
     workbenchOpen.value = false
+    fullPageRecorderRoute.value = null
     summaries.value = [payload.summary, ...summaries.value]
     artifacts.value = [...payload.summary.artifacts, ...artifacts.value]
     if (run.value) {
@@ -60,12 +77,19 @@ export function createRecordingRunStore() {
     workbenchOpen.value = true
   }
 
+  const consumeFullPageRecorderRoute = () => {
+    const route = fullPageRecorderRoute.value
+    fullPageRecorderRoute.value = null
+    return route
+  }
+
   return {
     run,
     activeSegment,
     artifacts,
     summaries,
     workbenchOpen,
+    fullPageRecorderRoute,
     testingState,
     publishPrompt,
     canContinue,
@@ -75,5 +99,6 @@ export function createRecordingRunStore() {
     onPublishPrepared,
     closeWorkbench,
     openWorkbench,
+    consumeFullPageRecorderRoute,
   }
 }

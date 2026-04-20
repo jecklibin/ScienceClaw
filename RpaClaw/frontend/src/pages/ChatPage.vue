@@ -194,15 +194,6 @@
       <ToolPanel ref="toolPanel" :size="toolPanelSize" :sessionId="sessionId" :realTime="realTime" 
       :isShare="false"
       @jumpToRealTime="jumpToRealTime" />
-      <RecordingWorkbench
-        :visible="recordingStore.workbenchOpen.value"
-        :chat-session-id="sessionId || ''"
-        :run-id="recordingStore.run.value?.id || ''"
-        :segment-id="recordingStore.activeSegment.value?.id || ''"
-        :intent="recordingStore.activeSegment.value?.intent"
-        @close="recordingStore.closeWorkbench()"
-        @segment-complete="handleRecordingSegmentComplete"
-      />
     </SimpleBar>
   </div>
 </template>
@@ -249,7 +240,6 @@ import ProcessMessage from '../components/ProcessMessage.vue';
 import ActivityPanel from '../components/ActivityPanel.vue';
 import type { ActivityItem } from '../components/ActivityPanel.vue';
 import McpSessionSelector from '../components/McpSessionSelector.vue';
-import RecordingWorkbench from '@/components/RecordingWorkbench.vue';
 import RecordingSegmentCard from '@/components/RecordingSegmentCard.vue';
 import RecordingArtifactList from '@/components/RecordingArtifactList.vue';
 import { createRecordingRunStore } from '@/composables/useRecordingRun';
@@ -805,6 +795,17 @@ const handlePlanEvent = (planData: PlanEventData) => {
 
 const handleRecordingRunStarted = (payload: RecordingRunStartedPayload) => {
   recordingStore.onRunStarted(payload);
+  if (!payload.open_workbench || !sessionId.value) return;
+  router.push({
+    path: '/rpa/recorder',
+    query: {
+      sandboxId: `recording-${payload.run.id}`,
+      chatSessionId: sessionId.value,
+      runId: payload.run.id,
+      segmentId: payload.segment.id,
+      returnTo: `/chat/${sessionId.value}`,
+    },
+  });
 }
 
 const handleRecordingSegmentComplete = (payload: RecordingSegmentCompletedPayload) => {
