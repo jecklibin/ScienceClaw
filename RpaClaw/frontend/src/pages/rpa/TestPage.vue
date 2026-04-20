@@ -34,6 +34,9 @@ const router = useRouter();
 const route = useRoute();
 
 const sessionId = computed(() => route.query.sessionId as string);
+const chatSessionId = computed(() => route.query.chatSessionId as string | undefined);
+const returnTo = computed(() => (route.query.returnTo as string | undefined) || (chatSessionId.value ? `/chat/${chatSessionId.value}` : '/chat'));
+const isConversationalTest = computed(() => !!chatSessionId.value && !!route.query.runId);
 const skillName = computed(() => (route.query.skillName as string) || '录制技能');
 const skillDescription = computed(() => (route.query.skillDescription as string) || '');
 const params = computed(() => {
@@ -437,6 +440,10 @@ const goToSkills = () => {
   router.push('/chat/skills');
 };
 
+const goBackToChat = () => {
+  router.push(returnTo.value);
+};
+
 const saveSkill = async () => {
   if (!sessionId.value) return;
   saving.value = true;
@@ -478,7 +485,7 @@ onBeforeUnmount(() => {
     <header class="flex h-14 flex-shrink-0 items-center gap-3 border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-[#272728] px-6">
       <button
         class="flex items-center gap-1 text-gray-500 dark:text-gray-400 transition-colors hover:text-gray-700 dark:hover:text-gray-200"
-        @click="goBackToConfigure"
+        @click="isConversationalTest ? goBackToChat() : goBackToConfigure()"
       >
         <ArrowLeft :size="18" />
       </button>
@@ -757,6 +764,15 @@ onBeforeUnmount(() => {
               重新执行
             </button>
             <button
+              v-if="isConversationalTest"
+              class="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-emerald-700 disabled:opacity-50"
+              @click="goBackToChat"
+            >
+              <CheckCircle :size="15" />
+              返回对话继续发布
+            </button>
+            <button
+              v-if="!isConversationalTest"
               class="flex w-full items-center justify-center gap-2 rounded-xl bg-[#831bd7] px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-[#7018b8] disabled:opacity-50"
               :disabled="saving"
               @click="saveSkill"

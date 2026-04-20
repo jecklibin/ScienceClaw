@@ -11,6 +11,15 @@ import type {
   RecordingPublishPreparedPayload,
 } from '@/types/recording'
 
+export interface RecordingActionPrompt {
+  runId: string
+  segmentId: string
+  rpaSessionId?: string
+  intent?: string
+  publishTarget: 'skill' | 'tool'
+  testingStatus?: string
+}
+
 export function createRecordingRunStore(chatSessionId?: string) {
   const run = ref<RecordingRun | null>(null)
   const activeSegment = ref<RecordingSegment | null>(null)
@@ -22,6 +31,7 @@ export function createRecordingRunStore(chatSessionId?: string) {
     query: Record<string, string>
   } | null>(null)
   const publishPrompt = ref<{ kind: 'skill' | 'tool'; name: string; stagingPaths: string[] } | null>(null)
+  const actionPrompt = ref<RecordingActionPrompt | null>(null)
 
   const canContinue = computed(() => !!run.value && !activeSegment.value)
   const testingState = computed(() => run.value?.testing || { status: run.value?.status === 'testing' ? 'running' : 'idle' })
@@ -29,6 +39,7 @@ export function createRecordingRunStore(chatSessionId?: string) {
   const onRunStarted = (payload: RecordingRunStartedPayload) => {
     run.value = payload.run
     activeSegment.value = payload.segment
+    actionPrompt.value = null
     workbenchOpen.value = false
     fullPageRecorderRoute.value = payload.open_workbench
       ? {
@@ -48,20 +59,35 @@ export function createRecordingRunStore(chatSessionId?: string) {
     activeSegment.value = null
     workbenchOpen.value = false
     fullPageRecorderRoute.value = null
-    summaries.value = [payload.summary, ...summaries.value]
-    artifacts.value = [...payload.summary.artifacts, ...artifacts.value]
+    summaries.value = [...summaries.value, payload.summary]
+    artifacts.value = [...artifacts.value, ...payload.summary.artifacts]
     if (run.value) {
       run.value = { ...run.value, status: 'ready_for_next_segment' }
+      actionPrompt.value = {
+        runId: run.value.id,
+        segmentId: payload.segment.id || payload.summary.segment_id,
+        rpaSessionId: payload.summary.session_id,
+        intent: payload.summary.intent,
+        publishTarget: run.value.publish_target || 'skill',
+        testingStatus: run.value.testing?.status || 'idle',
+      }
     }
   }
 
   const onTestStarted = (payload: RecordingTestStartedPayload) => {
     run.value = payload.run
-    workbenchOpen.value = true
+    workbenchOpen.value = false
+    if (actionPrompt.value) {
+      actionPrompt.value = {
+        ...actionPrompt.value,
+        testingStatus: payload.run.testing?.status || 'running',
+      }
+    }
   }
 
   const onPublishPrepared = (payload: RecordingPublishPreparedPayload) => {
     run.value = payload.run
+    actionPrompt.value = null
     publishPrompt.value = {
       kind: payload.prompt_kind,
       name: payload.summary.name || payload.summary.title || 'recorded_workflow',
@@ -77,6 +103,10 @@ export function createRecordingRunStore(chatSessionId?: string) {
     workbenchOpen.value = true
   }
 
+  const dismissActionPrompt = () => {
+    actionPrompt.value = null
+  }
+
   const consumeFullPageRecorderRoute = () => {
     const route = fullPageRecorderRoute.value
     fullPageRecorderRoute.value = null
@@ -90,6 +120,7 @@ export function createRecordingRunStore(chatSessionId?: string) {
     summaries,
     workbenchOpen,
     fullPageRecorderRoute,
+    actionPrompt,
     testingState,
     publishPrompt,
     canContinue,
@@ -99,6 +130,7 @@ export function createRecordingRunStore(chatSessionId?: string) {
     onPublishPrepared,
     closeWorkbench,
     openWorkbench,
+    dismissActionPrompt,
     consumeFullPageRecorderRoute,
   }
 }

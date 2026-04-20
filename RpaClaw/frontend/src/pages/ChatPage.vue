@@ -39,12 +39,6 @@
 
       <div class="mx-auto w-full max-w-full sm:max-w-[768px] sm:min-w-[390px] flex flex-col flex-1">
         <div class="flex flex-col w-full gap-[12px] pb-[80px] pt-[12px] flex-1 overflow-y-auto">
-          <RecordingArtifactList :artifacts="recordingStore.artifacts.value" />
-          <RecordingSegmentCard
-            v-for="summary in recordingStore.summaries.value"
-            :key="summary.segment_id"
-            :summary="summary"
-          />
           <template v-for="(group, index) in groupedMessages" :key="group.id">
             <!-- Process groups: compact reasoning indicator -->
             <div v-if="group.type === 'process'" class="flex items-start py-1 my-1">
@@ -101,6 +95,12 @@
 
           <!-- Loading indicator -->
           <LoadingIndicator v-if="isLoading" :text="$t('Thinking')" />
+          <RecordingArtifactList :artifacts="recordingStore.artifacts.value" />
+          <RecordingSegmentCard
+            v-for="summary in recordingStore.summaries.value"
+            :key="summary.segment_id"
+            :summary="summary"
+          />
 
         </div>
 
@@ -109,6 +109,33 @@
             class="flex items-center justify-center w-[36px] h-[36px] rounded-full bg-[var(--background-white-main)] hover:bg-[var(--background-gray-main)] clickable border border-[var(--border-main)] shadow-[0px_5px_16px_0px_var(--shadow-S),0px_0px_1.25px_0px_var(--shadow-S)] absolute -top-20 left-1/2 -translate-x-1/2">
             <ArrowDown class="text-[var(--icon-primary)]" :size="20" />
           </button>
+          <!-- Recording Action Prompt Bar -->
+          <div v-if="recordingStore.actionPrompt.value"
+            class="flex items-center gap-3 px-4 py-3 mb-2 rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50/90 dark:bg-amber-950/30 animate-fadeIn shadow-sm">
+            <Play :size="18" class="text-amber-600 flex-shrink-0" />
+            <div class="flex-1 min-w-0">
+              <div class="text-sm font-medium text-[var(--text-primary)] truncate">
+                录制段已完成，是否进入测试工作台验证？
+              </div>
+              <div class="text-xs text-[var(--text-tertiary)] truncate">
+                {{ recordingStore.actionPrompt.value.intent || '可以先测试回放，也可以直接准备发布。' }}
+              </div>
+            </div>
+            <button @click="handleOpenRecordingTest" :disabled="!!recordingActionBusy || !recordingStore.actionPrompt.value.rpaSessionId"
+              class="px-3 py-1.5 text-sm font-medium rounded-lg bg-amber-500 text-white hover:bg-amber-600 transition-colors disabled:opacity-50 flex-shrink-0">
+              <Loader2 v-if="recordingActionBusy === 'test'" :size="14" class="inline mr-1 animate-spin" />
+              进入测试工作台
+            </button>
+            <button @click="handlePrepareRecordingPublish" :disabled="!!recordingActionBusy"
+              class="px-3 py-1.5 text-sm font-medium rounded-lg bg-white text-amber-700 border border-amber-200 hover:bg-amber-100 transition-colors disabled:opacity-50 flex-shrink-0 dark:bg-amber-950/40 dark:text-amber-200 dark:border-amber-800">
+              <Loader2 v-if="recordingActionBusy === 'publish'" :size="14" class="inline mr-1 animate-spin" />
+              准备发布
+            </button>
+            <button @click="recordingStore.dismissActionPrompt()" :disabled="!!recordingActionBusy"
+              class="p-1 rounded-md hover:bg-[var(--fill-tsp-gray-main)] transition-colors flex-shrink-0">
+              <X :size="16" class="text-[var(--icon-tertiary)]" />
+            </button>
+          </div>
           <!-- Skill Save Prompt Bar -->
           <div v-if="pendingSkillSave && !isLoading"
             class="flex items-center gap-3 px-4 py-3 mb-2 rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50/80 dark:bg-blue-950/30 animate-fadeIn">
@@ -220,7 +247,7 @@ import {
 } from '../types/event';
 import ToolPanel from '../components/ToolPanel.vue'
 import PlanPanel from '../components/PlanPanel.vue';
-import { ArrowDown, FileSearch, PanelLeft, Package, Wrench, X } from 'lucide-vue-next';
+import { ArrowDown, FileSearch, Loader2, PanelLeft, Package, Play, Wrench, X } from 'lucide-vue-next';
 import { showErrorToast, showSuccessToast } from '../utils/toast';
 import type { FileInfo } from '../api/file';
 import { useLeftPanel } from '../composables/useLeftPanel'
@@ -243,6 +270,7 @@ import McpSessionSelector from '../components/McpSessionSelector.vue';
 import RecordingSegmentCard from '@/components/RecordingSegmentCard.vue';
 import RecordingArtifactList from '@/components/RecordingArtifactList.vue';
 import { createRecordingRunStore } from '@/composables/useRecordingRun';
+import { publishRecordingRun, testRecordingRun } from '@/api/recording';
 import type {
   RecordingPublishPreparedPayload,
   RecordingRunStartedPayload,
@@ -349,6 +377,7 @@ const savingSkill = ref(false);
 const pendingToolSave = ref<string | null>(null);
 const pendingToolReplaces = ref<string | null>(null);
 const savingTool = ref(false);
+const recordingActionBusy = ref<'test' | 'publish' | null>(null);
 const sessionMcpLoading = ref(false);
 const sessionMcpServers = ref<SessionMcpServerItem[]>([]);
 
@@ -369,6 +398,11 @@ watch(messages, async () => {
   if (follow.value) {
     simpleBarRef.value?.scrollToBottom();
   }
+}, { deep: true });
+
+watch(recordingStore.summaries, async () => {
+  await nextTick();
+  simpleBarRef.value?.scrollToBottom();
 }, { deep: true });
 
 
@@ -824,6 +858,52 @@ const handleRecordingPublishPrepared = (payload: RecordingPublishPreparedPayload
     pendingSkillSave.value = prompt.name;
   } else {
     pendingToolSave.value = prompt.name;
+  }
+}
+
+const handleOpenRecordingTest = async () => {
+  const prompt = recordingStore.actionPrompt.value;
+  if (!sessionId.value || !prompt) return;
+  if (!prompt.rpaSessionId) {
+    showErrorToast('缺少录制测试会话，无法进入测试工作台');
+    return;
+  }
+
+  recordingActionBusy.value = 'test';
+  try {
+    const payload = await testRecordingRun(sessionId.value, prompt.runId);
+    handleRecordingTestStarted(payload as RecordingTestStartedPayload);
+    router.push({
+      path: '/rpa/test',
+      query: {
+        sessionId: prompt.rpaSessionId,
+        chatSessionId: sessionId.value,
+        runId: prompt.runId,
+        returnTo: `/chat/${sessionId.value}`,
+        skillName: prompt.intent || '录制业务流程技能',
+      },
+    });
+  } catch (error) {
+    console.error('Failed to enter recording test workbench:', error);
+    showErrorToast('进入测试工作台失败');
+  } finally {
+    recordingActionBusy.value = null;
+  }
+}
+
+const handlePrepareRecordingPublish = async () => {
+  const prompt = recordingStore.actionPrompt.value;
+  if (!sessionId.value || !prompt) return;
+
+  recordingActionBusy.value = 'publish';
+  try {
+    const payload = await publishRecordingRun(sessionId.value, prompt.runId, prompt.publishTarget);
+    handleRecordingPublishPrepared(payload as RecordingPublishPreparedPayload);
+  } catch (error) {
+    console.error('Failed to prepare recording publish:', error);
+    showErrorToast('准备发布失败');
+  } finally {
+    recordingActionBusy.value = null;
   }
 }
 
