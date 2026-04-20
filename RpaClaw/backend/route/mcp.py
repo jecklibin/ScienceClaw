@@ -20,6 +20,8 @@ from backend.user.dependencies import User, require_user
 
 router = APIRouter(tags=["mcp"])
 
+RPA_GATEWAY_SYSTEM_SERVER_ID = "rpa_gateway"
+
 
 class ApiResponse(BaseModel):
     code: int = Field(default=0)
@@ -51,6 +53,12 @@ async def _maybe_await(value: Any) -> Any:
 async def _list_user_mcp_servers(user_id: str) -> List[Dict[str, Any]]:
     repo = get_repository("user_mcp_servers")
     return await repo.find_many({"user_id": user_id}, sort=[("updated_at", -1)])
+
+
+async def _build_rpa_gateway_tools(user_id: str) -> list[dict[str, Any]]:
+    from backend.route.rpa_mcp import _build_gateway_tools
+
+    return await _maybe_await(_build_gateway_tools(user_id))
 
 
 def _normalize_string_map(value: Any, field_name: str) -> Dict[str, str]:
@@ -240,6 +248,26 @@ async def _discover_tools(server_key: str, user_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail="MCP server not found")
 
     definition = _to_server_definition(server)
+    if definition.scope == "system" and definition.id == RPA_GATEWAY_SYSTEM_SERVER_ID:
+        raw_tools = await _build_rpa_gateway_tools(user_id)
+        tools = []
+        for raw_tool in raw_tools:
+            tool = coerce_mcp_tool_definition(raw_tool)
+            if not tool.name:
+                continue
+            tools.append(
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.input_schema,
+                }
+            )
+        return {
+            "server_key": server_key,
+            "tools": tools,
+            "tool_count": len(tools),
+        }
+
     if definition.scope == "user":
         try:
             definition = await apply_mcp_credentials(definition, user_id)

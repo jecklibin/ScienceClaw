@@ -1,10 +1,20 @@
 type McpServerLike = {
+  id?: string;
   scope?: string;
   server_key?: string;
+  description?: string;
   enabled?: boolean;
   default_enabled?: boolean;
   session_mode?: 'inherit' | 'enabled' | 'disabled';
 };
+
+type RpaMcpToolLike = {
+  id: string;
+};
+
+export type UnifiedMcpItem<Server extends McpServerLike, RpaTool extends RpaMcpToolLike> =
+  | { kind: 'server'; id: string; server: Server }
+  | { kind: 'rpa_tool'; id: string; tool: RpaTool };
 
 type McpEndpointLike = {
   url?: string;
@@ -39,6 +49,39 @@ export function groupMcpServers<T extends McpServerLike>(servers: T[]) {
     system: servers.filter((server) => server.scope === 'system'),
     user: servers.filter((server) => server.scope === 'user'),
   };
+}
+
+export function buildUnifiedMcpItems<Server extends McpServerLike, RpaTool extends RpaMcpToolLike>(
+  servers: Server[],
+  rpaTools: RpaTool[],
+): Array<UnifiedMcpItem<Server, RpaTool>> {
+  return [
+    ...servers.map((server) => ({
+      kind: 'server' as const,
+      id: server.id || server.server_key || '',
+      server,
+    })),
+    ...rpaTools.map((tool) => ({
+      kind: 'rpa_tool' as const,
+      id: tool.id,
+      tool,
+    })),
+  ];
+}
+
+export function isRpaGatewayServer(server?: McpServerLike | null): boolean {
+  return Boolean(
+    server
+      && server.scope === 'system'
+      && (server.id === 'rpa_gateway' || server.server_key === 'system:rpa_gateway'),
+  );
+}
+
+export function formatMcpServerDescription(server: McpServerLike, t: (key: string) => string): string {
+  if (isRpaGatewayServer(server)) {
+    return t('RPA gateway platform description');
+  }
+  return server.description || t('No description');
 }
 
 export function computeEffectiveMcpEnabled(server: McpServerLike): boolean {

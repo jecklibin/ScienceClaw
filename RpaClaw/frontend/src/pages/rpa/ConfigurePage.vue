@@ -12,6 +12,7 @@ import {
 } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { buildRpaToolEditorLocation } from '@/utils/rpaMcpConvert';
 
 const router = useRouter();
 const route = useRoute();
@@ -463,6 +464,14 @@ const goToTest = () => {
   });
 };
 
+const goToMcpToolEditor = () => {
+  router.push(buildRpaToolEditorLocation({
+    sessionId: sessionId.value,
+    skillName: skillName.value,
+    skillDescription: skillDescription.value,
+  }));
+};
+
 onMounted(() => {
   loadSession();
   loadCredentials();
@@ -483,6 +492,14 @@ onMounted(() => {
         </div>
 
         <div class="ml-auto flex items-center gap-2">
+          <button
+            type="button"
+            @click="goToMcpToolEditor"
+            class="inline-flex items-center gap-2 rounded-full border border-violet-200 bg-violet-50 px-4 py-2 text-sm font-semibold text-violet-700 transition-colors hover:bg-violet-100 dark:border-violet-500/30 dark:bg-violet-500/10 dark:text-violet-200 dark:hover:bg-violet-500/20"
+          >
+            <ChevronRight :size="16" />
+            转换为 MCP 工具
+          </button>
           <button
             type="button"
             @click="generateScript"
