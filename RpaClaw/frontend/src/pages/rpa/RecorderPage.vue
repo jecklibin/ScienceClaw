@@ -232,6 +232,15 @@ const cleanupAssistantText = (text: string, script = '') => {
   return next.trim();
 };
 
+const formatAgentDiagnostics = (diagnostics: any[] = []) => diagnostics
+  .map((item: any) => {
+    const message = String(item?.message || '').trim();
+    const rawError = item?.raw?.result?.error ? String(item.raw.result.error).trim() : '';
+    if (message && rawError && rawError !== message) return `${message}: ${rawError}`;
+    return message || rawError;
+  })
+  .filter(Boolean);
+
 const initSession = async () => {
   try {
     loading.value = true;
@@ -764,6 +773,7 @@ const sendMessage = async () => {
             } else if (eventType === 'agent_aborted') {
               chatMessages.value[msgIdx].status = 'error';
               chatMessages.value[msgIdx].text += `\n⚠️ Agent 已停止：${data.reason || ''}`;
+              chatMessages.value[msgIdx].diagnostics = formatAgentDiagnostics(data.diagnostics || []);
               agentRunning.value = false;
               pendingConfirm.value = null;
             } else if (eventType === 'error') {
@@ -1044,6 +1054,12 @@ const sendMessage = async () => {
               </div>
               <div v-if="msg.status === 'error' && msg.error" class="mt-2 text-[10px] text-red-500 bg-red-50 dark:bg-red-900/30 p-2 rounded-lg">
                 {{ msg.error }}
+              </div>
+              <div v-if="msg.status === 'error' && msg.diagnostics?.length" class="mt-2 text-[10px] text-red-600 bg-red-50 dark:bg-red-900/30 border border-red-100 dark:border-red-800/60 p-2 rounded-lg space-y-1">
+                <div class="font-bold">失败诊断</div>
+                <div v-for="(diagnostic, didx) in msg.diagnostics" :key="didx" class="font-mono whitespace-pre-wrap break-words">
+                  {{ didx + 1 }}. {{ diagnostic }}
+                </div>
               </div>
               <div v-if="msg.frameSummary || msg.collectionSummary || msg.locatorSummary" class="mt-2 space-y-1 text-[10px] text-gray-500 dark:text-gray-400">
                 <div v-if="msg.frameSummary">

@@ -52,6 +52,48 @@ class TraceSkillCompiler:
             "        return href",
             "    return 'https://github.com' + href",
             "",
+            "def _github_repo_base(url):",
+            "    text = str(url or '').split('?', 1)[0].rstrip('/')",
+            "    match = re.match(r'(https://github\\.com/[^/]+/[^/]+)', text)",
+            "    return match.group(1) if match else ''",
+            "",
+            "def _normalize_runtime_ai_payload(payload, page_url=''):",
+            "    if isinstance(payload, dict) and len(payload) == 1:",
+            "        only_value = next(iter(payload.values()))",
+            "        if isinstance(only_value, dict):",
+            "            payload = only_value",
+            "    if isinstance(payload, str):",
+            "        payload = {'value': payload}",
+            "    if not isinstance(payload, dict):",
+            "        payload = {'value': payload}",
+            "    value = payload.get('value')",
+            "    if 'url' not in payload and isinstance(value, str) and value.startswith(('http://', 'https://')):",
+            "        payload['url'] = value",
+            "    if 'url' not in payload and page_url:",
+            "        payload['url'] = page_url",
+            "    if 'name' not in payload and isinstance(payload.get('url'), str):",
+            "        match = re.match(r'https://github\\.com/([^/]+/[^/?#]+)', payload['url'])",
+            "        if match:",
+            "            payload['name'] = match.group(1)",
+            "    return payload",
+            "",
+            "async def _execute_runtime_ai_instruction(page, results, instruction, output_key):",
+            "    from backend.rpa.recording_runtime_agent import RecordingRuntimeAgent",
+            "    agent = RecordingRuntimeAgent()",
+            "    outcome = await agent.run(page=page, instruction=instruction, runtime_results=results)",
+            "    if not outcome.success:",
+            "        detail = '; '.join(str(item.message) for item in outcome.diagnostics) or outcome.message",
+            "        raise RuntimeError(f'Runtime semantic instruction failed: {detail}')",
+            "    payload = outcome.output",
+            "    if isinstance(payload, dict) and output_key in payload and isinstance(payload.get(output_key), (dict, list, str)):",
+            "        payload = payload.get(output_key)",
+            "    payload = _normalize_runtime_ai_payload(payload, getattr(page, 'url', ''))",
+            "    if outcome.output_key and outcome.output_key not in results:",
+            "        results[outcome.output_key] = payload",
+            "    if output_key:",
+            "        results[output_key] = payload",
+            "    return payload",
+            "",
             "async def execute_skill(page, **kwargs):",
             '    """Auto-generated skill from RPA trace recording."""',
             "    _results = {}",
@@ -72,7 +114,7 @@ class TraceSkillCompiler:
         if trace.trace_type == RPATraceType.DATA_CAPTURE:
             return self._render_data_capture_trace(index, trace)
         if trace.trace_type == RPATraceType.AI_OPERATION:
-            return self._render_ai_operation_trace(index, trace)
+            return self._render_ai_operation_trace(index, trace, previous_traces)
         return ["", f"    # trace {index}: unsupported trace type {trace.trace_type.value}"]
 
     def _render_navigation_trace(
@@ -105,6 +147,9 @@ class TraceSkillCompiler:
         action = trace.action or ""
         if action in {"navigate_click", "navigate_press"} and trace.after_page.url:
             return self._render_navigation_trace(index, trace, previous_traces)
+        stable_subpage = self._manual_github_subpage_navigation(index, trace, previous_traces)
+        if stable_subpage:
+            return stable_subpage
         locator = self._best_locator(trace.locator_candidates)
         lines = ["", f"    # trace {index}: {trace.description or action}"]
         if not locator:
@@ -139,16 +184,21 @@ class TraceSkillCompiler:
         lines.append(f"    _results[{key!r}] = _result")
         return lines
 
-    def _render_ai_operation_trace(self, index: int, trace: RPAAcceptedTrace) -> List[str]:
+    def _render_ai_operation_trace(
+        self,
+        index: int,
+        trace: RPAAcceptedTrace,
+        previous_traces: List[RPAAcceptedTrace],
+    ) -> List[str]:
         instruction = f"{trace.user_instruction or ''} {trace.description or ''}".lower()
         if _looks_like_highest_star(instruction):
             return self._render_highest_star_trace(index, trace)
         if _looks_like_pr_extraction(instruction, trace.output):
-            return self._render_pr_extraction_trace(index, trace)
+            return self._render_pr_extraction_trace(index, trace, previous_traces)
         if _looks_like_semantic_repo_selection(instruction, trace.output):
             return self._render_semantic_repo_selection_trace(index, trace)
         if trace.ai_execution and trace.ai_execution.code:
-            return self._render_embedded_ai_code_trace(index, trace)
+            return self._render_embedded_ai_code_trace(index, trace, previous_traces)
         return ["", f"    # trace {index}: AI operation has no executable body"]
 
     def _render_highest_star_trace(self, index: int, trace: RPAAcceptedTrace) -> List[str]:
@@ -188,77 +238,107 @@ class TraceSkillCompiler:
 
     def _render_semantic_repo_selection_trace(self, index: int, trace: RPAAcceptedTrace) -> List[str]:
         key = trace.output_key or "selected_project"
-        query = _extract_semantic_query(trace.user_instruction or trace.description or "")
-        recorded = trace.output if isinstance(trace.output, dict) else {}
-        fallback_url = recorded.get("url") or recorded.get("value") or ""
         return [
             "",
-            f"    # trace {index}: semantic repository selection compiled from accepted trace",
-            f"    _semantic_query = {query!r}.lower()",
-            "    rows = await current_page.locator('article.Box-row').all()",
-            "    _result = None",
-            "    _best_score = -1",
-            "    for row in rows:",
-            "        try:",
-            "            link = row.locator('h2 a').first",
-            "            href = await link.get_attribute('href')",
-            "            name = (await link.inner_text()).strip().replace(' ', '')",
-            "            row_text = (await row.inner_text()).strip()",
-            "            haystack = f'{name}\\n{row_text}'.lower()",
-            "            score = 0",
-            "            for token in re.findall(r'[a-zA-Z0-9_+#.-]+', _semantic_query):",
-            "                if token and token in haystack:",
-            "                    score += 10 if token in name.lower() else 3",
-            "            if href and score > _best_score:",
-            "                _best_score = score",
-            "                _result = {'name': name, 'url': _abs_github_url(href), 'reason': f'matched query: {_semantic_query}'}",
-            "        except Exception:",
-            "            continue",
-            f"    if not _result and {fallback_url!r}:",
-            f"        _result = {{'name': '', 'url': {fallback_url!r}, 'reason': 'fallback to accepted recording target'}}",
-            "    if not _result:",
-            "        raise RuntimeError('No semantically matching repository was found')",
-            "    await current_page.goto(_result['url'], wait_until='domcontentloaded')",
-            "    await current_page.wait_for_load_state('domcontentloaded')",
-            f"    _results[{key!r}] = _result",
+            f"    # trace {index}: runtime semantic repository selection",
+            f"    _result = await _execute_runtime_ai_instruction(current_page, _results, {str(trace.user_instruction or trace.description or '').strip()!r}, {key!r})",
+            "    if not isinstance(_result, dict) or not _result.get('url'):",
+            "        raise RuntimeError('Runtime semantic selection did not produce a repository URL')",
         ]
 
-    def _render_pr_extraction_trace(self, index: int, trace: RPAAcceptedTrace) -> List[str]:
+    def _render_pr_extraction_trace(
+        self,
+        index: int,
+        trace: RPAAcceptedTrace,
+        previous_traces: List[RPAAcceptedTrace],
+    ) -> List[str]:
         key = trace.output_key or "top10_prs"
         allow_empty = isinstance(trace.output, list) and not trace.output
+        instruction = f"{trace.user_instruction or ''} {trace.description or ''}"
+        page_count = _extract_requested_page_count(instruction)
+        record_limit = _extract_record_limit(instruction)
+        previous_repo_expr = self._previous_repo_url_expression(previous_traces)
         lines = [
             "",
             f"    # trace {index}: generalized PR record extraction",
-            "    rows = await current_page.locator('.js-issue-row, .Box-row').all()",
-            "    _result = []",
-            "    for row in rows[:10]:",
-            "        title = ''",
-            "        creator = ''",
-            "        url = ''",
-            "        for selector in ['a.Link--primary', 'a[id^=\"issue_\"]', 'a.js-navigation-open', 'a[href*=\"/pull/\"]']:",
-            "            loc = row.locator(selector).first",
-            "            if await loc.count() > 0:",
-            "                title = (await loc.inner_text()).strip()",
-            "                url = (await loc.get_attribute('href')) or ''",
-            "                if title and not re.fullmatch(r'\\d+(\\s+comments?)?', title.lower()):",
-            "                    break",
-            "        for selector in ['a[data-hovercard-type=\"user\"]', 'a[href*=\"author%3A\"]', 'a[href*=\"author:\"]']:",
-            "            loc = row.locator(selector).first",
-            "            if await loc.count() > 0:",
-            "                creator = (await loc.inner_text()).strip()",
-            "                if creator:",
-            "                    break",
-            "        if title and creator:",
-            "            _result.append({'title': title, 'creator': creator, 'url': _abs_github_url(url) if url else ''})",
-            f"    _results[{key!r}] = _result",
+            f"    _page_count = {page_count}",
+            f"    _record_limit = {record_limit if record_limit is not None else 'None'}",
+            "    _repo_base = _github_repo_base(current_page.url)",
         ]
+        if previous_repo_expr:
+            lines.extend(
+                [
+                    "    if not _repo_base:",
+                    f"        _repo_base = _github_repo_base(str({previous_repo_expr}))",
+                ]
+            )
+        lines.extend(
+            [
+            "    _result = []",
+            "    _seen_urls = set()",
+            "    async def _collect_current_pr_rows():",
+            "        rows = await current_page.locator('div.js-issue-row, div[data-testid=\"issue-row\"], div.Box-row').all()",
+            "        collected = []",
+            "        for row in rows:",
+            "            title = ''",
+            "            creator = ''",
+            "            url = ''",
+            "            for selector in ['a[href*=\"/pull/\"]', 'a.Link--primary', 'a[id^=\"issue_\"]', 'a.js-navigation-open']:",
+            "                loc = row.locator(selector).first",
+            "                if await loc.count() > 0:",
+            "                    title = (await loc.inner_text()).strip()",
+            "                    url = (await loc.get_attribute('href')) or ''",
+            "                    if '/pull/' in url and title and not re.fullmatch(r'\\d+(\\s+comments?)?', title.lower()):",
+            "                        break",
+            "            for selector in ['a[data-hovercard-type=\"user\"]', 'a[href*=\"author%3A\"]', 'a[href*=\"author:\"]']:",
+            "                loc = row.locator(selector).first",
+            "                if await loc.count() > 0:",
+            "                    creator = (await loc.inner_text()).strip()",
+            "                    if creator:",
+            "                        break",
+            "            if title and creator:",
+            "                absolute_url = _abs_github_url(url) if url else ''",
+            "                if absolute_url and absolute_url in _seen_urls:",
+            "                    continue",
+            "                if absolute_url:",
+            "                    _seen_urls.add(absolute_url)",
+            "                collected.append({'title': title, 'creator': creator, 'url': absolute_url})",
+            "        return collected",
+            "    for _page_number in range(1, _page_count + 1):",
+            "        if _repo_base:",
+            "            _target_url = _repo_base + '/pulls?q=is%3Apr'",
+            "            if _page_number > 1:",
+            "                _target_url += f'&page={_page_number}'",
+            "            await current_page.goto(_target_url, wait_until='domcontentloaded')",
+            "            await current_page.wait_for_load_state('domcontentloaded')",
+            "        _result.extend(await _collect_current_pr_rows())",
+            "        if _record_limit is not None and len(_result) >= _record_limit:",
+            "            _result = _result[:_record_limit]",
+            "            break",
+            "        if not _repo_base and _page_number < _page_count:",
+            "            next_link = current_page.locator('a[rel=\"next\"]').first",
+            "            if await next_link.count() == 0:",
+            "                break",
+            "            await next_link.click()",
+            "            await current_page.wait_for_load_state('domcontentloaded')",
+            f"    _results[{key!r}] = _result",
+            ]
+        )
         if not allow_empty:
             lines.append(f"    _validate_non_empty_records({key!r}, _result)")
         return lines
 
-    def _render_embedded_ai_code_trace(self, index: int, trace: RPAAcceptedTrace) -> List[str]:
+    def _render_embedded_ai_code_trace(
+        self,
+        index: int,
+        trace: RPAAcceptedTrace,
+        previous_traces: List[RPAAcceptedTrace],
+    ) -> List[str]:
         key = trace.output_key
-        code = (trace.ai_execution.code if trace.ai_execution else "").strip()
+        code = self._rewrite_dynamic_urls_in_code(
+            (trace.ai_execution.code if trace.ai_execution else "").strip(),
+            previous_traces,
+        )
         lines = ["", f"    # trace {index}: {trace.description or 'AI operation'}"]
         for code_line in code.splitlines():
             lines.append(f"    {code_line}" if code_line.strip() else "")
@@ -299,6 +379,55 @@ class TraceSkillCompiler:
                 suffix = url[len(base):]
                 return f"str(_resolve_result_ref(_results, {trace.output_key + '.url'!r})).rstrip('/') + {suffix!r}"
         return ""
+
+    def _previous_repo_url_expression(self, previous_traces: List[RPAAcceptedTrace]) -> str:
+        for trace in reversed(previous_traces):
+            if trace.output_key and isinstance(trace.output, dict):
+                if trace.output.get("url"):
+                    return f"_resolve_result_ref(_results, {trace.output_key + '.url'!r})"
+                if trace.output.get("value"):
+                    return f"_resolve_result_ref(_results, {trace.output_key + '.value'!r})"
+            if trace.after_page.url and _is_github_repo_url(trace.after_page.url):
+                return repr(_repo_base_from_url(trace.after_page.url))
+        return ""
+
+    def _manual_github_subpage_navigation(
+        self,
+        index: int,
+        trace: RPAAcceptedTrace,
+        previous_traces: List[RPAAcceptedTrace],
+    ) -> List[str]:
+        suffix = _manual_github_subpage_suffix(trace)
+        if not suffix:
+            return []
+        repo_expr = self._previous_repo_url_expression(previous_traces)
+        if not repo_expr:
+            return []
+        return [
+            "",
+            f"    # trace {index}: {trace.description or 'stable GitHub repository subpage navigation'}",
+            f"    _repo_base = _github_repo_base(str({repo_expr}))",
+            "    if not _repo_base:",
+            "        raise RuntimeError('Could not resolve GitHub repository URL for recorded subpage navigation')",
+            f"    _target_url = _repo_base + {suffix!r}",
+            "    await current_page.goto(_target_url, wait_until='domcontentloaded')",
+            "    await current_page.wait_for_load_state('domcontentloaded')",
+        ]
+
+    def _rewrite_dynamic_urls_in_code(self, code: str, previous_traces: List[RPAAcceptedTrace]) -> str:
+        if not code or not previous_traces:
+            return code
+
+        def replace(match: re.Match[str]) -> str:
+            url = match.group("url")
+            dynamic = self._dynamic_url_expression(url, previous_traces)
+            return dynamic or match.group(0)
+
+        return re.sub(
+            r"(?P<quote>['\"])(?P<url>https://github\.com/[^'\"]+)(?P=quote)",
+            replace,
+            code,
+        )
 
 
 def _locator_expression(scope: str, locator: Dict[str, Any]) -> str:
@@ -361,6 +490,111 @@ def _extract_semantic_query(text: str) -> str:
         if match:
             return match.group(1)
     return text
+
+
+def _looks_like_highest_star(text: str) -> bool:
+    return any(
+        pattern in text
+        for pattern in (
+            "highest star",
+            "most stars",
+            "star count",
+            "stars最多",
+            "star数最多",
+            "start数量最多",
+            "star数量最多",
+            "最多星",
+            "最多的项目",
+        )
+    )
+
+
+def _looks_like_pr_extraction(text: str, output: Any) -> bool:
+    return (
+        ("pr" in text or "pull request" in text or "pull requests" in text)
+        and ("title" in text or "标题" in text)
+        and ("creator" in text or "author" in text or "创建人" in text)
+    ) or (isinstance(output, list) and output and isinstance(output[0], dict) and "title" in output[0])
+
+
+def _looks_like_semantic_repo_selection(text: str, output: Any) -> bool:
+    return (
+        ("related" in text or "相关" in text or "semantic" in text)
+        and ("repo" in text or "repository" in text or "project" in text or "项目" in text)
+    )
+
+
+def _extract_semantic_query(text: str) -> str:
+    for pattern in (
+        r"related to\s+([a-zA-Z0-9_+#.-]+)",
+        r"和\s*([a-zA-Z0-9_+#.-]+)\s*最相关",
+        r"most related to\s+([a-zA-Z0-9_+#.-]+)",
+    ):
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return text
+
+
+def _extract_requested_page_count(text: str) -> int:
+    normalized = str(text or "").lower()
+    chinese_numbers = {"一": 1, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5}
+    match = re.search(r"前\s*(\d+)\s*页", normalized)
+    if match:
+        return max(int(match.group(1)), 1)
+    for word, value in chinese_numbers.items():
+        if f"前{word}页" in normalized or f"{word}页" in normalized:
+            return value
+    match = re.search(r"(?:first|top)\s+(\d+)\s+pages?", normalized)
+    if match:
+        return max(int(match.group(1)), 1)
+    match = re.search(r"(\d+)\s+pages?", normalized)
+    if match:
+        return max(int(match.group(1)), 1)
+    if "two pages" in normalized:
+        return 2
+    return 1
+
+
+def _extract_record_limit(text: str) -> Optional[int]:
+    normalized = str(text or "").lower()
+    match = re.search(r"前\s*(\d+)\s*(?:个|条)", normalized)
+    if match:
+        return max(int(match.group(1)), 1)
+    match = re.search(r"(?:first|top)\s+(\d+)\s+(?:prs?|pull requests?|records?|items?)", normalized)
+    if match:
+        return max(int(match.group(1)), 1)
+    if any(pattern in normalized for pattern in ("前十个", "前十条")):
+        return 10
+    return None
+
+
+def _repo_base_from_url(url: str) -> str:
+    text = str(url or "").split("?", 1)[0].rstrip("/")
+    match = re.match(r"(https://github\.com/[^/]+/[^/]+)", text)
+    return match.group(1) if match else ""
+
+
+def _is_github_repo_url(url: str) -> bool:
+    return bool(_repo_base_from_url(url))
+
+
+def _manual_github_subpage_suffix(trace: RPAAcceptedTrace) -> str:
+    text_parts = [trace.description or "", trace.action or "", trace.after_page.url or ""]
+    for candidate in trace.locator_candidates or []:
+        locator = candidate.get("locator") if isinstance(candidate, dict) else candidate
+        if isinstance(locator, dict):
+            text_parts.extend(str(locator.get(key) or "") for key in ("name", "value", "role"))
+    text = " ".join(text_parts).lower()
+    if "/pulls" in text or "pull request" in text or "pull requests" in text or re.search(r"\bprs?\b", text):
+        return "/pulls?q=is%3Apr"
+    if "/issues" in text or "issues" in text or "issue" in text:
+        return "/issues"
+    if "/actions" in text or "actions" in text:
+        return "/actions"
+    if "/releases" in text or "releases" in text:
+        return "/releases"
+    return ""
 
 
 def _runner_template(is_local: bool) -> str:

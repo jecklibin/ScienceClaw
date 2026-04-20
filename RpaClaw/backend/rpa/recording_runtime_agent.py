@@ -4,6 +4,7 @@ import inspect
 import json
 import re
 from typing import Any, Awaitable, Callable, Dict, List, Optional
+from urllib.parse import urljoin, urlparse
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
@@ -21,19 +22,28 @@ Schema:
 {
   "description": "short user-facing action summary",
   "action_type": "run_python",
+  "expected_effect": "extract|navigate|click|fill|mixed",
+  "allow_empty_output": false,
   "output_key": "optional_ascii_snake_case_result_key",
   "code": "async def run(page, results): ..."
 }
 Rules:
 - Complete only the current user command, not the full SOP.
 - Return action_type="run_python" unless a simple goto/click/fill action is clearly enough.
+- expected_effect describes the browser-visible outcome required by the user's current command.
+- Use expected_effect="navigate" when the user asks to open, go to, enter, visit, or navigate to a target.
+- Use expected_effect="extract" when the user only asks to find, collect, summarize, or return data without opening it.
 - If code is returned, it must define async def run(page, results).
 - Use Python Playwright async APIs.
 - Prefer Playwright locators and page.locator/query_selector_all over page.evaluate.
 - Avoid page.evaluate unless the snippet is short, read-only, and necessary.
 - Do not include shell, filesystem, network requests outside the current browser page, or infinite loops.
+- Do not leave the browser on API, JSON, raw, or other machine endpoints after an extract-only command.
+- For extract-only commands, prefer user-facing pages and restore the most recent user-facing page after any temporary helper navigation.
 - Do not include a separate done-check.
 - If extracting data, return structured JSON-serializable Python values.
+- For extract-only commands, do not return null/empty output unless the user explicitly allows empty results.
+- Set allow_empty_output=true only when the user explicitly says no result, empty list, or empty output is acceptable.
 """
 
 
@@ -80,6 +90,13 @@ class RecordingRuntimeAgent:
 
         first_plan = await self.planner(payload)
         first_result = await self.executor(page, first_plan, runtime_results)
+        first_result = await _ensure_expected_effect(
+            page=page,
+            instruction=instruction,
+            plan=first_plan,
+            result=first_result,
+            before=before,
+        )
         if first_result.get("success"):
             trace = await self._accepted_trace(
                 page,
@@ -114,6 +131,13 @@ class RecordingRuntimeAgent:
         }
         repair_plan = await self.planner(repair_payload)
         repair_result = await self.executor(page, repair_plan, runtime_results)
+        repair_result = await _ensure_expected_effect(
+            page=page,
+            instruction=instruction,
+            plan=repair_plan,
+            result=repair_result,
+            before=before,
+        )
         if repair_result.get("success"):
             trace = await self._accepted_trace(
                 page,
@@ -195,14 +219,18 @@ class RecordingRuntimeAgent:
                     return {"success": False, "error": "goto plan missing url", "output": ""}
                 await page.goto(url, wait_until="domcontentloaded")
                 await page.wait_for_load_state("domcontentloaded")
-                return {"success": True, "output": {"url": getattr(page, "url", url)}}
+                return {
+                    "success": True,
+                    "output": {"url": getattr(page, "url", url)},
+                    "effect": {"type": "navigate", "url": getattr(page, "url", url)},
+                }
 
             if action_type == "click":
                 selector = str(plan.get("selector") or "")
                 if not selector:
                     return {"success": False, "error": "click plan missing selector", "output": ""}
                 await page.locator(selector).first.click()
-                return {"success": True, "output": "clicked"}
+                return {"success": True, "output": "clicked", "effect": {"type": "click", "action_performed": True}}
 
             if action_type == "fill":
                 selector = str(plan.get("selector") or "")
@@ -210,7 +238,11 @@ class RecordingRuntimeAgent:
                 if not selector:
                     return {"success": False, "error": "fill plan missing selector", "output": ""}
                 await page.locator(selector).first.fill(str(value))
-                return {"success": True, "output": value}
+                return {
+                    "success": True,
+                    "output": value,
+                    "effect": {"type": "fill", "action_performed": True},
+                }
 
             code = str(plan.get("code") or "")
             if "async def run(page, results)" not in code:
@@ -220,10 +252,39 @@ class RecordingRuntimeAgent:
             runner = namespace.get("run")
             if not callable(runner):
                 return {"success": False, "error": "No run(page, results) function defined", "output": ""}
-            output = runner(page, runtime_results)
-            if inspect.isawaitable(output):
-                output = await output
-            return {"success": True, "error": None, "output": output}
+            navigation_history: List[str] = []
+            original_goto = getattr(page, "goto", None)
+            goto_wrapped = False
+
+            if callable(original_goto):
+                async def tracked_goto(url: str, *args: Any, **kwargs: Any) -> Any:
+                    response = original_goto(url, *args, **kwargs)
+                    if inspect.isawaitable(response):
+                        response = await response
+                    navigation_history.append(str(getattr(page, "url", "") or url or ""))
+                    return response
+
+                try:
+                    setattr(page, "goto", tracked_goto)
+                    goto_wrapped = True
+                except Exception:
+                    goto_wrapped = False
+
+            try:
+                output = runner(page, runtime_results)
+                if inspect.isawaitable(output):
+                    output = await output
+            finally:
+                if goto_wrapped:
+                    try:
+                        setattr(page, "goto", original_goto)
+                    except Exception:
+                        pass
+
+            response = {"success": True, "error": None, "output": output}
+            if navigation_history:
+                response["navigation_history"] = navigation_history
+            return response
         except Exception as exc:
             return {"success": False, "error": str(exc), "output": ""}
 
@@ -260,6 +321,8 @@ def _parse_json_object(text: str) -> Dict[str, Any]:
     if not isinstance(parsed, dict):
         raise ValueError("Recording planner must return a JSON object")
     parsed.setdefault("action_type", "run_python")
+    parsed["expected_effect"] = _normalize_expected_effect(parsed.get("expected_effect"))
+    parsed["allow_empty_output"] = _normalize_bool(parsed.get("allow_empty_output"))
     if parsed.get("action_type") == "run_python" and "async def run(page, results)" not in str(parsed.get("code") or ""):
         raise ValueError("Recording planner must return Python code defining async def run(page, results)")
     return parsed
@@ -287,6 +350,234 @@ async def _page_state(page: Any) -> RPAPageState:
             value = await value
         title = str(value or "")
     return RPAPageState(url=str(getattr(page, "url", "") or ""), title=title)
+
+
+async def _ensure_expected_effect(
+    *,
+    page: Any,
+    instruction: str,
+    plan: Dict[str, Any],
+    result: Dict[str, Any],
+    before: RPAPageState,
+) -> Dict[str, Any]:
+    if not result.get("success"):
+        return result
+
+    expected_effect = _expected_effect(plan, instruction)
+    if expected_effect in {"none", "extract"}:
+        result = await _restore_extract_surface_if_needed(page=page, before=before, result=result)
+        if expected_effect == "extract" and not _normalize_bool(plan.get("allow_empty_output")):
+            if not _has_meaningful_extract_output(result.get("output")):
+                return {
+                    **result,
+                    "success": False,
+                    "error": "Extract step returned no meaningful output; all extracted values were empty or null.",
+                }
+        return result
+
+    if expected_effect in {"navigate", "mixed"}:
+        after = await _page_state(page)
+        if _url_changed(before.url, after.url):
+            effect = dict(result.get("effect") or {})
+            effect.update({"type": "navigate", "url": after.url, "observed_url_change": True})
+            return {**result, "effect": effect}
+
+        target_url = _extract_target_url(result.get("output"), base_url=before.url) or _extract_target_url(
+            plan,
+            base_url=before.url,
+        )
+        if target_url:
+            await page.goto(target_url, wait_until="domcontentloaded")
+            wait_for_load_state = getattr(page, "wait_for_load_state", None)
+            if callable(wait_for_load_state):
+                wait_result = wait_for_load_state("domcontentloaded")
+                if inspect.isawaitable(wait_result):
+                    await wait_result
+            after = await _page_state(page)
+            if _url_changed(before.url, after.url):
+                effect = dict(result.get("effect") or {})
+                effect.update(
+                    {
+                        "type": "navigate",
+                        "url": after.url,
+                        "auto_completed": True,
+                        "source": "output_url",
+                    }
+                )
+                return {**result, "effect": effect}
+
+        return {
+            **result,
+            "success": False,
+            "error": "Expected navigation effect, but the page URL did not change and no target URL was available.",
+        }
+
+    if expected_effect in {"click", "fill"}:
+        effect = result.get("effect")
+        if isinstance(effect, dict) and effect.get("action_performed"):
+            return result
+        action_type = str(plan.get("action_type") or "").strip().lower()
+        if action_type == expected_effect:
+            return {**result, "effect": {"type": expected_effect, "action_performed": True}}
+        return {
+            **result,
+            "success": False,
+            "error": f"Expected {expected_effect} effect, but no browser action evidence was produced.",
+        }
+
+    return result
+
+
+def _expected_effect(plan: Dict[str, Any], instruction: str) -> str:
+    explicit = _normalize_expected_effect(plan.get("expected_effect") or plan.get("effect"))
+    if explicit != "extract":
+        return explicit
+
+    action_type = str(plan.get("action_type") or "").strip().lower()
+    if action_type == "goto":
+        return "navigate"
+    if action_type in {"click", "fill"}:
+        return action_type
+
+    text = str(instruction or "").strip().lower()
+    if _contains_any(text, ("打开", "进入", "跳转", "访问", "open", "go to", "goto", "navigate", "visit")):
+        return "navigate"
+    if _contains_any(text, ("点击", "click", "press")):
+        return "click"
+    if _contains_any(text, ("填写", "填入", "输入", "fill", "type into", "enter ")):
+        return "fill"
+    return explicit
+
+
+def _normalize_expected_effect(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in {"extract", "navigate", "click", "fill", "mixed", "none"} else "extract"
+
+
+def _normalize_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return bool(value)
+
+
+def _has_meaningful_extract_output(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, (int, float)):
+        return True
+    if isinstance(value, str):
+        normalized = value.strip()
+        return bool(normalized) and normalized.lower() not in {"none", "null", "undefined", "n/a"}
+    if isinstance(value, dict):
+        return any(_has_meaningful_extract_output(item) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return any(_has_meaningful_extract_output(item) for item in value)
+    return True
+
+
+def _contains_any(text: str, patterns: tuple[str, ...]) -> bool:
+    return any(pattern in text for pattern in patterns)
+
+
+async def _restore_extract_surface_if_needed(
+    *,
+    page: Any,
+    before: RPAPageState,
+    result: Dict[str, Any],
+) -> Dict[str, Any]:
+    after = await _page_state(page)
+    if not before.url or not _url_changed(before.url, after.url):
+        return result
+    if not _is_machine_endpoint_url(after.url, before_url=before.url):
+        return result
+
+    restore_url = _last_user_facing_url(result.get("navigation_history"), before_url=before.url) or before.url
+    await page.goto(restore_url, wait_until="domcontentloaded")
+    await _wait_for_load_state(page, "domcontentloaded")
+    restored = await _page_state(page)
+    effect = dict(result.get("effect") or {})
+    effect.update(
+        {
+            "type": "extract",
+            "restored_after_transient_endpoint": True,
+            "transient_url": after.url,
+            "url": restored.url,
+        }
+    )
+    return {**result, "effect": effect}
+
+
+async def _wait_for_load_state(page: Any, state: str) -> None:
+    wait_for_load_state = getattr(page, "wait_for_load_state", None)
+    if not callable(wait_for_load_state):
+        return
+    wait_result = wait_for_load_state(state)
+    if inspect.isawaitable(wait_result):
+        await wait_result
+
+
+def _url_changed(before_url: str, after_url: str) -> bool:
+    before = str(before_url or "").rstrip("/")
+    after = str(after_url or "").rstrip("/")
+    return bool(after) and before != after
+
+
+def _is_machine_endpoint_url(url: str, *, before_url: str = "") -> bool:
+    parsed = urlparse(str(url or ""))
+    if not parsed.scheme or not parsed.netloc:
+        return False
+    host = parsed.netloc.lower()
+    path = parsed.path.lower()
+    if host.startswith("api.") or ".api." in host:
+        return True
+    if host in {"api.github.com"}:
+        return True
+    if "/api/" in path or path.startswith("/api/"):
+        return True
+    if path.endswith((".json", ".xml")):
+        return True
+
+    before_host = urlparse(str(before_url or "")).netloc.lower()
+    return bool(before_host and host != before_host and host.startswith(("raw.", "gist.")))
+
+
+def _last_user_facing_url(history: Any, *, before_url: str = "") -> str:
+    if not isinstance(history, list):
+        return ""
+    for item in reversed(history):
+        url = str(item or "").strip()
+        if url and not _is_machine_endpoint_url(url, before_url=before_url):
+            return url
+    return ""
+
+
+def _extract_target_url(value: Any, *, base_url: str = "") -> str:
+    if isinstance(value, str):
+        return _normalize_target_url(value, base_url=base_url)
+    if isinstance(value, dict):
+        for key in ("target_url", "url", "href", "repo_url", "value"):
+            target_url = _extract_target_url(value.get(key), base_url=base_url)
+            if target_url:
+                return target_url
+        output_url = _extract_target_url(value.get("output"), base_url=base_url)
+        if output_url:
+            return output_url
+    return ""
+
+
+def _normalize_target_url(value: str, *, base_url: str = "") -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.startswith(("http://", "https://")):
+        return text
+    if text.startswith("/") and base_url:
+        return urljoin(base_url, text)
+    return ""
 
 
 async def _safe_page_snapshot(page: Any) -> Dict[str, Any]:
