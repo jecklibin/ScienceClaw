@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { createRecordingRunStore } from '@/composables/useRecordingRun'
 
 describe('recording lifecycle store', () => {
-  it('routes interactive segments to the full-screen recorder instead of opening an embedded workbench', () => {
+  it('opens an overlay recorder modal for active interactive segments', () => {
     const store = createRecordingRunStore('chat-1')
 
     store.onRunStarted({
@@ -12,7 +12,8 @@ describe('recording lifecycle store', () => {
       open_workbench: true,
     })
     expect(store.workbenchOpen.value).toBe(false)
-    expect(store.fullPageRecorderRoute.value).toMatchObject({
+    expect(store.recorderModalOpen.value).toBe(true)
+    expect(store.recorderModalRoute.value).toMatchObject({
       path: '/rpa/recorder',
       query: {
         chatSessionId: 'chat-1',
@@ -26,6 +27,7 @@ describe('recording lifecycle store', () => {
       summary: { segment_id: 'seg-1', artifacts: [], steps: [] },
     })
     expect(store.workbenchOpen.value).toBe(false)
+    expect(store.recorderModalOpen.value).toBe(false)
   })
 
   it('tracks testing and publish prompt state', () => {

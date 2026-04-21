@@ -1,64 +1,105 @@
 <template>
-  <div class="mb-3 rounded-2xl border border-emerald-200/70 bg-emerald-50/70 p-4 shadow-sm dark:border-emerald-900/60 dark:bg-emerald-950/20">
-    <div class="flex items-start justify-between gap-3">
-      <div class="min-w-0">
-        <div class="text-sm font-semibold text-gray-900 dark:text-gray-100">{{ summary.intent || '已完成录制段' }}</div>
-        <div class="mt-1 text-xs text-emerald-700 dark:text-emerald-300">
-          {{ summary.kind || 'rpa' }} · {{ summary.status || 'completed' }}
-        </div>
-      </div>
-      <div class="rounded-full bg-white/80 px-2.5 py-1 text-xs font-medium text-emerald-700 shadow-sm dark:bg-gray-900/80 dark:text-emerald-300">
-        Segment
-      </div>
-    </div>
-
-    <div class="mt-3 text-xs text-gray-600 dark:text-gray-300">
-      产物数：{{ summary.artifacts.length }}
-    </div>
-
-    <div v-if="steps.length" class="mt-4 space-y-3">
-      <div
-        v-for="(step, index) in steps"
-        :key="step.id"
-        class="rounded-xl border border-white/80 bg-white/70 p-3 dark:border-gray-800 dark:bg-gray-950/40"
-      >
-        <div class="flex items-start justify-between gap-3">
-          <div class="min-w-0">
-            <div class="text-sm font-medium text-gray-900 dark:text-gray-100">
-              {{ index + 1 }}. {{ step.description || step.action }}
-            </div>
-            <div class="mt-1 break-all text-xs text-gray-500 dark:text-gray-400">
-              {{ step.target || '未生成定位器' }}
-            </div>
-          </div>
-          <span
-            class="rounded-full px-2 py-0.5 text-[11px] font-medium"
-            :class="statusClass(step.validation?.status)"
-          >
-            {{ step.validation?.status || 'unknown' }}
-          </span>
+  <div class="mb-3 overflow-hidden rounded-3xl border border-violet-100/80 bg-white shadow-[0_18px_60px_-36px_rgba(76,29,149,0.55)] dark:border-violet-900/50 dark:bg-gray-950/70">
+    <div class="relative p-4 sm:p-5">
+      <div class="pointer-events-none absolute -right-12 -top-16 h-40 w-40 rounded-full bg-violet-200/30 blur-3xl dark:bg-violet-800/20" />
+      <div class="relative flex items-start gap-4">
+        <div class="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white shadow-lg shadow-violet-500/20">
+          <span class="text-lg font-black">R</span>
         </div>
 
-        <div v-if="step.locator_candidates?.length" class="mt-3">
-          <div class="text-[11px] font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
-            候选定位器
+        <div class="min-w-0 flex-1">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div class="min-w-0">
+              <p class="text-[11px] font-bold uppercase tracking-[0.22em] text-violet-500">Recording captured</p>
+              <h3 class="mt-1 truncate text-base font-extrabold text-gray-950 dark:text-gray-50">
+                {{ summary.intent || '已完成录制段' }}
+              </h3>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                {{ summary.kind || 'rpa' }} · {{ summary.status || 'completed' }}
+              </p>
+            </div>
+            <span class="rounded-full bg-violet-50 px-3 py-1 text-[11px] font-bold text-violet-700 dark:bg-violet-950/50 dark:text-violet-200">
+              Segment
+            </span>
           </div>
-          <div class="mt-2 flex flex-wrap gap-2">
+
+          <div class="mt-4 grid grid-cols-3 gap-2">
+            <div class="rounded-2xl bg-gray-50 p-3 dark:bg-gray-900/70">
+              <div class="text-lg font-black text-gray-950 dark:text-gray-50">{{ stepCount }}</div>
+              <div class="text-[10px] font-bold uppercase tracking-wider text-gray-500">steps</div>
+            </div>
+            <div class="rounded-2xl bg-gray-50 p-3 dark:bg-gray-900/70">
+              <div class="text-lg font-black text-gray-950 dark:text-gray-50">{{ artifactCount }}</div>
+              <div class="text-[10px] font-bold uppercase tracking-wider text-gray-500">artifacts</div>
+            </div>
+            <div class="rounded-2xl bg-gray-50 p-3 dark:bg-gray-900/70">
+              <div class="text-lg font-black text-emerald-600">{{ okStepCount }}</div>
+              <div class="text-[10px] font-bold uppercase tracking-wider text-gray-500">stable</div>
+            </div>
+          </div>
+
+          <div class="mt-4 flex flex-wrap gap-2">
             <button
-              v-for="(candidate, candidateIndex) in step.locator_candidates"
-              :key="`${step.id}-${candidateIndex}`"
-              class="rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors"
-              :class="candidate.selected
-                ? 'border-emerald-500 bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
-                : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800'"
-              :disabled="isRepairing(step.step_index)"
-              @click="switchLocator(step.step_index, candidateIndex)"
+              data-testid="recording-segment-toggle"
+              class="inline-flex items-center justify-center rounded-xl bg-violet-50 px-3 py-2 text-xs font-bold text-violet-700 transition hover:bg-violet-100 dark:bg-violet-950/50 dark:text-violet-200 dark:hover:bg-violet-900/60"
+              type="button"
+              @click="expanded = !expanded"
             >
-              {{ candidate.kind || `候选 ${candidateIndex + 1}` }}
+              {{ expanded ? '收起步骤' : '查看步骤' }}
             </button>
+            <span class="inline-flex items-center rounded-xl bg-gray-50 px-3 py-2 text-xs font-semibold text-gray-500 dark:bg-gray-900/70 dark:text-gray-400">
+              {{ stepCount }} steps · {{ artifactCount }} artifacts
+            </span>
           </div>
-          <div v-if="repairErrors[step.id]" class="mt-2 text-xs text-rose-600 dark:text-rose-300">
-            {{ repairErrors[step.id] }}
+        </div>
+      </div>
+    </div>
+
+    <div v-if="expanded && steps.length" class="border-t border-gray-100 bg-gray-50/70 p-4 dark:border-gray-800 dark:bg-gray-900/40">
+      <div class="space-y-3">
+        <div
+          v-for="(step, index) in steps"
+          :key="step.id"
+          class="rounded-2xl border border-white bg-white/90 p-3 dark:border-gray-800 dark:bg-gray-950/70"
+        >
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <div class="text-sm font-bold text-gray-950 dark:text-gray-50">
+                {{ index + 1 }}. {{ step.description || step.action }}
+              </div>
+              <div class="mt-1 break-all text-xs text-gray-500 dark:text-gray-400">
+                {{ step.target || '未生成定位器' }}
+              </div>
+            </div>
+            <span
+              class="rounded-full px-2 py-0.5 text-[11px] font-bold"
+              :class="statusClass(step.validation?.status)"
+            >
+              {{ step.validation?.status || 'unknown' }}
+            </span>
+          </div>
+
+          <div v-if="step.locator_candidates?.length" class="mt-3">
+            <div class="text-[11px] font-bold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+              候选定位器
+            </div>
+            <div class="mt-2 flex flex-wrap gap-2">
+              <button
+                v-for="(candidate, candidateIndex) in step.locator_candidates"
+                :key="`${step.id}-${candidateIndex}`"
+                class="rounded-lg border px-2.5 py-1 text-xs font-bold transition-colors"
+                :class="candidate.selected
+                  ? 'border-emerald-500 bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
+                  : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800'"
+                :disabled="isRepairing(step.step_index)"
+                @click="switchLocator(step.step_index, candidateIndex)"
+              >
+                {{ candidate.kind || `候选 ${candidateIndex + 1}` }}
+              </button>
+            </div>
+            <div v-if="repairErrors[step.id]" class="mt-2 text-xs text-rose-600 dark:text-rose-300">
+              {{ repairErrors[step.id] }}
+            </div>
           </div>
         </div>
       </div>
@@ -67,7 +108,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import { promoteRecordingStepLocator } from '@/api/recording'
 import type { RecordingSegmentSummary, RecordingStep } from '@/types/recording'
@@ -76,9 +117,16 @@ const props = defineProps<{
   summary: RecordingSegmentSummary
 }>()
 
+const expanded = ref(false)
 const steps = ref<RecordingStep[]>(props.summary.steps ? [...props.summary.steps] : [])
 const repairingStepIndex = ref<number | null>(null)
 const repairErrors = ref<Record<string, string>>({})
+
+const stepCount = computed(() => steps.value.length)
+const artifactCount = computed(() => props.summary.artifacts.length)
+const okStepCount = computed(() =>
+  steps.value.filter((step) => step.validation?.status === 'ok').length,
+)
 
 watch(
   () => props.summary.steps,

@@ -204,6 +204,12 @@
         </div>
       </div>
     </div>
+      <RecordingRecorderModal
+        :visible="recordingStore.recorderModalOpen.value"
+        :route="recordingStore.recorderModalRoute.value"
+        @close="recordingStore.closeRecorderModal()"
+        @segment-complete="handleRecordingSegmentComplete"
+      />
       <!-- Activity Panel (right side - Cursor-style thinking + execution timeline) -->
       <ActivityPanel
         :key="sessionId"
@@ -269,6 +275,7 @@ import type { ActivityItem } from '../components/ActivityPanel.vue';
 import McpSessionSelector from '../components/McpSessionSelector.vue';
 import RecordingSegmentCard from '@/components/RecordingSegmentCard.vue';
 import RecordingArtifactList from '@/components/RecordingArtifactList.vue';
+import RecordingRecorderModal from '@/components/RecordingRecorderModal.vue';
 import { createRecordingRunStore } from '@/composables/useRecordingRun';
 import { publishRecordingRun, testRecordingRun } from '@/api/recording';
 import type {
@@ -829,17 +836,6 @@ const handlePlanEvent = (planData: PlanEventData) => {
 
 const handleRecordingRunStarted = (payload: RecordingRunStartedPayload) => {
   recordingStore.onRunStarted(payload);
-  if (!payload.open_workbench || !sessionId.value) return;
-  router.push({
-    path: '/rpa/recorder',
-    query: {
-      sandboxId: `recording-${payload.run.id}`,
-      chatSessionId: sessionId.value,
-      runId: payload.run.id,
-      segmentId: payload.segment.id,
-      returnTo: `/chat/${sessionId.value}`,
-    },
-  });
 }
 
 const handleRecordingSegmentComplete = (payload: RecordingSegmentCompletedPayload) => {

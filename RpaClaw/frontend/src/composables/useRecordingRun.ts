@@ -30,6 +30,11 @@ export function createRecordingRunStore(chatSessionId?: string) {
     path: string
     query: Record<string, string>
   } | null>(null)
+  const recorderModalOpen = ref(false)
+  const recorderModalRoute = ref<{
+    path: string
+    query: Record<string, string>
+  } | null>(null)
   const publishPrompt = ref<{ kind: 'skill' | 'tool'; name: string; stagingPaths: string[] } | null>(null)
   const actionPrompt = ref<RecordingActionPrompt | null>(null)
 
@@ -41,7 +46,7 @@ export function createRecordingRunStore(chatSessionId?: string) {
     activeSegment.value = payload.segment
     actionPrompt.value = null
     workbenchOpen.value = false
-    fullPageRecorderRoute.value = payload.open_workbench
+    const route = payload.open_workbench
       ? {
           path: '/rpa/recorder',
           query: {
@@ -50,15 +55,21 @@ export function createRecordingRunStore(chatSessionId?: string) {
             runId: payload.run.id,
             segmentId: payload.segment.id,
             returnTo: chatSessionId ? `/chat/${chatSessionId}` : '/chat',
+            embedded: '1',
           },
         }
       : null
+    fullPageRecorderRoute.value = route
+    recorderModalRoute.value = route
+    recorderModalOpen.value = !!route
   }
 
   const onSegmentCompleted = (payload: RecordingSegmentCompletedPayload) => {
     activeSegment.value = null
     workbenchOpen.value = false
     fullPageRecorderRoute.value = null
+    recorderModalOpen.value = false
+    recorderModalRoute.value = null
     summaries.value = [...summaries.value, payload.summary]
     artifacts.value = [...artifacts.value, ...payload.summary.artifacts]
     if (run.value) {
@@ -103,6 +114,11 @@ export function createRecordingRunStore(chatSessionId?: string) {
     workbenchOpen.value = true
   }
 
+  const closeRecorderModal = () => {
+    recorderModalOpen.value = false
+    recorderModalRoute.value = null
+  }
+
   const dismissActionPrompt = () => {
     actionPrompt.value = null
   }
@@ -120,6 +136,8 @@ export function createRecordingRunStore(chatSessionId?: string) {
     summaries,
     workbenchOpen,
     fullPageRecorderRoute,
+    recorderModalOpen,
+    recorderModalRoute,
     actionPrompt,
     testingState,
     publishPrompt,
@@ -130,6 +148,7 @@ export function createRecordingRunStore(chatSessionId?: string) {
     onPublishPrepared,
     closeWorkbench,
     openWorkbench,
+    closeRecorderModal,
     dismissActionPrompt,
     consumeFullPageRecorderRoute,
   }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue';
+import { computed, ref, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { Camera, Terminal, CheckCircle, Radio, Send, Wand2, Bot, Code, X, House, FolderOpen, Globe } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
@@ -25,6 +25,7 @@ const router = useRouter();
 const route = useRoute();
 
 const sessionId = ref<string | null>(null);
+const isEmbedded = computed(() => route.query.embedded === '1');
 const sandboxSessionId = ref<string>('');
 const isRecording = ref(true);
 const recordingTime = ref('00:00');
@@ -259,6 +260,11 @@ onBeforeUnmount(() => {
   shouldReconnectScreencast = false;
   if (timerInterval.value) clearInterval(timerInterval.value);
   if (pollInterval) clearInterval(pollInterval);
+  if (isEmbedded.value && isRecording.value && sessionId.value) {
+    void apiClient.post(`/rpa/session/${sessionId.value}/stop`).catch((err) => {
+      console.error('Failed to stop embedded recording session on close:', err);
+    });
+  }
   disconnectScreencast();
 });
 
@@ -564,12 +570,13 @@ const stopRecording = async () => {
   const runId = route.query.runId as string | undefined;
   const segmentId = route.query.segmentId as string | undefined;
   const returnTo = (route.query.returnTo as string | undefined) || (chatSessionId ? `/chat/${chatSessionId}` : '/chat');
+  let embeddedCompletionPayload: any = null;
 
   if (sessionId.value && chatSessionId && runId && segmentId) {
     try {
       const response = await apiClient.get(`/rpa/session/${sessionId.value}`);
       const rawSteps: RpaStep[] = response.data.session?.steps || [];
-      await completeRecordingSegment(
+      embeddedCompletionPayload = await completeRecordingSegment(
         chatSessionId,
         runId,
         segmentId,
@@ -597,10 +604,31 @@ const stopRecording = async () => {
     }
   }
   if (chatSessionId && runId && segmentId) {
+    if (isEmbedded.value) {
+      window.parent?.postMessage(
+        {
+          type: 'rpa-recording-completed',
+          payload: {
+            segment: embeddedCompletionPayload?.segment,
+            summary: embeddedCompletionPayload?.summary,
+          },
+        },
+        window.location.origin,
+      );
+      return;
+    }
     router.push(returnTo);
   } else {
     router.push(`/rpa/configure?sessionId=${sessionId.value}`);
   }
+};
+
+const returnToParentChat = () => {
+  if (isEmbedded.value) {
+    window.parent?.postMessage({ type: 'rpa-recording-close' }, window.location.origin);
+    return;
+  }
+  router.push('/chat');
 };
 
 const goToHome = () => {
@@ -788,6 +816,15 @@ const sendMessage = async () => {
       </div>
       <div class="flex items-center gap-4">
         <button
+          v-if="isEmbedded"
+          @click="returnToParentChat"
+          class="flex items-center gap-2 bg-white/10 text-white font-medium px-4 py-2 rounded-full hover:bg-white/20 transition-all text-sm"
+        >
+          <House :size="16" />
+          返回对话
+        </button>
+        <button
+          v-if="!isEmbedded"
           @click="goToHome"
           class="flex items-center gap-2 bg-white/10 text-white font-medium px-4 py-2 rounded-full hover:bg-white/20 transition-all text-sm"
         >
@@ -795,6 +832,7 @@ const sendMessage = async () => {
           返回首页
         </button>
         <button
+          v-if="!isEmbedded"
           @click="goToSkills"
           class="flex items-center gap-2 bg-white/10 text-white font-medium px-4 py-2 rounded-full hover:bg-white/20 transition-all text-sm"
         >
