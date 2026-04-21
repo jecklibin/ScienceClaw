@@ -5,8 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from backend.config import settings
-from backend.rpa.generator import PlaywrightGenerator
+from backend.workflow.publishing import build_publish_draft, safe_skill_name, write_skill_artifacts
+from backend.workflow.recording_adapter import recording_run_to_workflow
 
 from .models import RecordingRun
 
@@ -23,46 +23,6 @@ def _safe_name(value: str, fallback: str) -> str:
     return candidate or fallback
 
 
-def _run_display_name(run: RecordingRun) -> str:
-    if run.segments:
-        return run.segments[0].intent.strip() or "recorded_workflow"
-    return "recorded_workflow"
-
-
-def _collect_rpa_steps(run: RecordingRun) -> list[dict[str, Any]]:
-    steps: list[dict[str, Any]] = []
-    for segment in run.segments:
-        if segment.kind in {"rpa", "mixed"}:
-            steps.extend(segment.steps)
-    return steps
-
-
-def _build_skill_script(run: RecordingRun) -> str:
-    steps = _collect_rpa_steps(run)
-    if not steps:
-        return "\n".join(
-            [
-                '"""Generated recorded workflow skill."""',
-                "",
-                "def run(*args, **kwargs):",
-                "    return {",
-                f'        "run_id": "{run.id}",',
-                '        "status": "no_rpa_steps",',
-                "    }",
-                "",
-            ]
-        )
-    return PlaywrightGenerator().generate_script(
-        steps,
-        params={},
-        is_local=(settings.storage_backend == "local"),
-    )
-
-
-def _skill_staging_dir(workspace_dir: str, session_id: str, run_id: str) -> Path:
-    return Path(workspace_dir) / session_id / "skills_staging" / run_id
-
-
 def _tool_staging_dir(workspace_dir: str, session_id: str) -> Path:
     return Path(workspace_dir) / session_id / "tools_staging"
 
@@ -72,25 +32,18 @@ async def build_publish_artifacts(run: RecordingRun, workspace_dir: str) -> Publ
     if target not in {"skill", "tool"}:
         target = "skill"
 
-    display_name = _run_display_name(run)
-    safe_name = _safe_name(display_name, f"recording_{run.id[:8]}")
-    summary = {
-        "name": safe_name,
-        "title": display_name,
-        "run_id": run.id,
-        "session_id": run.session_id,
-        "segments": [segment.model_dump(mode="json") for segment in run.segments],
-        "artifacts": [artifact.model_dump(mode="json") for artifact in run.artifact_index],
-    }
+    workflow_run = recording_run_to_workflow(run)
+    draft = build_publish_draft(workflow_run, publish_target="skill" if target == "skill" else "tool")
 
     if target == "tool":
+        safe_name = safe_skill_name(draft.skill_name, f"recording_{run.id[:8]}")
         target_dir = _tool_staging_dir(workspace_dir, run.session_id)
         target_dir.mkdir(parents=True, exist_ok=True)
         tool_path = target_dir / f"{safe_name}.py"
         tool_path.write_text(
             "\n".join(
                 [
-                    '"""Generated from a recorded RPA/MCP workflow."""',
+                    '"""Generated from a recorded workflow."""',
                     "",
                     "def run(*args, **kwargs):",
                     "    return {",
@@ -102,47 +55,32 @@ async def build_publish_artifacts(run: RecordingRun, workspace_dir: str) -> Publ
             ),
             encoding="utf-8",
         )
-        return PublishPreparation(prompt_kind="tool", staging_paths=[str(tool_path)], summary=summary)
+        return PublishPreparation(
+            prompt_kind="tool",
+            staging_paths=[str(tool_path)],
+            summary={
+                "name": safe_name,
+                "title": draft.display_title,
+                "run_id": run.id,
+                "draft": draft.model_dump(mode="json"),
+            },
+        )
 
-    target_dir = _skill_staging_dir(workspace_dir, run.session_id, run.id)
-    target_dir.mkdir(parents=True, exist_ok=True)
-    save_ready_dir = Path(workspace_dir) / run.session_id / ".agents" / "skills" / safe_name
-    save_ready_dir.mkdir(parents=True, exist_ok=True)
-    skill_md = "\n".join(
-        [
-            "---",
-            f"name: {safe_name}",
-            f'description: "Recorded workflow generated from conversation run {run.id}."',
-            "---",
-            "",
-            f"# {display_name}",
-            "",
-            "This skill was generated from a recorded RPA/MCP workflow.",
-            "",
-            "## Segments",
-            *[f"- {segment.intent}" for segment in run.segments],
-            "",
-        ]
-    )
-    skill_py = _build_skill_script(run)
-    (target_dir / "SKILL.md").write_text(
-        skill_md,
-        encoding="utf-8",
-    )
-    (target_dir / "skill.py").write_text(
-        skill_py,
-        encoding="utf-8",
-    )
-    (save_ready_dir / "SKILL.md").write_text(
-        skill_md,
-        encoding="utf-8",
-    )
-    (save_ready_dir / "skill.py").write_text(
-        skill_py,
-        encoding="utf-8",
-    )
+    staging_root = Path(workspace_dir) / run.session_id / "skills_staging"
+    save_ready_root = Path(workspace_dir) / run.session_id / ".agents" / "skills"
+    staging_result = write_skill_artifacts(workflow_run, draft, staging_root)
+    save_ready_result = write_skill_artifacts(workflow_run, draft, save_ready_root)
+
     return PublishPreparation(
         prompt_kind="skill",
-        staging_paths=[str(target_dir), str(save_ready_dir)],
-        summary=summary,
+        staging_paths=[staging_result["skill_dir"], save_ready_result["skill_dir"]],
+        summary={
+            "name": staging_result["name"],
+            "title": draft.display_title,
+            "run_id": run.id,
+            "session_id": run.session_id,
+            "draft": draft.model_dump(mode="json"),
+            "segments": [segment.model_dump(mode="json") for segment in workflow_run.segments],
+            "artifacts": [artifact.model_dump(mode="json") for artifact in workflow_run.artifacts],
+        },
     )
