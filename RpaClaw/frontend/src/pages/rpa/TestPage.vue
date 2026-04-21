@@ -42,8 +42,12 @@ const segmentId = computed(() => route.query.segmentId as string | undefined);
 const returnTo = computed(() => (route.query.returnTo as string | undefined) || (chatSessionId.value ? `/chat/${chatSessionId.value}` : '/chat'));
 const isEmbedded = computed(() => route.query.embedded === '1');
 const isConversationalTest = computed(() => !!chatSessionId.value && !!route.query.runId);
-const skillName = computed(() => (route.query.skillName as string) || '录制技能');
-const skillDescription = computed(() => (route.query.skillDescription as string) || '');
+const segmentTitle = computed(() =>
+  (route.query.segmentTitle as string) || (route.query.skillName as string) || '未命名片段',
+);
+const segmentPurpose = computed(() =>
+  (route.query.segmentPurpose as string) || (route.query.skillDescription as string) || '',
+);
 const params = computed(() => {
   try {
     return JSON.parse((route.query.params as string) || '{}');
@@ -471,8 +475,8 @@ const finishConversationalSegment = async () => {
         artifacts: deriveArtifactsFromRpaSteps(rawSteps),
         params: params.value,
         auth_config: { credential_ids: authCredentialIds },
-        title: skillName.value,
-        description: skillDescription.value,
+        title: segmentTitle.value,
+        description: segmentPurpose.value,
         testing_status: testSuccess.value ? 'passed' : 'failed',
       },
     );
@@ -498,8 +502,8 @@ const saveSkill = async () => {
 
   try {
     const resp = await apiClient.post(`/rpa/session/${sessionId.value}/save`, {
-      skill_name: skillName.value,
-      description: skillDescription.value,
+      skill_name: segmentTitle.value,
+      description: segmentPurpose.value,
       params: params.value,
     });
 
@@ -537,8 +541,8 @@ onBeforeUnmount(() => {
         <ArrowLeft :size="18" />
       </button>
       <Play class="text-[#831bd7]" :size="22" />
-      <h1 class="text-lg font-extrabold text-gray-900 dark:text-gray-100">测试技能</h1>
-      <span class="max-w-48 truncate text-sm text-gray-500 dark:text-gray-400">{{ skillName }}</span>
+      <h1 class="text-lg font-extrabold text-gray-900 dark:text-gray-100">{{ isConversationalTest ? '测试片段' : '测试技能' }}</h1>
+      <span class="max-w-48 truncate text-sm text-gray-500 dark:text-gray-400">{{ segmentTitle }}</span>
       <div class="flex-1" />
 
       <button

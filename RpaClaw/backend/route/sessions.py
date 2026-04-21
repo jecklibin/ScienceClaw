@@ -145,6 +145,16 @@ class PublishRecordingRunRequest(BaseModel):
     draft: dict | None = Field(default=None, description="Final user-confirmed publish draft")
 
 
+class CreateScriptSegmentRequest(BaseModel):
+    title: str = Field(..., description="Segment title")
+    purpose: str = Field(..., description="Segment purpose")
+    script: str = Field(..., description="Python script source defining run(context)")
+    entry: str = Field(default="", description="Relative segment script path")
+    params: dict = Field(default_factory=dict)
+    inputs: list[dict] = Field(default_factory=list)
+    outputs: list[dict] = Field(default_factory=list)
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 内部辅助函数
 # ═══════════════════════════════════════════════════════════════════
@@ -2041,6 +2051,69 @@ async def test_recording_run(
         "run": _serialize_recording_obj(run),
         "test_payload": test_payload,
     })
+
+
+@router.post("/{session_id}/recordings/{run_id}/script-segments", response_model=ApiResponse)
+async def create_recording_script_segment(
+    session_id: str,
+    run_id: str,
+    body: CreateScriptSegmentRequest,
+    current_user: User = Depends(require_user),
+) -> ApiResponse:
+    try:
+        session = await async_get_science_session(session_id)
+        if session.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Access denied")
+    except ScienceSessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    try:
+        run = recording_orchestrator.get_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Recording run not found") from exc
+
+    if run.session_id != session_id or run.user_id != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    segment = recording_orchestrator.start_segment(
+        run,
+        kind="chat_process",
+        intent=body.purpose,
+        requires_workbench=False,
+    )
+    segment.exports = {
+        "title": body.title,
+        "description": body.purpose,
+        "script": body.script,
+        "entry": body.entry or f"segments/{segment.id}_script.py",
+        "params": body.params,
+        "inputs": body.inputs,
+        "outputs": body.outputs,
+        "testing_status": "passed",
+    }
+    recording_orchestrator.complete_segment(run, segment)
+
+    summary = {
+        "segment_id": segment.id,
+        "intent": segment.intent,
+        "title": body.title,
+        "description": body.purpose,
+        "kind": "script",
+        "status": segment.status,
+        "params": body.params,
+        "artifacts": [],
+        "steps": [],
+        "inputs": body.inputs,
+        "outputs": body.outputs,
+        "testing_status": "passed",
+    }
+    _append_session_event(session, _wrap_event("recording_segment_completed", {
+        "timestamp": _now_ts(),
+        "segment": _serialize_recording_obj(segment),
+        "summary": summary,
+    }))
+    await session.save()
+    return ApiResponse(data={"segment": _serialize_recording_obj(segment), "summary": summary})
 
 
 @router.post("/{session_id}/recordings/{run_id}/publish-draft", response_model=ApiResponse)

@@ -478,6 +478,49 @@ class TestRecordingRoutes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[0]["event"], "recording_segment_completed")
         self.assertEqual(events[0]["data"]["summary"]["artifacts"][0]["name"], "downloaded_pdf")
 
+    async def test_create_script_segment_route_appends_completion_event(self):
+        events = []
+
+        async def _save():
+            return None
+
+        session = SimpleNamespace(user_id="u1", events=events, save=_save)
+        current_user = SimpleNamespace(id="u1")
+        orchestrator = RecordingOrchestrator()
+        run = orchestrator.create_run(session_id="session-1", user_id="u1", kind="mixed")
+
+        with (
+            unittest.mock.patch.object(
+                SESSIONS_MODULE,
+                "async_get_science_session",
+                AsyncMock(return_value=session),
+            ),
+            unittest.mock.patch.object(
+                SESSIONS_MODULE,
+                "recording_orchestrator",
+                orchestrator,
+            ),
+        ):
+            data = await SESSIONS_MODULE.create_recording_script_segment(
+                "session-1",
+                run.id,
+                SESSIONS_MODULE.CreateScriptSegmentRequest(
+                    title="转换报表",
+                    purpose="将下载文件转换为 CSV",
+                    script="def run(context):\n    return {'converted_csv': 'output.csv'}\n",
+                    params={"report_date": {"original_value": "2026-04-21", "sensitive": False}},
+                    inputs=[{"name": "source_file", "type": "file", "description": "下载文件"}],
+                    outputs=[{"name": "converted_csv", "type": "file", "description": "CSV 文件"}],
+                ),
+                current_user=current_user,
+            )
+
+        self.assertEqual(data.data["summary"]["kind"], "script")
+        self.assertEqual(data.data["summary"]["title"], "转换报表")
+        self.assertEqual(data.data["summary"]["inputs"][0]["name"], "source_file")
+        self.assertEqual(events[0]["event"], "recording_segment_completed")
+        self.assertEqual(run.segments[0].kind, "chat_process")
+
     async def test_begin_recording_test_route_sets_testing_status(self):
         async def _save():
             return None

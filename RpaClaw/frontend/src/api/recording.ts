@@ -74,3 +74,23 @@ export async function prepareRecordingPublishDraft(
   )
   return response.data.data as { draft: SkillPublishDraft }
 }
+
+export async function createScriptRecordingSegment(
+  sessionId: string,
+  runId: string,
+  payload: {
+    title: string
+    purpose: string
+    script: string
+    entry?: string
+    params?: Record<string, unknown>
+    inputs?: Array<Record<string, unknown>>
+    outputs?: Array<Record<string, unknown>>
+  },
+) {
+  const response = await apiClient.post(
+    `/sessions/${sessionId}/recordings/${runId}/script-segments`,
+    payload,
+  )
+  return response.data.data
+}

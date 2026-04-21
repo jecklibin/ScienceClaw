@@ -82,8 +82,8 @@ interface CredentialItem {
 }
 
 const steps = ref<StepItem[]>([]);
-const skillName = ref('');
-const skillDescription = ref('');
+const segmentTitle = ref('');
+const segmentPurpose = ref('');
 const generatedScript = ref('');
 const params = ref<ParamItem[]>([]);
 const credentials = ref<CredentialItem[]>([]);
@@ -381,14 +381,14 @@ const loadSession = async () => {
     if (navStep?.url) {
       try {
         const url = new URL(navStep.url);
-        skillName.value = `${url.hostname} 自动化`;
+        segmentTitle.value = `${url.hostname} 自动化`;
       } catch {
-        skillName.value = '录制技能';
+        segmentTitle.value = '录制片段';
       }
     } else {
-      skillName.value = '录制技能';
+      segmentTitle.value = '录制片段';
     }
-    skillDescription.value = `自动执行 ${steps.value.length} 个录制步骤`;
+    segmentPurpose.value = `自动执行 ${steps.value.length} 个录制步骤`;
   } catch (err: any) {
     error.value = `加载会话失败: ${err.response?.data?.detail || err.message}`;
     if (!steps.value.length) loadFailed.value = true;
@@ -429,8 +429,10 @@ const generateScript = async () => {
 const goToTest = () => {
   const query: Record<string, string> = {
     sessionId: sessionId.value,
-    skillName: skillName.value,
-    skillDescription: skillDescription.value,
+    skillName: segmentTitle.value,
+    skillDescription: segmentPurpose.value,
+    segmentTitle: segmentTitle.value,
+    segmentPurpose: segmentPurpose.value,
     params: JSON.stringify(buildParamMap()),
   };
   if (isEmbedded.value) {
@@ -669,22 +671,22 @@ onMounted(() => {
                 <Settings :size="18" />
               </div>
               <div>
-                <h2 class="text-base font-extrabold">技能信息</h2>
+                <h2 class="text-base font-extrabold">片段信息</h2>
               </div>
             </div>
 
             <div class="mt-4 space-y-4">
               <div class="space-y-1.5">
-                <label class="text-xs font-semibold text-gray-500 dark:text-gray-400">技能名称</label>
+                <label class="text-xs font-semibold text-gray-500 dark:text-gray-400">片段名称</label>
                 <input
-                  v-model="skillName"
+                  v-model="segmentTitle"
                   class="w-full rounded-2xl border border-gray-200 dark:border-gray-700 bg-[#fafafa] dark:bg-[#383739] px-3 py-2.5 text-sm outline-none transition-colors focus:border-[#831bd7] focus:bg-white"
                 />
               </div>
               <div class="space-y-1.5">
-                <label class="text-xs font-semibold text-gray-500 dark:text-gray-400">描述</label>
+                <label class="text-xs font-semibold text-gray-500 dark:text-gray-400">片段用途</label>
                 <textarea
-                  v-model="skillDescription"
+                  v-model="segmentPurpose"
                   rows="3"
                   class="w-full resize-none rounded-2xl border border-gray-200 dark:border-gray-700 bg-[#fafafa] dark:bg-[#383739] px-3 py-2.5 text-sm outline-none transition-colors focus:border-[#831bd7] focus:bg-white"
                 />

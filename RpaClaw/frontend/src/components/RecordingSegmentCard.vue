@@ -10,7 +10,7 @@
         <div class="min-w-0 flex-1">
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div class="min-w-0">
-              <p class="text-[11px] font-bold uppercase tracking-[0.22em] text-violet-500">Recording captured</p>
+              <p class="text-[11px] font-bold uppercase tracking-[0.22em] text-violet-500">{{ kindLabel }}</p>
               <h3 class="mt-1 truncate text-base font-extrabold text-gray-950 dark:text-gray-50">
                 {{ summary.title || summary.intent || '已完成录制段' }}
               </h3>
@@ -67,7 +67,7 @@
       </div>
     </div>
 
-    <div v-if="expanded && steps.length" class="border-t border-gray-100 bg-gray-50/70 p-4 dark:border-gray-800 dark:bg-gray-900/40">
+    <div v-if="expanded && (steps.length || inputEntries.length || outputEntries.length)" class="border-t border-gray-100 bg-gray-50/70 p-4 dark:border-gray-800 dark:bg-gray-900/40">
       <div class="space-y-3">
         <div
           v-for="(step, index) in steps"
@@ -114,6 +114,15 @@
             </div>
           </div>
         </div>
+
+        <div v-if="inputEntries.length || outputEntries.length" class="rounded-2xl border border-white bg-white/90 p-3 dark:border-gray-800 dark:bg-gray-950/70">
+          <div v-if="inputEntries.length" class="text-xs text-gray-500 dark:text-gray-400">
+            输入：{{ inputEntries.join('、') }}
+          </div>
+          <div v-if="outputEntries.length" class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+            输出：{{ outputEntries.join('、') }}
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -136,6 +145,20 @@ const repairErrors = ref<Record<string, string>>({})
 
 const stepCount = computed(() => steps.value.length)
 const paramCount = computed(() => Object.keys(props.summary.params || {}).length)
+const kindLabel = computed(() => {
+  if (props.summary.kind === 'script') return 'Script segment'
+  if (props.summary.kind === 'mcp') return 'MCP segment'
+  if (props.summary.kind === 'llm') return 'LLM segment'
+  return 'Workflow segment'
+})
+const inputEntries = computed(() => {
+  const inputs = props.summary.inputs
+  return Array.isArray(inputs) ? inputs.map((item) => item.name).filter(Boolean) : []
+})
+const outputEntries = computed(() => {
+  const outputs = props.summary.outputs
+  return Array.isArray(outputs) ? outputs.map((item) => item.name).filter(Boolean) : []
+})
 const authReady = computed(() => {
   const credentialIds = props.summary.auth_config?.credential_ids
   return Array.isArray(credentialIds) ? credentialIds.length > 0 : false

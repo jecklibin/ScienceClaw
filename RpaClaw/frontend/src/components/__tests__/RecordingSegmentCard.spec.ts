@@ -59,4 +59,36 @@ describe('RecordingSegmentCard', () => {
     expect(root.textContent).toContain('Open GitHub Trending')
     app.unmount()
   })
+
+  it('renders a script segment as a workflow segment card', async () => {
+    const { default: RecordingSegmentCard } = await import('@/components/RecordingSegmentCard.vue')
+    const root = document.createElement('div')
+    document.body.appendChild(root)
+
+    const app = createApp(RecordingSegmentCard, {
+      summary: {
+        segment_id: 'segment_2',
+        kind: 'script',
+        title: '转换报表',
+        description: '将下载文件转换为 CSV',
+        artifacts: [],
+        steps: [],
+        params: {},
+        testing_status: 'passed',
+        inputs: [{ name: 'source_file', type: 'file' }],
+        outputs: [{ name: 'converted_csv', type: 'file' }],
+      },
+    })
+    app.mount(root)
+    await nextTick()
+
+    expect(root.textContent).toContain('Script segment')
+    expect(root.textContent).toContain('转换报表')
+    root.querySelector<HTMLButtonElement>('[data-testid="recording-segment-toggle"]')?.click()
+    await nextTick()
+    expect(root.textContent).toContain('source_file')
+    expect(root.textContent).toContain('converted_csv')
+
+    app.unmount()
+  })
 })
