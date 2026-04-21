@@ -282,6 +282,7 @@ import RecordingRecorderModal from '@/components/RecordingRecorderModal.vue';
 import RecordingPublishDraftModal from '@/components/RecordingPublishDraftModal.vue';
 import { createRecordingRunStore } from '@/composables/useRecordingRun';
 import { prepareRecordingPublishDraft, publishRecordingRun } from '@/api/recording';
+import { normalizeToolContent } from '@/utils/recordingEvents';
 import type {
   RecordingPublishPreparedPayload,
   RecordingRunStartedPayload,
@@ -356,6 +357,7 @@ const {
   selectedActivityTurn,
   pendingToolCallIds,
 } = toRefs(state);
+const isRestoringHistory = ref(false);
 
 const { groupedMessages } = useMessageGrouper(messages);
 const recordingStore = createRecordingRunStore(() => sessionId.value);
@@ -543,27 +545,20 @@ const handleToolEvent = (toolData: ToolEventData) => {
     ...toolData
   }
 
-  // Try to parse content if it's a string
-  if (typeof toolContent.content === 'string') {
-    try {
-      toolContent.content = JSON.parse(toolContent.content);
-    } catch (e) {
-      // Ignore parse error, keep as string
-    }
-  }
+  const { content, recordingPayload } = normalizeToolContent(toolContent.content);
+  toolContent.content = content;
 
-  if (realTime.value && toolContent.content && typeof toolContent.content === 'object') {
-    const recordingContent = toolContent.content as any;
-    if (recordingContent.recording_event === 'recording_run_started') {
-      handleRecordingRunStarted(recordingContent as RecordingRunStartedPayload);
-    } else if (recordingContent.recording_event === 'recording_segment_completed') {
-      handleRecordingSegmentComplete(recordingContent as RecordingSegmentCompletedPayload);
-    } else if (recordingContent.recording_event === 'recording_segment_updated') {
-      handleRecordingSegmentUpdated(recordingContent as RecordingSegmentUpdatedPayload);
-    } else if (recordingContent.recording_event === 'recording_test_started') {
-      handleRecordingTestStarted(recordingContent as RecordingTestStartedPayload);
-    } else if (recordingContent.recording_event === 'recording_publish_prepared') {
-      handleRecordingPublishPrepared(recordingContent as RecordingPublishPreparedPayload);
+  if (!isRestoringHistory.value && recordingPayload) {
+    if (recordingPayload.recording_event === 'recording_run_started') {
+      handleRecordingRunStarted(recordingPayload as RecordingRunStartedPayload);
+    } else if (recordingPayload.recording_event === 'recording_segment_completed') {
+      handleRecordingSegmentComplete(recordingPayload as RecordingSegmentCompletedPayload);
+    } else if (recordingPayload.recording_event === 'recording_segment_updated') {
+      handleRecordingSegmentUpdated(recordingPayload as RecordingSegmentUpdatedPayload);
+    } else if (recordingPayload.recording_event === 'recording_test_started') {
+      handleRecordingTestStarted(recordingPayload as RecordingTestStartedPayload);
+    } else if (recordingPayload.recording_event === 'recording_publish_prepared') {
+      handleRecordingPublishPrepared(recordingPayload as RecordingPublishPreparedPayload);
     }
   }
 
@@ -1158,9 +1153,14 @@ const restoreSession = async () => {
     selectedModelId.value = session.model_config_id;
   }
   realTime.value = false;
-  for (const event of session.events) {
-    if (isStale()) return;
-    handleEvent(event);
+  isRestoringHistory.value = true;
+  try {
+    for (const event of session.events) {
+      if (isStale()) return;
+      handleEvent(event);
+    }
+  } finally {
+    isRestoringHistory.value = false;
   }
   realTime.value = true;
 
