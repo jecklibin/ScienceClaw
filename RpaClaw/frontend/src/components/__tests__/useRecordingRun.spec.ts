@@ -57,6 +57,34 @@ describe('createRecordingRunStore', () => {
     expect(store.recorderModalRoute.value?.query.returnTo).toBe('/chat/chat-2')
   })
 
+  it('keeps the modal open and moves to configuration after embedded recording capture', () => {
+    const store = createRecordingRunStore('chat-1')
+
+    store.onRunStarted({
+      run: { id: 'run-1', status: 'recording', type: 'rpa' },
+      segment: { id: 'seg-1', status: 'recording', kind: 'rpa', intent: 'download PDF' },
+      open_workbench: true,
+    })
+
+    store.onRecordingCaptured({
+      rpaSessionId: 'rpa-1',
+      steps: [{ id: 'step-1', step_index: 0, action: 'navigate' }],
+      artifacts: [],
+    })
+
+    expect(store.recorderModalOpen.value).toBe(true)
+    expect(store.recorderModalRoute.value).toMatchObject({
+      path: '/rpa/configure',
+      query: {
+        sessionId: 'rpa-1',
+        chatSessionId: 'chat-1',
+        runId: 'run-1',
+        segmentId: 'seg-1',
+        embedded: '1',
+      },
+    })
+  })
+
   it('appends completed segments in chronological order for bottom-of-chat rendering', () => {
     const store = createRecordingRunStore('chat-1')
 

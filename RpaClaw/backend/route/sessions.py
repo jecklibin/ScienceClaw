@@ -129,6 +129,11 @@ class CompleteRecordingSegmentRequest(BaseModel):
     rpa_session_id: Optional[str] = Field(default=None, description="Backing RPA session ID for locator repair")
     steps: List[Dict[str, Any]] = Field(default_factory=list, description="Normalized step list for this segment")
     artifacts: List[Dict[str, Any]] = Field(default_factory=list, description="Artifacts produced by this segment")
+    params: Dict[str, Any] = Field(default_factory=dict, description="Parameter configuration captured for this segment")
+    auth_config: Dict[str, Any] = Field(default_factory=dict, description="Credential/auth configuration for this segment")
+    title: Optional[str] = Field(default=None, description="User-facing segment title")
+    description: Optional[str] = Field(default=None, description="User-facing segment description")
+    testing_status: Optional[str] = Field(default=None, description="Inline test status for this segment")
 
 
 class PublishRecordingRunRequest(BaseModel):
@@ -1948,6 +1953,16 @@ async def complete_recording_segment(
     segment.steps = body.steps
     if body.rpa_session_id:
         segment.exports["rpa_session_id"] = body.rpa_session_id
+    if body.params:
+        segment.exports["params"] = body.params
+    if body.auth_config:
+        segment.exports["auth_config"] = body.auth_config
+    if body.title:
+        segment.exports["title"] = body.title
+    if body.description:
+        segment.exports["description"] = body.description
+    if body.testing_status:
+        segment.exports["testing_status"] = body.testing_status
 
     for artifact_data in body.artifacts:
         artifact = RecordingArtifact(

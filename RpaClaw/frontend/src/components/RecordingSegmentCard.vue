@@ -12,10 +12,10 @@
             <div class="min-w-0">
               <p class="text-[11px] font-bold uppercase tracking-[0.22em] text-violet-500">Recording captured</p>
               <h3 class="mt-1 truncate text-base font-extrabold text-gray-950 dark:text-gray-50">
-                {{ summary.intent || '已完成录制段' }}
+                {{ summary.title || summary.intent || '已完成录制段' }}
               </h3>
               <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                {{ summary.kind || 'rpa' }} · {{ summary.status || 'completed' }}
+                {{ summary.description || `${summary.kind || 'rpa'} · ${summary.status || 'completed'}` }}
               </p>
             </div>
             <span class="rounded-full bg-violet-50 px-3 py-1 text-[11px] font-bold text-violet-700 dark:bg-violet-950/50 dark:text-violet-200">
@@ -29,12 +29,12 @@
               <div class="text-[10px] font-bold uppercase tracking-wider text-gray-500">steps</div>
             </div>
             <div class="rounded-2xl bg-gray-50 p-3 dark:bg-gray-900/70">
-              <div class="text-lg font-black text-gray-950 dark:text-gray-50">{{ artifactCount }}</div>
-              <div class="text-[10px] font-bold uppercase tracking-wider text-gray-500">artifacts</div>
+              <div class="text-lg font-black text-gray-950 dark:text-gray-50">{{ paramCount }}</div>
+              <div class="text-[10px] font-bold uppercase tracking-wider text-gray-500">params</div>
             </div>
             <div class="rounded-2xl bg-gray-50 p-3 dark:bg-gray-900/70">
-              <div class="text-lg font-black text-emerald-600">{{ okStepCount }}</div>
-              <div class="text-[10px] font-bold uppercase tracking-wider text-gray-500">stable</div>
+              <div class="text-lg font-black text-emerald-600">{{ tested ? 'ok' : okStepCount }}</div>
+              <div class="text-[10px] font-bold uppercase tracking-wider text-gray-500">{{ tested ? 'tested' : 'stable' }}</div>
             </div>
           </div>
 
@@ -48,7 +48,19 @@
               {{ expanded ? '收起步骤' : '查看步骤' }}
             </button>
             <span class="inline-flex items-center rounded-xl bg-gray-50 px-3 py-2 text-xs font-semibold text-gray-500 dark:bg-gray-900/70 dark:text-gray-400">
-              {{ stepCount }} steps · {{ artifactCount }} artifacts
+              {{ stepCount }} steps · {{ paramCount }} params
+            </span>
+            <span
+              v-if="authReady"
+              class="inline-flex items-center rounded-xl bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300"
+            >
+              auth ready
+            </span>
+            <span
+              v-if="tested"
+              class="inline-flex items-center rounded-xl bg-sky-50 px-3 py-2 text-xs font-semibold text-sky-700 dark:bg-sky-950/40 dark:text-sky-300"
+            >
+              tested
             </span>
           </div>
         </div>
@@ -123,7 +135,12 @@ const repairingStepIndex = ref<number | null>(null)
 const repairErrors = ref<Record<string, string>>({})
 
 const stepCount = computed(() => steps.value.length)
-const artifactCount = computed(() => props.summary.artifacts.length)
+const paramCount = computed(() => Object.keys(props.summary.params || {}).length)
+const authReady = computed(() => {
+  const credentialIds = props.summary.auth_config?.credential_ids
+  return Array.isArray(credentialIds) ? credentialIds.length > 0 : false
+})
+const tested = computed(() => props.summary.testing_status === 'passed')
 const okStepCount = computed(() =>
   steps.value.filter((step) => step.validation?.status === 'ok').length,
 )

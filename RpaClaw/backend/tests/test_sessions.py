@@ -457,6 +457,13 @@ class TestRecordingRoutes(unittest.IsolatedAsyncioTestCase):
                             "labels": ["download", "pdf"],
                         }
                     ],
+                    params={
+                        "keyword": {"original_value": "paper", "sensitive": False},
+                        "password": {"original_value": "secret", "sensitive": True, "credential_id": "cred-1"},
+                    },
+                    auth_config={"credential_ids": ["cred-1"]},
+                    description="下载 GitHub 趋势项目详情",
+                    testing_status="passed",
                 ),
                 current_user=current_user,
             )
@@ -464,6 +471,10 @@ class TestRecordingRoutes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data.data["segment"]["status"], "completed")
         self.assertEqual(data.data["summary"]["session_id"], "rpa-session-1")
         self.assertEqual(data.data["summary"]["steps"][0]["step_index"], 0)
+        self.assertEqual(data.data["summary"]["params"]["keyword"]["original_value"], "paper")
+        self.assertEqual(data.data["summary"]["auth_config"]["credential_ids"], ["cred-1"])
+        self.assertEqual(data.data["summary"]["description"], "下载 GitHub 趋势项目详情")
+        self.assertEqual(data.data["summary"]["testing_status"], "passed")
         self.assertEqual(events[0]["event"], "recording_segment_completed")
         self.assertEqual(events[0]["data"]["summary"]["artifacts"][0]["name"], "downloaded_pdf")
 

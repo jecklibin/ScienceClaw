@@ -54,8 +54,8 @@ class RecordingSegment(BaseModel):
     intent: str
     status: RecordingSegmentStatus = "draft"
     steps: list[dict[str, Any]] = Field(default_factory=list)
-    imports: dict[str, str] = Field(default_factory=dict)
-    exports: dict[str, str] = Field(default_factory=dict)
+    imports: dict[str, Any] = Field(default_factory=dict)
+    exports: dict[str, Any] = Field(default_factory=dict)
     artifacts: list[RecordingArtifact] = Field(default_factory=list)
     started_at: datetime = Field(default_factory=datetime.now)
     ended_at: Optional[datetime] = None

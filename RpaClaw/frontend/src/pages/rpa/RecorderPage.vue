@@ -571,6 +571,7 @@ const stopRecording = async () => {
   const segmentId = route.query.segmentId as string | undefined;
   const returnTo = (route.query.returnTo as string | undefined) || (chatSessionId ? `/chat/${chatSessionId}` : '/chat');
   let embeddedCompletionPayload: any = null;
+  let rawSteps: RpaStep[] = [];
 
   if (isEmbedded.value && (!chatSessionId || !runId || !segmentId)) {
     console.error('Embedded recording is missing chat context; closing recorder instead of entering standalone flow.');
@@ -585,10 +586,45 @@ const stopRecording = async () => {
     return;
   }
 
-  if (sessionId.value && chatSessionId && runId && segmentId) {
+  if (sessionId.value) {
     try {
       const response = await apiClient.get(`/rpa/session/${sessionId.value}`);
-      const rawSteps: RpaStep[] = response.data.session?.steps || [];
+      rawSteps = response.data.session?.steps || [];
+    } catch (err: any) {
+      console.error('Failed to read recorded RPA steps:', err);
+      error.value = `无法读取录制步骤：${err.response?.data?.detail || err.message || '未知错误'}`;
+      isRecording.value = true;
+      startTimer();
+      startPollingSteps();
+      return;
+    }
+  }
+
+  if (sessionId.value) {
+    try {
+      await apiClient.post(`/rpa/session/${sessionId.value}/stop`);
+    } catch (err) {
+      console.error('Failed to stop session:', err);
+    }
+  }
+
+  if (isEmbedded.value && chatSessionId && runId && segmentId && sessionId.value) {
+    window.parent?.postMessage(
+      {
+        type: 'rpa-recording-captured',
+        payload: {
+          rpaSessionId: sessionId.value,
+          steps: mapRpaStepsToRecordingSteps(rawSteps),
+          artifacts: deriveArtifactsFromRpaSteps(rawSteps),
+        },
+      },
+      window.location.origin,
+    );
+    return;
+  }
+
+  if (sessionId.value && chatSessionId && runId && segmentId) {
+    try {
       embeddedCompletionPayload = await completeRecordingSegment(
         chatSessionId,
         runId,
@@ -609,13 +645,6 @@ const stopRecording = async () => {
     }
   }
 
-  if (sessionId.value) {
-    try {
-      await apiClient.post(`/rpa/session/${sessionId.value}/stop`);
-    } catch (err) {
-      console.error('Failed to stop session:', err);
-    }
-  }
   if (chatSessionId && runId && segmentId) {
     if (isEmbedded.value) {
       window.parent?.postMessage(

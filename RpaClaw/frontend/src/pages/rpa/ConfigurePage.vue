@@ -17,6 +17,7 @@ const router = useRouter();
 const route = useRoute();
 
 const sessionId = computed(() => typeof route.query.sessionId === 'string' ? route.query.sessionId : '');
+const isEmbedded = computed(() => route.query.embedded === '1');
 const loading = ref(true);
 const loadFailed = ref(false);
 const error = ref<string | null>(null);
@@ -426,14 +427,21 @@ const generateScript = async () => {
 };
 
 const goToTest = () => {
+  const query: Record<string, string> = {
+    sessionId: sessionId.value,
+    skillName: skillName.value,
+    skillDescription: skillDescription.value,
+    params: JSON.stringify(buildParamMap()),
+  };
+  if (isEmbedded.value) {
+    for (const key of ['embedded', 'chatSessionId', 'runId', 'segmentId', 'returnTo']) {
+      const value = route.query[key];
+      if (typeof value === 'string') query[key] = value;
+    }
+  }
   router.push({
     path: '/rpa/test',
-    query: {
-      sessionId: sessionId.value,
-      skillName: skillName.value,
-      skillDescription: skillDescription.value,
-      params: JSON.stringify(buildParamMap()),
-    },
+    query,
   });
 };
 

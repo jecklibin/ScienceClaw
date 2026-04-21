@@ -17,6 +17,8 @@ import {
   XCircle,
 } from 'lucide-vue-next';
 import { apiClient } from '@/api/client';
+import { completeRecordingSegment } from '@/api/recording';
+import { deriveArtifactsFromRpaSteps, mapRpaStepsToRecordingSteps, type RpaStep } from '@/utils/recording';
 import { getBackendWsUrl } from '@/utils/sandbox';
 import {
   getFrameSizeFromMetadata,
@@ -35,7 +37,10 @@ const route = useRoute();
 
 const sessionId = computed(() => route.query.sessionId as string);
 const chatSessionId = computed(() => route.query.chatSessionId as string | undefined);
+const runId = computed(() => route.query.runId as string | undefined);
+const segmentId = computed(() => route.query.segmentId as string | undefined);
 const returnTo = computed(() => (route.query.returnTo as string | undefined) || (chatSessionId.value ? `/chat/${chatSessionId.value}` : '/chat'));
+const isEmbedded = computed(() => route.query.embedded === '1');
 const isConversationalTest = computed(() => !!chatSessionId.value && !!route.query.runId);
 const skillName = computed(() => (route.query.skillName as string) || '录制技能');
 const skillDescription = computed(() => (route.query.skillDescription as string) || '');
@@ -82,6 +87,7 @@ const generatedScript = ref('');
 const recordedSteps = ref<any[]>([]);
 const saving = ref(false);
 const saved = ref(false);
+const completingSegment = ref(false);
 const showScript = ref(false);
 const error = ref<string | null>(null);
 
@@ -425,7 +431,12 @@ watch(failedStepIndex, (index) => {
 });
 
 const goBackToConfigure = () => {
-  router.push(`/rpa/configure?sessionId=${sessionId.value}`);
+  const query: Record<string, string> = { sessionId: sessionId.value };
+  for (const key of ['embedded', 'chatSessionId', 'runId', 'segmentId', 'returnTo']) {
+    const value = route.query[key];
+    if (typeof value === 'string') query[key] = value;
+  }
+  router.push({ path: '/rpa/configure', query });
 };
 
 const goBackToRecorder = () => {
@@ -440,8 +451,44 @@ const goToSkills = () => {
   router.push('/chat/skills');
 };
 
-const goBackToChat = () => {
-  router.push(returnTo.value);
+const finishConversationalSegment = async () => {
+  if (!chatSessionId.value || !runId.value || !segmentId.value || !sessionId.value || completingSegment.value) return;
+  completingSegment.value = true;
+  error.value = null;
+  try {
+    await loadSessionDiagnostics();
+    const rawSteps = recordedSteps.value as RpaStep[];
+    const authCredentialIds = Object.values(params.value || {})
+      .map((param: any) => param?.credential_id)
+      .filter(Boolean);
+    const payload = await completeRecordingSegment(
+      chatSessionId.value,
+      runId.value,
+      segmentId.value,
+      {
+        rpa_session_id: sessionId.value,
+        steps: mapRpaStepsToRecordingSteps(rawSteps),
+        artifacts: deriveArtifactsFromRpaSteps(rawSteps),
+        params: params.value,
+        auth_config: { credential_ids: authCredentialIds },
+        title: skillName.value,
+        description: skillDescription.value,
+        testing_status: testSuccess.value ? 'passed' : 'failed',
+      },
+    );
+    if (isEmbedded.value) {
+      window.parent?.postMessage(
+        { type: 'rpa-recording-completed', payload },
+        window.location.origin,
+      );
+      return;
+    }
+    router.push(returnTo.value);
+  } catch (err: any) {
+    error.value = `完成录制段失败: ${err.response?.data?.detail || err.message || '未知错误'}`;
+  } finally {
+    completingSegment.value = false;
+  }
 };
 
 const saveSkill = async () => {
@@ -485,7 +532,7 @@ onBeforeUnmount(() => {
     <header class="flex h-14 flex-shrink-0 items-center gap-3 border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-[#272728] px-6">
       <button
         class="flex items-center gap-1 text-gray-500 dark:text-gray-400 transition-colors hover:text-gray-700 dark:hover:text-gray-200"
-        @click="isConversationalTest ? goBackToChat() : goBackToConfigure()"
+        @click="goBackToConfigure"
       >
         <ArrowLeft :size="18" />
       </button>
@@ -495,6 +542,7 @@ onBeforeUnmount(() => {
       <div class="flex-1" />
 
       <button
+        v-if="!isEmbedded"
         class="flex items-center gap-1.5 rounded-lg border border-gray-200 dark:border-gray-700 px-3 py-1.5 text-sm text-gray-600 dark:text-gray-400 transition-colors hover:bg-gray-50 dark:hover:bg-[#444345] hover:text-gray-900 dark:hover:text-white"
         @click="goToHome"
       >
@@ -502,6 +550,7 @@ onBeforeUnmount(() => {
         返回首页
       </button>
       <button
+        v-if="!isEmbedded"
         class="flex items-center gap-1.5 rounded-lg border border-gray-200 dark:border-gray-700 px-3 py-1.5 text-sm text-gray-600 dark:text-gray-400 transition-colors hover:bg-gray-50 dark:hover:bg-[#444345] hover:text-gray-900 dark:hover:text-white"
         @click="goToSkills"
       >
@@ -766,10 +815,12 @@ onBeforeUnmount(() => {
             <button
               v-if="isConversationalTest"
               class="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-emerald-700 disabled:opacity-50"
-              @click="goBackToChat"
+              :disabled="testing || completingSegment || !testSuccess"
+              @click="finishConversationalSegment"
             >
-              <CheckCircle :size="15" />
-              返回对话继续发布
+              <Loader2 v-if="completingSegment" :size="15" class="animate-spin" />
+              <CheckCircle v-else :size="15" />
+              {{ completingSegment ? '正在完成...' : '完成并返回对话' }}
             </button>
             <button
               v-if="!isConversationalTest"

@@ -115,17 +115,12 @@
             <Play :size="18" class="text-amber-600 flex-shrink-0" />
             <div class="flex-1 min-w-0">
               <div class="text-sm font-medium text-[var(--text-primary)] truncate">
-                录制段已完成，是否进入测试工作台验证？
+                录制段已完成，是否准备发布？
               </div>
               <div class="text-xs text-[var(--text-tertiary)] truncate">
-                {{ recordingStore.actionPrompt.value.intent || '可以先测试回放，也可以直接准备发布。' }}
+                {{ recordingStore.actionPrompt.value.intent || '已完成录制、配置和测试；可以准备发布，也可以继续对话补充后续处理。' }}
               </div>
             </div>
-            <button @click="handleOpenRecordingTest" :disabled="!!recordingActionBusy || !recordingStore.actionPrompt.value.rpaSessionId"
-              class="px-3 py-1.5 text-sm font-medium rounded-lg bg-amber-500 text-white hover:bg-amber-600 transition-colors disabled:opacity-50 flex-shrink-0">
-              <Loader2 v-if="recordingActionBusy === 'test'" :size="14" class="inline mr-1 animate-spin" />
-              进入测试工作台
-            </button>
             <button @click="handlePrepareRecordingPublish" :disabled="!!recordingActionBusy"
               class="px-3 py-1.5 text-sm font-medium rounded-lg bg-white text-amber-700 border border-amber-200 hover:bg-amber-100 transition-colors disabled:opacity-50 flex-shrink-0 dark:bg-amber-950/40 dark:text-amber-200 dark:border-amber-800">
               <Loader2 v-if="recordingActionBusy === 'publish'" :size="14" class="inline mr-1 animate-spin" />
@@ -208,6 +203,7 @@
         :visible="recordingStore.recorderModalOpen.value"
         :route="recordingStore.recorderModalRoute.value"
         @close="recordingStore.closeRecorderModal()"
+        @recording-captured="handleRecordingCaptured"
         @segment-complete="handleRecordingSegmentComplete"
       />
       <!-- Activity Panel (right side - Cursor-style thinking + execution timeline) -->
@@ -277,10 +273,11 @@ import RecordingSegmentCard from '@/components/RecordingSegmentCard.vue';
 import RecordingArtifactList from '@/components/RecordingArtifactList.vue';
 import RecordingRecorderModal from '@/components/RecordingRecorderModal.vue';
 import { createRecordingRunStore } from '@/composables/useRecordingRun';
-import { publishRecordingRun, testRecordingRun } from '@/api/recording';
+import { publishRecordingRun } from '@/api/recording';
 import type {
   RecordingPublishPreparedPayload,
   RecordingRunStartedPayload,
+  RecordingSegmentCapturedPayload,
   RecordingSegmentCompletedPayload,
   RecordingTestStartedPayload,
 } from '@/types/recording';
@@ -838,6 +835,10 @@ const handleRecordingRunStarted = (payload: RecordingRunStartedPayload) => {
   recordingStore.onRunStarted(payload);
 }
 
+const handleRecordingCaptured = (payload: RecordingSegmentCapturedPayload) => {
+  recordingStore.onRecordingCaptured(payload);
+}
+
 const handleRecordingSegmentComplete = (payload: RecordingSegmentCompletedPayload) => {
   recordingStore.onSegmentCompleted(payload);
 }
@@ -854,36 +855,6 @@ const handleRecordingPublishPrepared = (payload: RecordingPublishPreparedPayload
     pendingSkillSave.value = prompt.name;
   } else {
     pendingToolSave.value = prompt.name;
-  }
-}
-
-const handleOpenRecordingTest = async () => {
-  const prompt = recordingStore.actionPrompt.value;
-  if (!sessionId.value || !prompt) return;
-  if (!prompt.rpaSessionId) {
-    showErrorToast('缺少录制测试会话，无法进入测试工作台');
-    return;
-  }
-
-  recordingActionBusy.value = 'test';
-  try {
-    const payload = await testRecordingRun(sessionId.value, prompt.runId);
-    handleRecordingTestStarted(payload as RecordingTestStartedPayload);
-    router.push({
-      path: '/rpa/test',
-      query: {
-        sessionId: prompt.rpaSessionId,
-        chatSessionId: sessionId.value,
-        runId: prompt.runId,
-        returnTo: `/chat/${sessionId.value}`,
-        skillName: prompt.intent || '录制业务流程技能',
-      },
-    });
-  } catch (error) {
-    console.error('Failed to enter recording test workbench:', error);
-    showErrorToast('进入测试工作台失败');
-  } finally {
-    recordingActionBusy.value = null;
   }
 }
 

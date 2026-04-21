@@ -25,6 +25,12 @@ describe('RecordingSegmentCard', () => {
         intent: 'Download GitHub trend',
         kind: 'rpa',
         status: 'completed',
+        params: {
+          keyword: { original_value: 'paper', sensitive: false },
+          password: { original_value: 'secret', sensitive: true, credential_id: 'cred-1' },
+        },
+        auth_config: { credential_ids: ['cred-1'] },
+        testing_status: 'passed',
         artifacts: [],
         steps: [
           {
@@ -42,6 +48,9 @@ describe('RecordingSegmentCard', () => {
 
     expect(root.textContent).toContain('Download GitHub trend')
     expect(root.textContent).toContain('1 steps')
+    expect(root.textContent).toContain('2 params')
+    expect(root.textContent).toContain('auth ready')
+    expect(root.textContent).toContain('tested')
     expect(root.textContent).not.toContain('Open GitHub Trending')
 
     root.querySelector<HTMLButtonElement>('[data-testid="recording-segment-toggle"]')?.click()

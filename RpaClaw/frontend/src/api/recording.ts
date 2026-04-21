@@ -1,5 +1,5 @@
 import { apiClient } from '@/api/client'
-import type { RecordingArtifact, RecordingStep } from '@/types/recording'
+import type { RecordingArtifact, RecordingParamConfig, RecordingStep } from '@/types/recording'
 
 export async function createRecordingRun(sessionId: string, message: string) {
   const response = await apiClient.post(`/sessions/${sessionId}/recordings`, { message })
@@ -14,6 +14,11 @@ export async function completeRecordingSegment(
     rpa_session_id?: string
     steps: RecordingStep[]
     artifacts: RecordingArtifact[]
+    params?: RecordingParamConfig
+    auth_config?: Record<string, unknown>
+    title?: string
+    description?: string
+    testing_status?: string
   },
 ) {
   const response = await apiClient.post(

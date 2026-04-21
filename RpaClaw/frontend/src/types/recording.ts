@@ -63,12 +63,23 @@ export interface RecordingStep {
   locator_candidates?: RecordingStepCandidate[]
 }
 
+export type RecordingParamConfig = Record<string, {
+  original_value?: unknown
+  sensitive?: boolean
+  credential_id?: string
+}>
+
 export interface RecordingSegmentSummary {
   segment_id: string
   session_id?: string
   intent?: string
+  title?: string
+  description?: string
   kind?: string
   status?: string
+  params?: RecordingParamConfig
+  auth_config?: Record<string, unknown>
+  testing_status?: string
   artifacts: RecordingArtifact[]
   steps?: RecordingStep[]
 }
@@ -82,6 +93,12 @@ export interface RecordingRunStartedPayload {
 export interface RecordingSegmentCompletedPayload {
   segment: RecordingSegment
   summary: RecordingSegmentSummary
+}
+
+export interface RecordingSegmentCapturedPayload {
+  rpaSessionId: string
+  steps: RecordingStep[]
+  artifacts: RecordingArtifact[]
 }
 
 export interface RecordingTestStartedPayload {

@@ -5,6 +5,7 @@ import type {
   RecordingRun,
   RecordingRunStartedPayload,
   RecordingSegment,
+  RecordingSegmentCapturedPayload,
   RecordingSegmentCompletedPayload,
   RecordingSegmentSummary,
   RecordingTestStartedPayload,
@@ -45,22 +46,29 @@ export function createRecordingRunStore(chatSessionIdSource?: ChatSessionIdSourc
   const getChatSessionId = () => (
     typeof chatSessionIdSource === 'function' ? chatSessionIdSource() : chatSessionIdSource
   )
+  const buildRouteContext = () => {
+    const currentChatSessionId = getChatSessionId() || ''
+    return {
+      chatSessionId: currentChatSessionId,
+      returnTo: currentChatSessionId ? `/chat/${currentChatSessionId}` : '/chat',
+    }
+  }
 
   const onRunStarted = (payload: RecordingRunStartedPayload) => {
     run.value = payload.run
     activeSegment.value = payload.segment
     actionPrompt.value = null
     workbenchOpen.value = false
-    const currentChatSessionId = getChatSessionId() || ''
+    const routeContext = buildRouteContext()
     const route = payload.open_workbench
       ? {
           path: '/rpa/recorder',
           query: {
             sandboxId: `recording-${payload.run.id}`,
-            chatSessionId: currentChatSessionId,
+            chatSessionId: routeContext.chatSessionId,
             runId: payload.run.id,
             segmentId: payload.segment.id,
-            returnTo: currentChatSessionId ? `/chat/${currentChatSessionId}` : '/chat',
+            returnTo: routeContext.returnTo,
             embedded: '1',
           },
         }
@@ -68,6 +76,23 @@ export function createRecordingRunStore(chatSessionIdSource?: ChatSessionIdSourc
     fullPageRecorderRoute.value = route
     recorderModalRoute.value = route
     recorderModalOpen.value = !!route
+  }
+
+  const onRecordingCaptured = (payload: RecordingSegmentCapturedPayload) => {
+    if (!run.value || !activeSegment.value) return
+    const routeContext = buildRouteContext()
+    recorderModalRoute.value = {
+      path: '/rpa/configure',
+      query: {
+        sessionId: payload.rpaSessionId,
+        chatSessionId: routeContext.chatSessionId,
+        runId: run.value.id,
+        segmentId: activeSegment.value.id,
+        returnTo: routeContext.returnTo,
+        embedded: '1',
+      },
+    }
+    recorderModalOpen.value = true
   }
 
   const onSegmentCompleted = (payload: RecordingSegmentCompletedPayload) => {
@@ -149,6 +174,7 @@ export function createRecordingRunStore(chatSessionIdSource?: ChatSessionIdSourc
     publishPrompt,
     canContinue,
     onRunStarted,
+    onRecordingCaptured,
     onSegmentCompleted,
     onTestStarted,
     onPublishPrepared,

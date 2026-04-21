@@ -73,7 +73,7 @@ class RecordingOrchestrator:
         move_run_status(run, "ready_to_publish")
 
     def build_segment_summary(self, segment: RecordingSegment) -> dict[str, object]:
-        return {
+        summary = {
             "segment_id": segment.id,
             "intent": segment.intent,
             "kind": segment.kind,
@@ -81,6 +81,10 @@ class RecordingOrchestrator:
             "artifacts": [artifact.model_dump(mode="json") for artifact in segment.artifacts],
             "steps": segment.steps,
         }
+        for key in ("params", "auth_config", "title", "description", "testing_status"):
+            if key in segment.exports:
+                summary[key] = segment.exports[key]
+        return summary
 
     def should_open_workbench(self, kind: str, requires_user_interaction: bool) -> bool:
         return kind in {"rpa", "mcp"} and requires_user_interaction
