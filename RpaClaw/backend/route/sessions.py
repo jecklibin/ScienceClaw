@@ -136,8 +136,13 @@ class CompleteRecordingSegmentRequest(BaseModel):
     testing_status: Optional[str] = Field(default=None, description="Inline test status for this segment")
 
 
+class PrepareRecordingPublishDraftRequest(BaseModel):
+    publish_target: str = Field(default="skill", description="Publish target: skill, tool or mcp")
+
+
 class PublishRecordingRunRequest(BaseModel):
-    publish_target: str = Field(default="skill", description="Publish target: skill or tool")
+    publish_target: str = Field(default="skill", description="Publish target: skill, tool or mcp")
+    draft: dict | None = Field(default=None, description="Final user-confirmed publish draft")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -2038,6 +2043,40 @@ async def test_recording_run(
     })
 
 
+@router.post("/{session_id}/recordings/{run_id}/publish-draft", response_model=ApiResponse)
+async def prepare_recording_publish_draft(
+    session_id: str,
+    run_id: str,
+    body: PrepareRecordingPublishDraftRequest,
+    current_user: User = Depends(require_user),
+) -> ApiResponse:
+    try:
+        session = await async_get_science_session(session_id)
+        if session.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Access denied")
+    except ScienceSessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    try:
+        run = recording_orchestrator.get_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Recording run not found") from exc
+
+    if run.session_id != session_id or run.user_id != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    from backend.workflow.publishing import build_publish_draft
+    from backend.workflow.recording_adapter import recording_run_to_workflow
+
+    target = body.publish_target if body.publish_target in {"skill", "tool", "mcp"} else "skill"
+    workflow_run = recording_run_to_workflow(run)
+    draft = build_publish_draft(workflow_run, publish_target=target)
+    return ApiResponse(data={
+        "run": _serialize_recording_obj(run),
+        "draft": draft.model_dump(mode="json"),
+    })
+
+
 @router.post("/{session_id}/recordings/{run_id}/publish", response_model=ApiResponse)
 async def publish_recording_run(
     session_id: str,
@@ -2061,8 +2100,32 @@ async def publish_recording_run(
         raise HTTPException(status_code=403, detail="Access denied")
 
     try:
-        recording_orchestrator.mark_ready_to_publish(run, body.publish_target)
-        prepared = await recording_publishing.build_publish_artifacts(run, workspace_dir=str(_WORKSPACE_DIR))
+        target_for_orchestrator = "tool" if body.publish_target == "mcp" else body.publish_target
+        recording_orchestrator.mark_ready_to_publish(run, target_for_orchestrator)
+        if body.draft:
+            from backend.workflow.models import SkillPublishDraft
+            from backend.workflow.publishing import write_skill_artifacts
+            from backend.workflow.recording_adapter import recording_run_to_workflow
+
+            workflow_run = recording_run_to_workflow(run)
+            draft = SkillPublishDraft.model_validate(body.draft)
+            staging_root = _WORKSPACE_DIR / run.session_id / "skills_staging"
+            save_ready_root = _WORKSPACE_DIR / run.session_id / ".agents" / "skills"
+            staging_result = write_skill_artifacts(workflow_run, draft, staging_root)
+            save_ready_result = write_skill_artifacts(workflow_run, draft, save_ready_root)
+            prepared = recording_publishing.PublishPreparation(
+                prompt_kind="skill",
+                staging_paths=[staging_result["skill_dir"], save_ready_result["skill_dir"]],
+                summary={
+                    "name": staging_result["name"],
+                    "title": draft.display_title,
+                    "run_id": run.id,
+                    "session_id": run.session_id,
+                    "draft": draft.model_dump(mode="json"),
+                },
+            )
+        else:
+            prepared = await recording_publishing.build_publish_artifacts(run, workspace_dir=str(_WORKSPACE_DIR))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

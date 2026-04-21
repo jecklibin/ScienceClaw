@@ -135,13 +135,15 @@ def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_di
             return "Error: recording run not found for this session."
         recording_orchestrator.mark_ready_to_publish(run, publish_target)
         prepared = _run_async(build_publish_artifacts(run, workspace_dir=workspace_dir))
+        summary = prepared.summary
         return json.dumps(
             {
                 "recording_event": "recording_publish_prepared",
                 "run": run.model_dump(mode="json"),
                 "prompt_kind": prepared.prompt_kind,
                 "staging_paths": prepared.staging_paths,
-                "summary": prepared.summary,
+                "summary": summary,
+                "draft": summary.get("draft"),
             },
             ensure_ascii=False,
         )
