@@ -351,7 +351,7 @@ const {
 } = toRefs(state);
 
 const { groupedMessages } = useMessageGrouper(messages);
-const recordingStore = createRecordingRunStore();
+const recordingStore = createRecordingRunStore(() => sessionId.value);
 
 // 最后一个 process 组的索引（推理失败时会先 push 一条 assistant 消息，此时最后一组不是 process，需用此判断当前轮次的 process 组）
 const lastProcessGroupIndex = computed(() => {

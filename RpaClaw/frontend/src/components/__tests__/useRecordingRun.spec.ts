@@ -42,6 +42,21 @@ describe('createRecordingRunStore', () => {
     })
   })
 
+  it('resolves the current chat session lazily when opening the recorder overlay', () => {
+    let currentSessionId = 'chat-1'
+    const store = createRecordingRunStore(() => currentSessionId)
+
+    currentSessionId = 'chat-2'
+    store.onRunStarted({
+      run: { id: 'run-1', status: 'recording', type: 'rpa' },
+      segment: { id: 'seg-1', status: 'recording', kind: 'rpa', intent: 'download PDF' },
+      open_workbench: true,
+    })
+
+    expect(store.recorderModalRoute.value?.query.chatSessionId).toBe('chat-2')
+    expect(store.recorderModalRoute.value?.query.returnTo).toBe('/chat/chat-2')
+  })
+
   it('appends completed segments in chronological order for bottom-of-chat rendering', () => {
     const store = createRecordingRunStore('chat-1')
 

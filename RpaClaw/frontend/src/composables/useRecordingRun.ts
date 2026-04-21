@@ -20,7 +20,9 @@ export interface RecordingActionPrompt {
   testingStatus?: string
 }
 
-export function createRecordingRunStore(chatSessionId?: string) {
+type ChatSessionIdSource = string | null | undefined | (() => string | null | undefined)
+
+export function createRecordingRunStore(chatSessionIdSource?: ChatSessionIdSource) {
   const run = ref<RecordingRun | null>(null)
   const activeSegment = ref<RecordingSegment | null>(null)
   const artifacts = ref<RecordingArtifact[]>([])
@@ -40,21 +42,25 @@ export function createRecordingRunStore(chatSessionId?: string) {
 
   const canContinue = computed(() => !!run.value && !activeSegment.value)
   const testingState = computed(() => run.value?.testing || { status: run.value?.status === 'testing' ? 'running' : 'idle' })
+  const getChatSessionId = () => (
+    typeof chatSessionIdSource === 'function' ? chatSessionIdSource() : chatSessionIdSource
+  )
 
   const onRunStarted = (payload: RecordingRunStartedPayload) => {
     run.value = payload.run
     activeSegment.value = payload.segment
     actionPrompt.value = null
     workbenchOpen.value = false
+    const currentChatSessionId = getChatSessionId() || ''
     const route = payload.open_workbench
       ? {
           path: '/rpa/recorder',
           query: {
             sandboxId: `recording-${payload.run.id}`,
-            chatSessionId: chatSessionId || '',
+            chatSessionId: currentChatSessionId,
             runId: payload.run.id,
             segmentId: payload.segment.id,
-            returnTo: chatSessionId ? `/chat/${chatSessionId}` : '/chat',
+            returnTo: currentChatSessionId ? `/chat/${currentChatSessionId}` : '/chat',
             embedded: '1',
           },
         }

@@ -572,6 +572,19 @@ const stopRecording = async () => {
   const returnTo = (route.query.returnTo as string | undefined) || (chatSessionId ? `/chat/${chatSessionId}` : '/chat');
   let embeddedCompletionPayload: any = null;
 
+  if (isEmbedded.value && (!chatSessionId || !runId || !segmentId)) {
+    console.error('Embedded recording is missing chat context; closing recorder instead of entering standalone flow.');
+    if (sessionId.value) {
+      try {
+        await apiClient.post(`/rpa/session/${sessionId.value}/stop`);
+      } catch (err) {
+        console.error('Failed to stop session:', err);
+      }
+    }
+    window.parent?.postMessage({ type: 'rpa-recording-close' }, window.location.origin);
+    return;
+  }
+
   if (sessionId.value && chatSessionId && runId && segmentId) {
     try {
       const response = await apiClient.get(`/rpa/session/${sessionId.value}`);
