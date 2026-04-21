@@ -2182,8 +2182,9 @@ async def publish_recording_run(
 
             workflow_run = recording_run_to_workflow(run)
             draft = SkillPublishDraft.model_validate(body.draft)
-            staging_root = _WORKSPACE_DIR / run.session_id / "skills_staging"
-            save_ready_root = _WORKSPACE_DIR / run.session_id / ".agents" / "skills"
+            workspace_root = _Path(_WORKSPACE_DIR)
+            staging_root = workspace_root / run.session_id / "skills_staging"
+            save_ready_root = workspace_root / run.session_id / ".agents" / "skills"
             staging_result = write_skill_artifacts(workflow_run, draft, staging_root)
             save_ready_result = write_skill_artifacts(workflow_run, draft, save_ready_root)
             prepared = recording_publishing.PublishPreparation(

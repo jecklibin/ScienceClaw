@@ -135,6 +135,33 @@ export function createRecordingRunStore(chatSessionIdSource?: ChatSessionIdSourc
   const onTestStarted = (payload: RecordingTestStartedPayload) => {
     run.value = payload.run
     workbenchOpen.value = false
+    const routeContext = buildRouteContext()
+    const rpaSessionId = typeof payload.test_payload?.rpa_session_id === 'string'
+      ? payload.test_payload.rpa_session_id
+      : ''
+    const segmentId = typeof payload.test_payload?.segment_id === 'string'
+      ? payload.test_payload.segment_id
+      : actionPrompt.value?.segmentId || ''
+    const query: Record<string, string> | null = rpaSessionId
+      ? {
+          sessionId: rpaSessionId,
+          chatSessionId: routeContext.chatSessionId,
+          runId: payload.run.id,
+          segmentId,
+          returnTo: routeContext.returnTo,
+          embedded: '1',
+          segmentTitle: typeof payload.test_payload?.title === 'string' ? payload.test_payload.title : '',
+          segmentPurpose: typeof payload.test_payload?.description === 'string' ? payload.test_payload.description : '',
+          params: JSON.stringify(payload.test_payload?.params || {}),
+        }
+      : null
+    recorderModalRoute.value = query
+      ? {
+          path: '/rpa/test',
+          query,
+        }
+      : null
+    recorderModalOpen.value = !!query
     if (actionPrompt.value) {
       actionPrompt.value = {
         ...actionPrompt.value,

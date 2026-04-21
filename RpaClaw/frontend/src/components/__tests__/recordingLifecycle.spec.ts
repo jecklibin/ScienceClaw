@@ -31,7 +31,7 @@ describe('recording lifecycle store', () => {
   })
 
   it('tracks testing and publish prompt state', () => {
-    const store = createRecordingRunStore()
+    const store = createRecordingRunStore('chat-1')
 
     store.onRunStarted({
       run: { id: 'run-1', status: 'recording', type: 'rpa' },
@@ -45,11 +45,19 @@ describe('recording lifecycle store', () => {
 
     store.onTestStarted({
       run: { id: 'run-1', status: 'testing', type: 'rpa', testing: { status: 'running' } },
-      test_payload: { steps: [] },
+      test_payload: {
+        rpa_session_id: 'rpa-1',
+        segment_id: 'seg-1',
+        title: 'download PDF',
+        description: 'download and inspect PDF',
+        params: {},
+      },
     })
     expect(store.testingState.value.status).toBe('running')
     expect(store.workbenchOpen.value).toBe(false)
     expect(store.actionPrompt.value?.rpaSessionId).toBe('rpa-1')
+    expect(store.recorderModalOpen.value).toBe(true)
+    expect(store.recorderModalRoute.value?.path).toBe('/rpa/test')
 
     store.onPublishPrepared({
       run: { id: 'run-1', status: 'ready_to_publish', type: 'rpa', publish_target: 'skill' },

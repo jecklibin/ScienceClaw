@@ -530,6 +530,10 @@ class TestRecordingRoutes(unittest.IsolatedAsyncioTestCase):
         orchestrator = RecordingOrchestrator()
         run = orchestrator.create_run(session_id="session-1", user_id="u1", kind="rpa")
         segment = orchestrator.start_segment(run, kind="rpa", intent="下载 PDF", requires_workbench=True)
+        segment.exports["rpa_session_id"] = "rpa-1"
+        segment.exports["title"] = "下载 PDF"
+        segment.exports["description"] = "下载并检查 PDF 文件"
+        segment.exports["params"] = {"file_name": {"original_value": "paper.pdf"}}
         orchestrator.complete_segment(run, segment)
 
         with (
@@ -552,6 +556,8 @@ class TestRecordingRoutes(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(data.data["run"]["status"], "testing")
         self.assertEqual(data.data["test_payload"]["run_id"], run.id)
+        self.assertEqual(data.data["test_payload"]["rpa_session_id"], "rpa-1")
+        self.assertEqual(data.data["test_payload"]["title"], "下载 PDF")
 
     async def test_publish_recording_run_returns_prompt_kind(self):
         async def _save():
@@ -588,6 +594,53 @@ class TestRecordingRoutes(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(data.data["prompt_kind"], "skill")
         self.assertEqual(data.data["run"]["status"], "ready_to_publish")
+        self.assertTrue(data.data["staging_paths"])
+
+    async def test_publish_recording_run_accepts_string_workspace_dir_for_draft_publish(self):
+        async def _save():
+            return None
+
+        session = SimpleNamespace(user_id="u1", events=[], save=_save)
+        current_user = SimpleNamespace(id="u1")
+        orchestrator = RecordingOrchestrator()
+        run = orchestrator.create_run(session_id="session-1", user_id="u1", kind="rpa")
+        segment = orchestrator.start_segment(run, kind="rpa", intent="下载 PDF", requires_workbench=True)
+        segment.exports["rpa_session_id"] = "rpa-1"
+        segment.exports["title"] = "下载 PDF"
+        segment.exports["description"] = "下载并检查 PDF 文件"
+        orchestrator.complete_segment(run, segment)
+        orchestrator.begin_testing(run)
+
+        from backend.workflow.publishing import build_publish_draft
+        from backend.workflow.recording_adapter import recording_run_to_workflow
+
+        draft = build_publish_draft(recording_run_to_workflow(run), publish_target="skill")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with (
+                unittest.mock.patch.object(
+                    SESSIONS_MODULE,
+                    "async_get_science_session",
+                    AsyncMock(return_value=session),
+                ),
+                unittest.mock.patch.object(
+                    SESSIONS_MODULE,
+                    "recording_orchestrator",
+                    orchestrator,
+                ),
+                unittest.mock.patch.object(SESSIONS_MODULE, "_WORKSPACE_DIR", tmp_dir),
+            ):
+                data = await SESSIONS_MODULE.publish_recording_run(
+                    "session-1",
+                    run.id,
+                    SESSIONS_MODULE.PublishRecordingRunRequest(
+                        publish_target="skill",
+                        draft=draft.model_dump(mode="json"),
+                    ),
+                    current_user=current_user,
+                )
+
+        self.assertEqual(data.data["prompt_kind"], "skill")
         self.assertTrue(data.data["staging_paths"])
 
 

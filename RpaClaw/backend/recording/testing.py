@@ -7,12 +7,17 @@ from .models import RecordingRun
 
 async def build_test_payload(run: RecordingRun) -> dict[str, Any]:
     latest_segment = run.segments[-1] if run.segments else None
+    exports = latest_segment.exports if latest_segment else {}
     return {
         "run_id": run.id,
-        "session_id": run.session_id,
+        "chat_session_id": run.session_id,
+        "rpa_session_id": exports.get("rpa_session_id"),
         "segment_id": latest_segment.id if latest_segment else None,
         "type": run.type,
         "steps": latest_segment.steps if latest_segment else [],
+        "title": exports.get("title") or (latest_segment.intent if latest_segment else ""),
+        "description": exports.get("description") or "",
+        "params": exports.get("params") or {},
         "artifacts": [
             artifact.model_dump(mode="json")
             for artifact in (latest_segment.artifacts if latest_segment else run.artifact_index)

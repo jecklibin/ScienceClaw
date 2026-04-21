@@ -139,6 +139,38 @@ describe('createRecordingRunStore', () => {
     expect(store.publishDraft.value?.skill_name).toBe('download_and_convert_report')
   })
 
+  it('opens the embedded test route when recording testing starts from chat', () => {
+    const store = createRecordingRunStore('chat-1')
+
+    store.onSegmentCompleted({
+      segment: { id: 'seg-1', status: 'completed' },
+      summary: { segment_id: 'seg-1', session_id: 'rpa-1', artifacts: [] },
+    })
+
+    store.onTestStarted({
+      run: { id: 'run-1', status: 'testing', type: 'rpa', testing: { status: 'running' } },
+      test_payload: {
+        rpa_session_id: 'rpa-1',
+        segment_id: 'seg-1',
+        title: '下载 PDF',
+        description: '下载并检查 PDF 文件',
+        params: { file_name: { original_value: 'paper.pdf' } },
+      },
+    })
+
+    expect(store.recorderModalOpen.value).toBe(true)
+    expect(store.recorderModalRoute.value).toMatchObject({
+      path: '/rpa/test',
+      query: {
+        sessionId: 'rpa-1',
+        chatSessionId: 'chat-1',
+        runId: 'run-1',
+        segmentId: 'seg-1',
+        embedded: '1',
+      },
+    })
+  })
+
   it('updates existing segment summary when bindings are changed from chat', () => {
     const store = createRecordingRunStore('chat-1')
 
