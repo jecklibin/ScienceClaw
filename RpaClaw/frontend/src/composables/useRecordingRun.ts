@@ -7,6 +7,7 @@ import type {
   RecordingSegment,
   RecordingSegmentCapturedPayload,
   RecordingSegmentCompletedPayload,
+  RecordingSegmentUpdatedPayload,
   RecordingSegmentSummary,
   RecordingTestStartedPayload,
   RecordingPublishPreparedPayload,
@@ -117,6 +118,20 @@ export function createRecordingRunStore(chatSessionIdSource?: ChatSessionIdSourc
     }
   }
 
+  const onSegmentUpdated = (payload: RecordingSegmentUpdatedPayload) => {
+    run.value = payload.run
+    const next = [...summaries.value]
+    for (const summary of payload.summaries) {
+      const index = next.findIndex((item) => item.segment_id === summary.segment_id)
+      if (index >= 0) {
+        next[index] = { ...next[index], ...summary }
+      } else {
+        next.push(summary)
+      }
+    }
+    summaries.value = next
+  }
+
   const onTestStarted = (payload: RecordingTestStartedPayload) => {
     run.value = payload.run
     workbenchOpen.value = false
@@ -177,6 +192,7 @@ export function createRecordingRunStore(chatSessionIdSource?: ChatSessionIdSourc
     onRunStarted,
     onRecordingCaptured,
     onSegmentCompleted,
+    onSegmentUpdated,
     onTestStarted,
     onPublishPrepared,
     setPublishDraft,

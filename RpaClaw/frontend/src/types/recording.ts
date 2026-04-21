@@ -120,6 +120,11 @@ export interface RecordingPublishPreparedPayload {
   }
 }
 
+export interface RecordingSegmentUpdatedPayload {
+  run: RecordingRun
+  summaries: RecordingSegmentSummary[]
+}
+
 export type WorkflowSegmentKind = 'rpa' | 'script' | 'mcp' | 'llm' | 'mixed'
 export type WorkflowValueType = 'string' | 'number' | 'boolean' | 'file' | 'json' | 'secret'
 

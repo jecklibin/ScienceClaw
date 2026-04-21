@@ -25,6 +25,18 @@ class RecordingOrchestrator:
     def get_run(self, run_id: str) -> RecordingRun:
         return self._runs[run_id]
 
+    def list_runs(self, session_id: str, user_id: str, include_saved: bool = False) -> list[RecordingRun]:
+        runs = [
+            run
+            for run in self._runs.values()
+            if run.session_id == session_id and run.user_id == user_id and (include_saved or run.status != "saved")
+        ]
+        return sorted(runs, key=lambda run: run.updated_at, reverse=True)
+
+    def latest_run(self, session_id: str, user_id: str, include_saved: bool = False) -> RecordingRun | None:
+        runs = self.list_runs(session_id=session_id, user_id=user_id, include_saved=include_saved)
+        return runs[0] if runs else None
+
     def start_segment(
         self,
         run: RecordingRun,
@@ -81,7 +93,7 @@ class RecordingOrchestrator:
             "artifacts": [artifact.model_dump(mode="json") for artifact in segment.artifacts],
             "steps": segment.steps,
         }
-        for key in ("params", "auth_config", "title", "description", "testing_status"):
+        for key in ("params", "auth_config", "title", "description", "testing_status", "inputs", "outputs"):
             if key in segment.exports:
                 summary[key] = segment.exports[key]
         return summary

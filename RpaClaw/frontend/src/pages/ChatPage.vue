@@ -287,6 +287,7 @@ import type {
   RecordingRunStartedPayload,
   RecordingSegmentCapturedPayload,
   RecordingSegmentCompletedPayload,
+  RecordingSegmentUpdatedPayload,
   RecordingTestStartedPayload,
   SkillPublishDraft,
 } from '@/types/recording';
@@ -555,6 +556,10 @@ const handleToolEvent = (toolData: ToolEventData) => {
     const recordingContent = toolContent.content as any;
     if (recordingContent.recording_event === 'recording_run_started') {
       handleRecordingRunStarted(recordingContent as RecordingRunStartedPayload);
+    } else if (recordingContent.recording_event === 'recording_segment_completed') {
+      handleRecordingSegmentComplete(recordingContent as RecordingSegmentCompletedPayload);
+    } else if (recordingContent.recording_event === 'recording_segment_updated') {
+      handleRecordingSegmentUpdated(recordingContent as RecordingSegmentUpdatedPayload);
     } else if (recordingContent.recording_event === 'recording_test_started') {
       handleRecordingTestStarted(recordingContent as RecordingTestStartedPayload);
     } else if (recordingContent.recording_event === 'recording_publish_prepared') {
@@ -852,6 +857,10 @@ const handleRecordingSegmentComplete = (payload: RecordingSegmentCompletedPayloa
   recordingStore.onSegmentCompleted(payload);
 }
 
+const handleRecordingSegmentUpdated = (payload: RecordingSegmentUpdatedPayload) => {
+  recordingStore.onSegmentUpdated(payload);
+}
+
 const handleRecordingTestStarted = (payload: RecordingTestStartedPayload) => {
   recordingStore.onTestStarted(payload);
 }
@@ -914,6 +923,8 @@ const handleEvent = (event: AgentSSEEvent) => {
     handleRecordingRunStarted((event as any).data as RecordingRunStartedPayload);
   } else if ((event as any).event === 'recording_segment_completed') {
     handleRecordingSegmentComplete((event as any).data as RecordingSegmentCompletedPayload);
+  } else if ((event as any).event === 'recording_segment_updated') {
+    handleRecordingSegmentUpdated((event as any).data as RecordingSegmentUpdatedPayload);
   } else if ((event as any).event === 'recording_test_started') {
     handleRecordingTestStarted((event as any).data as RecordingTestStartedPayload);
   } else if ((event as any).event === 'recording_publish_prepared') {

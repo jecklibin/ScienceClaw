@@ -138,4 +138,36 @@ describe('createRecordingRunStore', () => {
 
     expect(store.publishDraft.value?.skill_name).toBe('download_and_convert_report')
   })
+
+  it('updates existing segment summary when bindings are changed from chat', () => {
+    const store = createRecordingRunStore('chat-1')
+
+    store.onSegmentCompleted({
+      segment: { id: 'seg-1', status: 'completed' },
+      summary: { segment_id: 'seg-1', intent: 'first', artifacts: [] },
+    })
+    store.onSegmentCompleted({
+      segment: { id: 'seg-2', status: 'completed' },
+      summary: { segment_id: 'seg-2', intent: 'second', artifacts: [] },
+    })
+
+    store.onSegmentUpdated({
+      run: { id: 'run-1', status: 'ready_for_next_segment', type: 'rpa' },
+      summaries: [
+        {
+          segment_id: 'seg-1',
+          outputs: [{ name: 'issue_title', type: 'string' }],
+          artifacts: [],
+        },
+        {
+          segment_id: 'seg-2',
+          inputs: [{ name: 'query', type: 'string', source_ref: 'seg-1.outputs.issue_title' }],
+          artifacts: [],
+        },
+      ],
+    })
+
+    expect(store.summaries.value[0].outputs?.[0].name).toBe('issue_title')
+    expect(store.summaries.value[1].inputs?.[0].source_ref).toBe('seg-1.outputs.issue_title')
+  })
 })

@@ -61,6 +61,34 @@ def propose_tool_save(tool_name: str, replaces: str = "") -> str:
 def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_dir: str):
     """Create session-bound tools used by recording-creator."""
 
+    def _resolve_run(run_id: str = ""):
+        from backend.recording.service import recording_orchestrator
+
+        if run_id:
+            run = recording_orchestrator.get_run(run_id)
+            if run.session_id != session_id or run.user_id != str(user_id):
+                raise ValueError("recording run not found for this session")
+            return run
+
+        run = recording_orchestrator.latest_run(session_id=session_id, user_id=str(user_id))
+        if run is None:
+            raise ValueError("no active recording run found for this session")
+        return run
+
+    def _parse_json_payload(raw: str, fallback):
+        if not raw:
+            return fallback
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid json payload: {exc}") from exc
+
+    def _segment_by_id(run, segment_id: str):
+        for segment in run.segments:
+            if segment.id == segment_id:
+                return segment
+        raise ValueError(f"segment not found: {segment_id}")
+
     @tool
     def start_recording_run(message: str, kind: str = "rpa", publish_target: str = "") -> str:
         """Start a conversational RPA/MCP recording run for the current chat session.
@@ -105,14 +133,174 @@ def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_di
         )
 
     @tool
-    def begin_recording_test(run_id: str) -> str:
+    def inspect_recording_runs(run_id: str = "") -> str:
+        """Inspect the latest recording run or a specific run to decide whether to continue it, bind artifacts, or publish it."""
+        from backend.recording.service import recording_orchestrator
+
+        if run_id:
+            runs = [_resolve_run(run_id)]
+        else:
+            runs = recording_orchestrator.list_runs(session_id=session_id, user_id=str(user_id))
+            if not runs:
+                return json.dumps({"recording_event": "recording_runs_inspected", "runs": []}, ensure_ascii=False)
+
+        return json.dumps(
+            {
+                "recording_event": "recording_runs_inspected",
+                "runs": [
+                    {
+                        "id": run.id,
+                        "status": run.status,
+                        "publish_target": run.publish_target,
+                        "segment_count": len(run.segments),
+                        "segments": [recording_orchestrator.build_segment_summary(segment) for segment in run.segments],
+                        "artifacts": [artifact.model_dump(mode="json") for artifact in run.artifact_index],
+                    }
+                    for run in runs
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+    @tool
+    def continue_recording_run(
+        run_id: str = "",
+        message: str = "",
+        kind: str = "rpa",
+        requires_workbench: bool = True,
+    ) -> str:
+        """Continue the latest recording run or a specified run by appending a new segment instead of starting a brand new run."""
+        from backend.recording.service import recording_orchestrator
+
+        run = _resolve_run(run_id)
+        segment_kind = kind if kind in {"rpa", "mcp", "mixed"} else run.type
+        segment = recording_orchestrator.start_segment(
+            run,
+            kind=segment_kind,
+            intent=message or "继续录制下一段",
+            requires_workbench=requires_workbench,
+        )
+        return json.dumps(
+            {
+                "recording_event": "recording_run_started",
+                "run": run.model_dump(mode="json"),
+                "segment": segment.model_dump(mode="json"),
+                "open_workbench": requires_workbench,
+            },
+            ensure_ascii=False,
+        )
+
+    @tool
+    def add_script_recording_segment(
+        run_id: str = "",
+        title: str = "",
+        purpose: str = "",
+        script: str = "",
+        entry: str = "",
+        params_json: str = "{}",
+        inputs_json: str = "[]",
+        outputs_json: str = "[]",
+    ) -> str:
+        """Append a completed script-processing segment to the current recording run for file conversion, parsing, extraction, or other non-browser processing."""
+        from backend.recording.service import recording_orchestrator
+
+        run = _resolve_run(run_id)
+        params = _parse_json_payload(params_json, {})
+        inputs = _parse_json_payload(inputs_json, [])
+        outputs = _parse_json_payload(outputs_json, [])
+        segment = recording_orchestrator.start_segment(
+            run,
+            kind="chat_process",
+            intent=purpose or title or "脚本处理片段",
+            requires_workbench=False,
+        )
+        segment.exports = {
+            "title": title or "脚本片段",
+            "description": purpose or title or "脚本处理片段",
+            "script": script or "def run(context):\n    return {}\n",
+            "entry": entry or f"segments/{segment.id}_script.py",
+            "params": params if isinstance(params, dict) else {},
+            "inputs": inputs if isinstance(inputs, list) else [],
+            "outputs": outputs if isinstance(outputs, list) else [],
+            "testing_status": "passed",
+        }
+        recording_orchestrator.complete_segment(run, segment)
+        summary = recording_orchestrator.build_segment_summary(segment)
+        return json.dumps(
+            {
+                "recording_event": "recording_segment_completed",
+                "run": run.model_dump(mode="json"),
+                "segment": segment.model_dump(mode="json"),
+                "summary": summary,
+            },
+            ensure_ascii=False,
+        )
+
+    @tool
+    def bind_recording_segment_io(
+        run_id: str = "",
+        source_segment_id: str = "",
+        output_name: str = "",
+        output_type: str = "string",
+        target_segment_id: str = "",
+        input_name: str = "",
+        input_type: str = "string",
+    ) -> str:
+        """Bind one segment's named output to another segment's named input so the workflow can carry data across segments during publish and execution."""
+        from backend.recording.service import recording_orchestrator
+
+        run = _resolve_run(run_id)
+        source_segment = _segment_by_id(run, source_segment_id)
+        target_segment = _segment_by_id(run, target_segment_id)
+
+        source_outputs = list(source_segment.exports.get("outputs", []))
+        source_outputs = [item for item in source_outputs if item.get("name") != output_name]
+        source_outputs.append(
+            {
+                "name": output_name,
+                "type": output_type,
+                "description": f"{source_segment.intent} 的输出变量 {output_name}",
+            }
+        )
+        source_segment.exports["outputs"] = source_outputs
+
+        target_inputs = list(target_segment.exports.get("inputs", []))
+        target_inputs = [item for item in target_inputs if item.get("name") != input_name]
+        target_inputs.append(
+            {
+                "name": input_name,
+                "type": input_type,
+                "required": True,
+                "source": "segment_output",
+                "source_ref": f"{source_segment_id}.outputs.{output_name}",
+                "description": f"来自片段 {source_segment_id} 的输出 {output_name}",
+            }
+        )
+        target_segment.exports["inputs"] = target_inputs
+        run.updated_at = source_segment.ended_at or target_segment.ended_at or run.updated_at
+
+        return json.dumps(
+            {
+                "recording_event": "recording_segment_updated",
+                "run": run.model_dump(mode="json"),
+                "summaries": [
+                    recording_orchestrator.build_segment_summary(source_segment),
+                    recording_orchestrator.build_segment_summary(target_segment),
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+    @tool
+    def begin_recording_test(run_id: str = "") -> str:
         """Move an existing recording run into testing state and return a test payload."""
         from backend.recording.service import recording_orchestrator
         from backend.recording.testing import build_test_payload
 
-        run = recording_orchestrator.get_run(run_id)
-        if run.session_id != session_id or run.user_id != str(user_id):
-            return "Error: recording run not found for this session."
+        try:
+            run = _resolve_run(run_id)
+        except ValueError as exc:
+            return f"Error: {exc}"
         recording_orchestrator.begin_testing(run)
         payload = _run_async(build_test_payload(run))
         return json.dumps(
@@ -125,14 +313,15 @@ def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_di
         )
 
     @tool
-    def prepare_recording_publish(run_id: str, publish_target: str = "skill") -> str:
+    def prepare_recording_publish(run_id: str = "", publish_target: str = "skill") -> str:
         """Prepare staged files for a tested recording run before calling propose_skill_save/propose_tool_save."""
         from backend.recording.publishing import build_publish_artifacts
         from backend.recording.service import recording_orchestrator
 
-        run = recording_orchestrator.get_run(run_id)
-        if run.session_id != session_id or run.user_id != str(user_id):
-            return "Error: recording run not found for this session."
+        try:
+            run = _resolve_run(run_id)
+        except ValueError as exc:
+            return f"Error: {exc}"
         recording_orchestrator.mark_ready_to_publish(run, publish_target)
         prepared = _run_async(build_publish_artifacts(run, workspace_dir=workspace_dir))
         summary = prepared.summary
@@ -148,7 +337,15 @@ def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_di
             ensure_ascii=False,
         )
 
-    return [start_recording_run, begin_recording_test, prepare_recording_publish]
+    return [
+        start_recording_run,
+        inspect_recording_runs,
+        continue_recording_run,
+        add_script_recording_segment,
+        bind_recording_segment_io,
+        begin_recording_test,
+        prepare_recording_publish,
+    ]
 
 
 @tool
