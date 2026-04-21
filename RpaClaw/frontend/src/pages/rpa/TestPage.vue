@@ -482,7 +482,14 @@ const finishConversationalSegment = async () => {
     );
     if (isEmbedded.value) {
       window.parent?.postMessage(
-        { type: 'rpa-recording-completed', payload },
+        {
+          type: 'rpa-recording-completed',
+          payload: {
+            ...payload,
+            runId: runId.value,
+            segmentId: segmentId.value,
+          },
+        },
         window.location.origin,
       );
       return;

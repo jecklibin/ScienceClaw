@@ -582,7 +582,10 @@ const stopRecording = async () => {
         console.error('Failed to stop session:', err);
       }
     }
-    window.parent?.postMessage({ type: 'rpa-recording-close' }, window.location.origin);
+    window.parent?.postMessage(
+      { type: 'rpa-recording-close', payload: { runId, segmentId } },
+      window.location.origin,
+    );
     return;
   }
 
@@ -613,6 +616,8 @@ const stopRecording = async () => {
       {
         type: 'rpa-recording-captured',
         payload: {
+          runId,
+          segmentId,
           rpaSessionId: sessionId.value,
           steps: mapRpaStepsToRecordingSteps(rawSteps),
           artifacts: deriveArtifactsFromRpaSteps(rawSteps),
@@ -651,6 +656,8 @@ const stopRecording = async () => {
         {
           type: 'rpa-recording-completed',
           payload: {
+            runId,
+            segmentId,
             segment: embeddedCompletionPayload?.segment,
             summary: embeddedCompletionPayload?.summary,
           },
@@ -667,7 +674,16 @@ const stopRecording = async () => {
 
 const returnToParentChat = () => {
   if (isEmbedded.value) {
-    window.parent?.postMessage({ type: 'rpa-recording-close' }, window.location.origin);
+    window.parent?.postMessage(
+      {
+        type: 'rpa-recording-close',
+        payload: {
+          runId: route.query.runId as string | undefined,
+          segmentId: route.query.segmentId as string | undefined,
+        },
+      },
+      window.location.origin,
+    );
     return;
   }
   router.push('/chat');

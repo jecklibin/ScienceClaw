@@ -43,6 +43,7 @@
 import { computed, onBeforeUnmount, onMounted } from 'vue'
 
 import type { RecordingSegmentCapturedPayload, RecordingSegmentCompletedPayload } from '@/types/recording'
+import { matchesRecordingRouteContext } from '@/utils/recordingRouteContext'
 
 const props = defineProps<{
   visible: boolean
@@ -63,6 +64,7 @@ const iframeSrc = computed(() => {
 
 const onMessage = (event: MessageEvent) => {
   if (event.origin !== window.location.origin) return
+  if (!matchesRecordingRouteContext(props.route, event.data?.payload)) return
   if (event.data?.type === 'rpa-recording-captured' && event.data.payload) {
     emit('recordingCaptured', event.data.payload as RecordingSegmentCapturedPayload)
   } else if (event.data?.type === 'rpa-recording-completed' && event.data.payload) {
