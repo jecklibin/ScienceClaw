@@ -82,6 +82,8 @@ export interface RecordingSegmentSummary {
   testing_status?: string
   artifacts: RecordingArtifact[]
   steps?: RecordingStep[]
+  inputs?: WorkflowIO[]
+  outputs?: WorkflowIO[]
 }
 
 export interface RecordingRunStartedPayload {
@@ -113,6 +115,57 @@ export interface RecordingPublishPreparedPayload {
   summary: {
     name?: string
     title?: string
+    draft?: SkillPublishDraft
     [key: string]: unknown
   }
+}
+
+export type WorkflowSegmentKind = 'rpa' | 'script' | 'mcp' | 'llm' | 'mixed'
+export type WorkflowValueType = 'string' | 'number' | 'boolean' | 'file' | 'json' | 'secret'
+
+export interface WorkflowIO {
+  name: string
+  type: WorkflowValueType
+  required?: boolean
+  source?: 'user' | 'workflow_param' | 'segment_output' | 'artifact' | 'credential'
+  source_ref?: string | null
+  description?: string
+  default?: unknown
+}
+
+export interface WorkflowPublishSegmentSummary {
+  id: string
+  kind: WorkflowSegmentKind
+  title: string
+  purpose: string
+  status: string
+  input_count: number
+  output_count: number
+}
+
+export interface WorkflowCredentialRequirement {
+  name: string
+  type: 'browser_session' | 'api_key' | 'username_password' | 'oauth' | 'secret'
+  description: string
+}
+
+export interface WorkflowPublishWarning {
+  code: string
+  message: string
+  segment_id?: string | null
+}
+
+export interface SkillPublishDraft {
+  id: string
+  run_id: string
+  publish_target: 'skill' | 'tool' | 'mcp'
+  skill_name: string
+  display_title: string
+  description: string
+  trigger_examples: string[]
+  inputs: WorkflowIO[]
+  outputs: WorkflowIO[]
+  credentials: WorkflowCredentialRequirement[]
+  segments: WorkflowPublishSegmentSummary[]
+  warnings: WorkflowPublishWarning[]
 }

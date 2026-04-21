@@ -1,5 +1,10 @@
 import { apiClient } from '@/api/client'
-import type { RecordingArtifact, RecordingParamConfig, RecordingStep } from '@/types/recording'
+import type {
+  RecordingArtifact,
+  RecordingParamConfig,
+  RecordingStep,
+  SkillPublishDraft,
+} from '@/types/recording'
 
 export async function createRecordingRun(sessionId: string, message: string) {
   const response = await apiClient.post(`/sessions/${sessionId}/recordings`, { message })
@@ -48,11 +53,24 @@ export async function testRecordingRun(sessionId: string, runId: string) {
 export async function publishRecordingRun(
   sessionId: string,
   runId: string,
-  publishTarget: 'skill' | 'tool',
+  publishTarget: 'skill' | 'tool' | 'mcp',
+  draft?: SkillPublishDraft,
 ) {
   const response = await apiClient.post(
     `/sessions/${sessionId}/recordings/${runId}/publish`,
-    { publish_target: publishTarget },
+    { publish_target: publishTarget, draft },
   )
   return response.data.data
+}
+
+export async function prepareRecordingPublishDraft(
+  sessionId: string,
+  runId: string,
+  publishTarget: 'skill' | 'tool' | 'mcp',
+) {
+  const response = await apiClient.post(
+    `/sessions/${sessionId}/recordings/${runId}/publish-draft`,
+    { publish_target: publishTarget },
+  )
+  return response.data.data as { draft: SkillPublishDraft }
 }

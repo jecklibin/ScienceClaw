@@ -58,8 +58,7 @@ describe('recording lifecycle store', () => {
       summary: { name: 'recorded_workflow' },
     })
     expect(store.run.value?.publish_target).toBe('skill')
-    expect(store.publishPrompt.value?.kind).toBe('skill')
-    expect(store.publishPrompt.value?.name).toBe('recorded_workflow')
+    expect(store.publishDraft.value).toBeNull()
     expect(store.actionPrompt.value).toBeNull()
   })
 })

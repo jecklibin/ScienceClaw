@@ -206,6 +206,13 @@
         @recording-captured="handleRecordingCaptured"
         @segment-complete="handleRecordingSegmentComplete"
       />
+      <RecordingPublishDraftModal
+        :visible="!!recordingStore.publishDraft.value"
+        :draft="recordingStore.publishDraft.value"
+        :saving="recordingActionBusy === 'save'"
+        @close="recordingStore.setPublishDraft(null)"
+        @save="handleSaveRecordingPublishDraft"
+      />
       <!-- Activity Panel (right side - Cursor-style thinking + execution timeline) -->
       <ActivityPanel
         :key="sessionId"
@@ -272,14 +279,16 @@ import McpSessionSelector from '../components/McpSessionSelector.vue';
 import RecordingSegmentCard from '@/components/RecordingSegmentCard.vue';
 import RecordingArtifactList from '@/components/RecordingArtifactList.vue';
 import RecordingRecorderModal from '@/components/RecordingRecorderModal.vue';
+import RecordingPublishDraftModal from '@/components/RecordingPublishDraftModal.vue';
 import { createRecordingRunStore } from '@/composables/useRecordingRun';
-import { publishRecordingRun } from '@/api/recording';
+import { prepareRecordingPublishDraft, publishRecordingRun } from '@/api/recording';
 import type {
   RecordingPublishPreparedPayload,
   RecordingRunStartedPayload,
   RecordingSegmentCapturedPayload,
   RecordingSegmentCompletedPayload,
   RecordingTestStartedPayload,
+  SkillPublishDraft,
 } from '@/types/recording';
 
 const router = useRouter()
@@ -381,7 +390,7 @@ const savingSkill = ref(false);
 const pendingToolSave = ref<string | null>(null);
 const pendingToolReplaces = ref<string | null>(null);
 const savingTool = ref(false);
-const recordingActionBusy = ref<'test' | 'publish' | null>(null);
+const recordingActionBusy = ref<'test' | 'publish' | 'save' | null>(null);
 const sessionMcpLoading = ref(false);
 const sessionMcpServers = ref<SessionMcpServerItem[]>([]);
 
@@ -849,12 +858,12 @@ const handleRecordingTestStarted = (payload: RecordingTestStartedPayload) => {
 
 const handleRecordingPublishPrepared = (payload: RecordingPublishPreparedPayload) => {
   recordingStore.onPublishPrepared(payload);
-  const prompt = recordingStore.publishPrompt.value;
-  if (!prompt) return;
-  if (prompt.kind === 'skill') {
-    pendingSkillSave.value = prompt.name;
-  } else {
-    pendingToolSave.value = prompt.name;
+  if (!payload.summary.draft) {
+    if (payload.prompt_kind === 'skill') {
+      pendingSkillSave.value = payload.summary.name || payload.summary.title || 'recorded_workflow';
+    } else {
+      pendingToolSave.value = payload.summary.name || payload.summary.title || 'recorded_workflow';
+    }
   }
 }
 
@@ -864,11 +873,28 @@ const handlePrepareRecordingPublish = async () => {
 
   recordingActionBusy.value = 'publish';
   try {
-    const payload = await publishRecordingRun(sessionId.value, prompt.runId, prompt.publishTarget);
-    handleRecordingPublishPrepared(payload as RecordingPublishPreparedPayload);
+    const payload = await prepareRecordingPublishDraft(sessionId.value, prompt.runId, prompt.publishTarget);
+    recordingStore.setPublishDraft(payload.draft);
+    recordingStore.dismissActionPrompt();
   } catch (error) {
     console.error('Failed to prepare recording publish:', error);
     showErrorToast('准备发布失败');
+  } finally {
+    recordingActionBusy.value = null;
+  }
+}
+
+const handleSaveRecordingPublishDraft = async (draft: SkillPublishDraft) => {
+  if (!sessionId.value) return;
+
+  recordingActionBusy.value = 'save';
+  try {
+    await publishRecordingRun(sessionId.value, draft.run_id, draft.publish_target, draft);
+    recordingStore.setPublishDraft(null);
+    pendingSkillSave.value = draft.skill_name;
+  } catch (error) {
+    console.error('Failed to save recording publish draft:', error);
+    showErrorToast('保存录制技能失败');
   } finally {
     recordingActionBusy.value = null;
   }

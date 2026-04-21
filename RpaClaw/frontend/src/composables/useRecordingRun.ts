@@ -10,6 +10,7 @@ import type {
   RecordingSegmentSummary,
   RecordingTestStartedPayload,
   RecordingPublishPreparedPayload,
+  SkillPublishDraft,
 } from '@/types/recording'
 
 export interface RecordingActionPrompt {
@@ -38,7 +39,7 @@ export function createRecordingRunStore(chatSessionIdSource?: ChatSessionIdSourc
     path: string
     query: Record<string, string>
   } | null>(null)
-  const publishPrompt = ref<{ kind: 'skill' | 'tool'; name: string; stagingPaths: string[] } | null>(null)
+  const publishDraft = ref<SkillPublishDraft | null>(null)
   const actionPrompt = ref<RecordingActionPrompt | null>(null)
 
   const canContinue = computed(() => !!run.value && !activeSegment.value)
@@ -130,11 +131,11 @@ export function createRecordingRunStore(chatSessionIdSource?: ChatSessionIdSourc
   const onPublishPrepared = (payload: RecordingPublishPreparedPayload) => {
     run.value = payload.run
     actionPrompt.value = null
-    publishPrompt.value = {
-      kind: payload.prompt_kind,
-      name: payload.summary.name || payload.summary.title || 'recorded_workflow',
-      stagingPaths: payload.staging_paths,
-    }
+    publishDraft.value = payload.summary.draft || null
+  }
+
+  const setPublishDraft = (draft: SkillPublishDraft | null) => {
+    publishDraft.value = draft
   }
 
   const closeWorkbench = () => {
@@ -170,14 +171,15 @@ export function createRecordingRunStore(chatSessionIdSource?: ChatSessionIdSourc
     recorderModalOpen,
     recorderModalRoute,
     actionPrompt,
+    publishDraft,
     testingState,
-    publishPrompt,
     canContinue,
     onRunStarted,
     onRecordingCaptured,
     onSegmentCompleted,
     onTestStarted,
     onPublishPrepared,
+    setPublishDraft,
     closeWorkbench,
     openWorkbench,
     closeRecorderModal,

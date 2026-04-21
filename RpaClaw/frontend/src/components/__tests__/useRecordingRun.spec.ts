@@ -109,4 +109,33 @@ describe('createRecordingRunStore', () => {
 
     expect(store.summaries.value.map((summary) => summary.segment_id)).toEqual(['seg-1', 'seg-2'])
   })
+
+  it('stores publish draft from recording publish prepared event', () => {
+    const store = createRecordingRunStore('chat-1')
+
+    store.onPublishPrepared({
+      run: { id: 'run-1', status: 'ready_to_publish', type: 'rpa' },
+      prompt_kind: 'skill',
+      staging_paths: [],
+      summary: {
+        name: 'download_and_convert_report',
+        draft: {
+          id: 'draft_run-1',
+          run_id: 'run-1',
+          publish_target: 'skill',
+          skill_name: 'download_and_convert_report',
+          display_title: '下载并转换业务报表',
+          description: '自动下载业务报表并转换为 CSV。',
+          trigger_examples: [],
+          inputs: [],
+          outputs: [],
+          credentials: [],
+          segments: [],
+          warnings: [],
+        },
+      },
+    })
+
+    expect(store.publishDraft.value?.skill_name).toBe('download_and_convert_report')
+  })
 })
