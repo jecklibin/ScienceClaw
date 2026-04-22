@@ -24,6 +24,18 @@ def test_recording_creator_skill_mentions_full_lifecycle_triggers():
     assert "bind_recording_segment_io" in skill_md
 
 
+def test_recording_creator_skill_stays_execution_focused():
+    skill_md = (Path(__file__).resolve().parents[1] / "builtin_skills" / "recording-creator" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert 'description: "Use when' in skill_md
+    assert "sessions.py" not in skill_md
+    assert "关键词" not in skill_md
+    assert "正则" not in skill_md
+    assert "params.schema.json" not in skill_md
+    assert "credentials.example.json" not in skill_md
+    assert "staging" not in skill_md
+
+
 def test_detect_recording_intent_for_explicit_rpa_request():
     intent = detect_recording_intent("帮我录一个下载论文 PDF 的流程")
     assert intent is not None

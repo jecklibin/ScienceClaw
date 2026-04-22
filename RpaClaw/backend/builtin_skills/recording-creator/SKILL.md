@@ -1,231 +1,161 @@
 ---
 name: recording-creator
-description: "通过对话发起并编排 RPA 技能录制、业务流程技能录制、MCP 工具录制，以及多段 workflow 录制。凡是用户提到“录制流程”“录个业务流程技能”“录制一个 MCP 工具”“把网页操作录成技能”“先下载再继续处理文件”“把上一段输出作为下一段输入”“准备发布录制技能/工具”这类诉求时，都应触发本技能。Use this whenever the user wants to record a browser workflow, capture an MCP operation, build a multi-segment recorded automation from chat, bind one segment's output to another segment's input, test a recorded workflow, repair it, or publish it as a reusable skill/tool."
+description: "Use when the user wants to record an RPA/browser workflow, create a business workflow skill, create an MCP tool from recorded actions, add another recording segment, add a script/data-processing segment, bind one segment output or artifact to another segment input, run a full recording test, repair a recorded workflow, or publish a recorded workflow as a skill or MCP tool."
 ---
 
 # recording-creator
 
-一个用于主对话内 workflow 录制的内置技能。它的职责与 `skill-creator` / `tool-creator` 同级，但面向“先录制、再验证、再发布”的可复用自动化流程。
-
-> **ENVIRONMENT: RpaClaw** — 录制入口由本技能接管，不要依赖 `sessions.py` 的关键词或正则旁路。由本技能决定什么时候开始 run、什么时候继续 segment、什么时候做整体测试、什么时候准备发布；后端工具只负责执行本技能已经决定好的动作。
-
-## 角色边界
-
-### 本技能负责什么
-
-- 识别用户是在创建新的录制 run，还是继续已有 run。
-- 判断当前段是交互录制段，还是纯脚本/文件处理段。
-- 明确多段 workflow 的输入、输出、artifact 和测试意图。
-- 驱动生成、测试、修复、发布四个阶段。
-- 在发布阶段区分目标：skill 继续复用 `propose_skill_save` 完成最终收口；tool / MCP 工具由 `prepare_recording_publish` 生成并保存到 RPA MCP 工具注册表，不要再走普通 `propose_tool_save`。
-
-### 本技能不负责什么
-
-- 不直接把录制请求短路到聊天路由。
-- 不把“是不是录制诉求”再交回后端工具做二次判定。
-- 不直接写入正式 `Skills` / `Tools` 目录。
-- 不把多段输入输出关系只写在自然语言里而不做结构化绑定。
+主对话中的录制编排技能。它负责把用户的自然语言诉求转换成 recording lifecycle tool 调用，并把多段录制沉淀为可测试、可发布的 workflow。
 
 ## 何时使用
 
-在这些场景必须优先使用本技能：
+使用本技能：
 
-- 用户要录制网页/RPA 流程。
-- 用户要录制业务流程技能。
-- 用户要录制 MCP 操作或 MCP 工具。
-- 用户要继续已有录制，例如“再录一段”“接着处理刚才下载的文件”。
-- 用户要把前一段输出作为后一段输入。
-- 用户要开始整体测试、修复录制、准备发布。
+- 用户要录制业务流程技能、RPA 流程、浏览器操作或 MCP 工具。
+- 用户要继续当前录制，例如“再录一段”“补一个片段”“接着处理刚才下载的文件”。
+- 用户要把上一段输出、artifact、文件或 JSON 作为下一段输入。
+- 用户要执行完整测试、修复失败步骤、准备发布或保存录制结果。
 
-不要在这些场景触发本技能：
+不要使用本技能：
 
-- 用户是在执行已经保存的技能或工具。
-- 用户是在查看、编辑、优化一个普通 `SKILL.md`，但并不需要录制流程。
-- 用户只是普通浏览网页或临时调用工具，并不想沉淀为录制工作流。
+- 用户是在执行已经保存的技能或 MCP 工具。
+- 用户只是临时浏览网页、普通调用工具，未表达要沉淀为录制 workflow。
+- 用户是在编辑普通 `SKILL.md`，且没有录制、续录、测试或发布意图。
 
-## 标准工作流
+## 快速决策
 
-本技能默认推进如下生命周期：
+| 用户意图 | 应调用 |
+| --- | --- |
+| 新录一个流程、技能或工具 | `inspect_recording_runs` 后调用 `start_recording_run` |
+| 继续已有流程、再录一段 | `inspect_recording_runs` 后调用 `continue_recording_run` |
+| 追加脚本或文件处理段 | `add_script_recording_segment` |
+| 绑定前后段输入输出 | `bind_recording_segment_io` |
+| 开始测试、完整测试、验证一下 | `begin_recording_test` |
+| 准备发布、保存录制结果 | 先确认测试通过，再调用 `prepare_recording_publish` |
 
-1. `inspect_recording_runs`
-2. `start_recording_run` 或 `continue_recording_run`
-3. `add_script_recording_segment`（当当前段不是浏览器录制，而是脚本/文件处理/MCP 后处理时）
-4. `bind_recording_segment_io`（当用户要求跨段传递输出/文件/JSON/文本时）
-5. `begin_recording_test`
-6. 修复或补录
-7. `prepare_recording_publish`
-8. skill 目标进入 `propose_skill_save`；tool / MCP 工具目标等待 `prepare_recording_publish` 返回的 MCP 工具保存结果
+## 执行流程
 
-## Phase 1：创建或恢复 Recording Run
+1. 先调用 `inspect_recording_runs`，判断当前会话是否已有可继续的 run。
+2. 如果用户明确要新建，调用 `start_recording_run`；如果用户是在补充前序流程，调用 `continue_recording_run`。
+3. 如果当前段不是浏览器/RPA 操作，而是文件转换、数据清洗、JSON 处理等，调用 `add_script_recording_segment`。
+4. 如果用户表达“用上一段结果”“把标题传给搜索”“处理刚才下载的文件”，调用 `bind_recording_segment_io` 保存结构化绑定。
+5. 用户要求测试时调用 `begin_recording_test`，读取返回的成功状态、日志和错误信息后直接向用户汇报。
+6. 测试失败时优先修复定位器、参数、绑定或脚本；只有局部修复无效时才建议重录。
+7. 发布前确认目标是 `skill` 还是 `tool`，再调用 `prepare_recording_publish`。
 
-### 先检查，再决定新开还是续录
+## 创建或续录
 
-在调用 `start_recording_run` 之前，先用 `inspect_recording_runs` 判断当前会话是否已经存在未发布的 run。
+优先续录：
 
-优先续录的场景：
+- 用户说“继续”“再录一段”“接着处理”。
+- 当前会话存在未保存或可继续的 run。
+- 当前 run 已测试通过，但用户又要求补充片段。此时继续同一个 run，并在新增片段后重新完整测试。
 
-- 用户说“继续下一段”“再录一段”“接着处理”。
-- 当前会话里已有一个活跃 run，且用户显然是在补充前序流程。
-- 如果当前 run 已经测试通过并处于 `ready_to_publish`，但用户又说“再录一段”或“补一个片段”，仍然继续同一个 run；新增片段会使之前的完整测试结论失效，完成新增片段后必须重新完整测试再发布。
+优先新建：
 
-优先新开 run 的场景：
-
-- 用户明确说“新录一个流程”“另外录一个技能/工具”。
+- 用户明确说“新录一个”“另外录一个”。
 - 当前会话没有可继续的 run。
+- 现有 run 已保存，且用户没有表达要修改它。
 
-### start_recording_run 的使用约束
+`start_recording_run` / `continue_recording_run` 参数规则：
 
-- 只有在你已经判断用户要开始新的录制 run 时才调用。
-- `kind` 由你决定并显式传入，常见值为 `rpa`、`mcp`、`mixed`。
-- `publish_target` 只有在用户已经明确要保存为 `skill` 或 `tool` 时才传；否则可以留空，稍后再决定。
-- 调用后前端会自动打开录制弹窗或录制工作台。
+- `kind` 用 `rpa`、`mcp` 或 `mixed`，根据用户目标判断。
+- `publish_target` 只在目标明确时传 `skill` 或 `tool`。
+- 工具/MCP 录制目标传 `tool`，不要保存成 skill。
 
-## Phase 2：Segment 录制与配置
+## Segment 规则
 
-### 交互录制段
+交互录制段：
 
-当当前段需要浏览器操作或 MCP 实时交互时：
+- 用 `start_recording_run` 或 `continue_recording_run` 打开录制。
+- 用户完成录制后，总结本段标题、用途、步骤数、输入、输出和 artifact。
+- 如果本段输出可供后续使用，明确提示用户可以绑定到下一段。
 
-- 使用 `start_recording_run` 或 `continue_recording_run`
-- 让用户在录制弹窗中完成操作
-- 段完成后总结：
-  - 这段做了什么
-  - 录到了哪些步骤
-  - 产生了哪些 artifact
-  - 下一段可以复用哪些输出
+脚本处理段：
 
-### 非交互段
+- 用 `add_script_recording_segment`，不要只在回复里描述脚本。
+- `title` 写清这段做什么。
+- `purpose` 写清业务用途。
+- `script` 必须是可执行处理逻辑。
+- `params_json`、`inputs_json`、`outputs_json` 必须结构化描述参数、输入和输出。
 
-当用户说的是“把下载下来的文件转换一下”“再处理刚才得到的 JSON”“继续做脚本转换”这类诉求时，不要强制再次打开录制台。
+参数与凭证：
 
-这类场景应优先使用 `add_script_recording_segment`：
+- 每个参数都要有 `description`。
+- 可由用户调用时覆盖的值应暴露为输入。
+- 敏感值标记为 `sensitive: true`，并在已选择凭证时保存 `credential_id`。
+- 不要把参数、凭证或绑定只写在自然语言回复里。
 
-- `title`: 片段标题
-- `purpose`: 片段用途
-- `script`: 实际处理脚本
-- `entry`: 片段脚本路径
-- `params_json`: 参数定义
-- `inputs_json`: 结构化输入定义
-- `outputs_json`: 结构化输出定义
+## 输入输出绑定
 
-脚本段是正式 workflow segment，不是临时聊天说明。必须沉淀到当前 run。
+用户表达以下含义时必须绑定：
 
-### 参数和凭证配置
+- 第一段输出作为第二段输入。
+- 用刚才下载的文件继续处理。
+- 把提取到的标题、名称、JSON、文件路径传给后续步骤。
+- 搜索词、表单值、文件路径来自历史 segment 或 artifact。
 
-每个 segment 的参数必须进入结构化 `params` / `inputs`，不要只写在自然语言回复里。
+绑定时优先使用明确的 `source_segment_id`、`output_name`、`target_segment_id`、`input_name`。如果有多个候选输出或 artifact，先向用户确认，不要猜。
 
-- 普通默认值写入参数的 `original_value`。
-- 每个参数必须有清晰 `description`，优先来自用户说明、segment input 描述或录制步骤描述。
-- 需要用户调用时覆盖的值，应暴露为 workflow 级输入。
-- 敏感参数应标记 `sensitive: true`，并在用户选择已保存凭证后保存 `credential_id`。
-- 发布后的技能会生成与普通 RPA 录制一致的 `params.json`，用于技能页面默认参数配置、凭证引用、workflow runner 默认值加载和应用内执行时自动注入。
+绑定完成后告诉用户：
 
-不要生成或依赖 `params.schema.json` / `credentials.example.json` 这类并行参数或示例文件；参数和凭证引用的唯一事实来源是 `params.json`。
+- 哪个来源绑定到了哪个输入。
+- 这个绑定会用于完整测试、发布和最终执行。
 
-## Phase 3：多段输入输出绑定
+## 测试与修复
 
-当用户表达以下语义时，必须做结构化绑定，而不是只口头描述：
+调用 `begin_recording_test` 后，必须阅读返回结果再回复用户：
 
-- “把第一段输出作为第二段输入”
-- “用刚才下载的文件继续处理”
-- “把提取的标题传给下一段搜索”
-- “第二段输入就是上一段导出的 JSON”
+- `run.status`
+- `run.testing.status`
+- `test_payload.execution.result.success`
+- 关键 `logs`、`stderr` 或错误原因
 
-这时必须调用 `bind_recording_segment_io`，显式建立：
+测试通过：
 
-- `source_segment_id`
-- `output_name`
-- `output_type`
-- `target_segment_id`
-- `input_name`
-- `input_type`
+- 告诉用户可以继续录下一段，或准备发布。
 
-绑定后，要在回复里明确告诉用户：
+测试失败：
 
-- 哪个输出被绑定到了哪个输入
-- 这个绑定会用于测试、发布和最终执行
+- 说明失败点和原因。
+- 优先建议切换定位器、补充参数、修复输入输出绑定、修正脚本。
+- 不要在没有定位原因时要求用户全部重录。
 
-如果 artifact 或输出不唯一，必须回问，不要猜。
+## 发布规则
 
-## Phase 4：测试与修复
+发布前必须确认：
 
-### 开始测试
+- 发布哪一个 run。
+- 目标是 skill 还是 tool / MCP 工具。
+- 名称、描述、输入输出是否清楚。
+- 所有需要发布的 segment 都已包含并测试通过。
 
-用户说“开始测试”“整体测试”“验证一下”时：
+目标是 skill：
 
-- 调用 `begin_recording_test`
-- 无论单段还是多段，都把它当作一次真实执行的完整测试
-- 不要再告诉用户“去前端工作台等待测试完成”
-- 读取 `begin_recording_test` 的返回结果并直接向用户汇报：
-  - `run.status`
-  - `run.testing.status`
-  - `test_payload.execution.result.success`
-  - 关键 `logs` / `stderr`
-- 如果测试通过，明确说明已经可以准备发布
-- 如果测试失败，明确说明失败原因，并继续推进修复、补录或重新测试
+- 调用 `prepare_recording_publish`。
+- 然后进入 `propose_skill_save` 保存确认。
 
-### 测试失败时
+目标是 tool / MCP 工具：
 
-优先推进轻量修复，不要直接建议全部重录：
+- 调用 `prepare_recording_publish`。
+- 如果返回结果表示 MCP 工具已保存，直接向用户说明工具名称和结果。
+- 不要再调用普通 `propose_tool_save`。
+- 不要把工具目标保存成技能。
 
-- 切换候选定位器
-- 单步重放
-- 补充缺失的输入/输出绑定
-- 修正脚本段参数或输出
+## 回复要求
 
-只有当局部修复无效时，才建议：
+- 基于当前 run 状态给下一步，不要输出固定话术。
+- 每次完成重要动作后，给出简洁摘要和可选下一步。
+- 如果当前会话有多个未发布 run 且用户没有指定对象，先问要操作哪一个。
+- 如果用户要求执行已保存技能或工具，退出录制流程，按执行请求处理。
 
-- 重录本步
-- 重录本段
+## 成功标准
 
-## Phase 5：发布准备与保存
+一次完成良好的录制会话应包含：
 
-### 准备发布
-
-测试通过后，再调用 `prepare_recording_publish`。不要跳过测试直接发布。
-
-发布前你应明确四件事：
-
-- 当前要发布哪一个 run
-- 保存目标是 `skill` 还是 `tool`
-- 最终名称、描述、输入输出是否合理
-- 当前多段 workflow 是否都纳入发布
-
-### 收口规则
-
-- 目标是 skill：调用 `prepare_recording_publish` 后，进入 `propose_skill_save`
-- 目标是 tool / MCP 工具：调用 `prepare_recording_publish`，它会产出并保存 RPA MCP 工具；不要再调用 `propose_tool_save`，也不要把它当成技能保存。
-- 发布提示应与 `skill-creator` / `tool-creator` 的保存确认体验一致
-
-不要直接写正式库目录，也不要绕开保存确认条。
-
-## 沟通规则
-
-- 默认把录制理解为“可继续扩展的多段 workflow”，不是一次性单段脚本。
-- 每段完成后都给出高信号摘要：标题、步骤数、artifact、输入输出、下一步建议。
-- 对用户说“可以继续录下一段、开始测试、或者准备发布”时，要基于当前 run 状态给出，不要输出一套固定话术。
-- 如果会话里存在多个未发布 run，且用户意图不明确，必须回问要操作哪一个。
-
-## 反模式
-
-以下做法是错误的：
-
-- 在 `sessions.py` 里写关键词/正则特判来旁路聊天。
-- 让 `start_recording_run` 再次自行判断“这是不是录制意图”。
-- 把脚本处理段只保留在回复文字里，不写入当前 run。
-- 已有跨段依赖时，不做 `bind_recording_segment_io`。
-- 未测试就直接发布。
-- skill 目标跳过 `propose_skill_save` 直接写正式目录。
-- tool / MCP 工具目标调用 `propose_tool_save` 或生成普通技能目录。
-
-## 成功结果
-
-一个完成良好的录制会话，最终应沉淀出：
-
-- 一个 `Recording Run`
-- 一个或多个已配置、已测试的 `segment`
-- 可跨段引用的 `artifact`
-- 结构化的输入输出绑定
-- 与普通录制技能一致的 `params.json` 参数/凭证配置
-- 测试验证结果和必要修复记录
-- 最终可发布的 skill/tool staging 产物
+- 一个明确的 Recording Run。
+- 一个或多个已配置、已测试的 segment。
+- 结构化输入、输出、参数和凭证信息。
+- 必要的跨段绑定。
+- 完整测试结果。
+- 最终发布为 skill 或 MCP 工具的结果。
