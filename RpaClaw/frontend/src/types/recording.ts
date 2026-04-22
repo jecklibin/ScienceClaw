@@ -27,7 +27,7 @@ export interface RecordingRun {
 export interface RecordingSegment {
   id: string
   status: string
-  kind?: 'rpa' | 'mcp' | 'chat_process' | 'mixed'
+  kind?: 'rpa' | 'mcp' | 'script' | 'mixed'
   intent?: string
 }
 
@@ -54,6 +54,20 @@ export interface RecordingStep {
   action: string
   description?: string
   target?: string
+  value?: unknown
+  url?: string | null
+  frame_path?: string[]
+  result_key?: string
+  signals?: Record<string, unknown>
+  element_snapshot?: Record<string, unknown>
+  tag?: string | null
+  label?: string | null
+  sensitive?: boolean
+  tab_id?: string | null
+  source_tab_id?: string | null
+  target_tab_id?: string | null
+  sequence?: number | null
+  event_timestamp_ms?: number | null
   validation?: {
     status?: string
     details?: string
@@ -72,6 +86,7 @@ export type RecordingParamConfig = Record<string, {
 export interface RecordingSegmentSummary {
   segment_id: string
   session_id?: string
+  rpa_session_id?: string
   intent?: string
   title?: string
   description?: string
@@ -127,6 +142,7 @@ export interface RecordingSegmentUpdatedPayload {
 
 export type WorkflowSegmentKind = 'rpa' | 'script' | 'mcp' | 'llm' | 'mixed'
 export type WorkflowValueType = 'string' | 'number' | 'boolean' | 'file' | 'json' | 'secret'
+export type MappingSourceType = 'segment_output' | 'artifact' | 'workflow_param'
 
 export interface WorkflowIO {
   name: string
@@ -136,6 +152,31 @@ export interface WorkflowIO {
   source_ref?: string | null
   description?: string
   default?: unknown
+}
+
+export interface MappingSourceOption {
+  id: string
+  sourceType: MappingSourceType
+  sourceRef: string
+  segmentId?: string
+  segmentTitle?: string
+  name: string
+  valueType: WorkflowValueType
+  preview?: string
+  recommended?: boolean
+}
+
+export interface MappingSourcePool {
+  recommended: MappingSourceOption[]
+  segmentOutputs: MappingSourceOption[]
+  artifacts: MappingSourceOption[]
+  workflowParams: MappingSourceOption[]
+}
+
+export interface InputBindingSummary {
+  boundCount: number
+  unboundCount: number
+  lines: string[]
 }
 
 export interface WorkflowPublishSegmentSummary {

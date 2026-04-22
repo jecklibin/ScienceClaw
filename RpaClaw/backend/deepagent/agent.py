@@ -731,7 +731,7 @@ NEVER use `npx skills`. Use `skills` directly. When installing: `HOME={sandbox_w
 ## Task Resources
 - **Existing skill?** → `read_file` the SKILL.md and follow it. Check `{external_path_for_prompt}` for local installs first.
 - **PDF processing?** → `read_file("{builtin_path_for_prompt}pdf/SKILL.md")`. For form filling, also read FORMS.md.
-- **Record an RPA skill, business workflow skill, or MCP tool** → `read_file("{builtin_path_for_prompt}recording-creator/SKILL.md")`. Use this for conversational recording, multi-segment workflow capture, artifact handoff, testing, repair, and publish preparation.
+- **Record an RPA skill, business workflow skill, or MCP tool** → `read_file("{builtin_path_for_prompt}recording-creator/SKILL.md")`. Use this only when the user wants to create or continue a recording run, not when they want to execute an already-saved skill. Use it for conversational recording, multi-segment workflow capture, artifact handoff, testing, repair, and publish preparation.
 - **Create a tool** → `read_file("{builtin_path_for_prompt}tool-creator/SKILL.md")`. NEVER write to /app/Tools/ directly.
 - **Create a skill** → `read_file("{builtin_path_for_prompt}skill-creator/SKILL.md")`. NEVER write to `{external_path_for_prompt}` directly.
 - **Find ecosystem skill** → `read_file("{builtin_path_for_prompt}find-skills/SKILL.md")`. After 2-3 failures, create from scratch.

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from backend.rpa.manager import RPAStep
+from backend.rpa.manager import RPASessionManager, RPAStep
 
 
 class StepRepairService:
@@ -12,13 +12,15 @@ class StepRepairService:
 
         updated = step.model_copy(deep=True)
         selected_candidate = updated.locator_candidates[candidate_index]
-        locator = selected_candidate.get("locator")
-        if locator is None:
-            raise ValueError("Selected candidate is missing locator payload")
+        try:
+            locator = RPASessionManager._resolve_candidate_locator(selected_candidate)
+        except ValueError as exc:
+            raise ValueError("Selected candidate is missing locator payload") from exc
 
         for index, candidate in enumerate(updated.locator_candidates):
             candidate["selected"] = index == candidate_index
 
+        selected_candidate["locator"] = locator
         updated.target = json.dumps(locator, ensure_ascii=False)
         updated.validation = dict(updated.validation) if isinstance(updated.validation, dict) else {}
         updated.validation["selected_candidate_index"] = candidate_index

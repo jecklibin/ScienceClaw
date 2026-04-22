@@ -13,7 +13,7 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "ready_for_next_segment": {"recording", "waiting_user", "testing", "ready_to_publish", "failed"},
     "testing": {"needs_repair", "ready_to_publish", "failed"},
     "needs_repair": {"testing", "failed"},
-    "ready_to_publish": {"saved", "failed"},
+    "ready_to_publish": {"testing", "saved", "failed"},
     "failed": {"recording", "testing"},
 }
 

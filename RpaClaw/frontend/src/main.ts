@@ -24,6 +24,7 @@ import CredentialsPage from './pages/CredentialsPage.vue'
 import RecorderPage from './pages/rpa/RecorderPage.vue'
 import ConfigurePage from './pages/rpa/ConfigurePage.vue'
 import TestPage from './pages/rpa/TestPage.vue'
+import WorkflowTestPage from './pages/rpa/WorkflowTestPage.vue'
 import { configure } from "vue-gtag";
 
 configure({
@@ -98,6 +99,10 @@ export const router = createRouter({
         {
           path: 'test',
           component: TestPage,
+        },
+        {
+          path: 'workflow-test',
+          component: WorkflowTestPage,
         }
       ]
     },

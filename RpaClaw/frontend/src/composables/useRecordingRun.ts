@@ -24,6 +24,9 @@ export interface RecordingActionPrompt {
 }
 
 type ChatSessionIdSource = string | null | undefined | (() => string | null | undefined)
+type RecordingEventOptions = {
+  interactive?: boolean
+}
 
 export function createRecordingRunStore(chatSessionIdSource?: ChatSessionIdSource) {
   const run = ref<RecordingRun | null>(null)
@@ -31,10 +34,6 @@ export function createRecordingRunStore(chatSessionIdSource?: ChatSessionIdSourc
   const artifacts = ref<RecordingArtifact[]>([])
   const summaries = ref<RecordingSegmentSummary[]>([])
   const workbenchOpen = ref(false)
-  const fullPageRecorderRoute = ref<{
-    path: string
-    query: Record<string, string>
-  } | null>(null)
   const recorderModalOpen = ref(false)
   const recorderModalRoute = ref<{
     path: string
@@ -56,13 +55,14 @@ export function createRecordingRunStore(chatSessionIdSource?: ChatSessionIdSourc
     }
   }
 
-  const onRunStarted = (payload: RecordingRunStartedPayload) => {
+  const onRunStarted = (payload: RecordingRunStartedPayload, options: RecordingEventOptions = {}) => {
+    const interactive = options.interactive ?? true
     run.value = payload.run
     activeSegment.value = payload.segment
     actionPrompt.value = null
     workbenchOpen.value = false
     const routeContext = buildRouteContext()
-    const route = payload.open_workbench
+    const route = interactive && payload.open_workbench
       ? {
           path: '/rpa/recorder',
           query: {
@@ -71,17 +71,17 @@ export function createRecordingRunStore(chatSessionIdSource?: ChatSessionIdSourc
             runId: payload.run.id,
             segmentId: payload.segment.id,
             returnTo: routeContext.returnTo,
-            embedded: '1',
-          },
-        }
+          embedded: '1',
+        },
+      }
       : null
-    fullPageRecorderRoute.value = route
     recorderModalRoute.value = route
     recorderModalOpen.value = !!route
   }
 
-  const onRecordingCaptured = (payload: RecordingSegmentCapturedPayload) => {
-    if (!run.value || !activeSegment.value) return
+  const onRecordingCaptured = (payload: RecordingSegmentCapturedPayload, options: RecordingEventOptions = {}) => {
+    const interactive = options.interactive ?? true
+    if (!interactive || !run.value || !activeSegment.value) return
     const routeContext = buildRouteContext()
     recorderModalRoute.value = {
       path: '/rpa/configure',
@@ -97,24 +97,38 @@ export function createRecordingRunStore(chatSessionIdSource?: ChatSessionIdSourc
     recorderModalOpen.value = true
   }
 
-  const onSegmentCompleted = (payload: RecordingSegmentCompletedPayload) => {
+  const onSegmentCompleted = (payload: RecordingSegmentCompletedPayload, options: RecordingEventOptions = {}) => {
+    const interactive = options.interactive ?? true
     activeSegment.value = null
     workbenchOpen.value = false
-    fullPageRecorderRoute.value = null
     recorderModalOpen.value = false
     recorderModalRoute.value = null
-    summaries.value = [...summaries.value, payload.summary]
-    artifacts.value = [...artifacts.value, ...payload.summary.artifacts]
+    const summaryIndex = summaries.value.findIndex((item) => item.segment_id === payload.summary.segment_id)
+    summaries.value = summaryIndex >= 0
+      ? summaries.value.map((item, index) => index === summaryIndex ? { ...item, ...payload.summary } : item)
+      : [...summaries.value, payload.summary]
+    const existingArtifactKeys = new Set(
+      artifacts.value.map((artifact) => artifact.id || `${artifact.type}:${artifact.path || artifact.name}`),
+    )
+    const nextArtifacts = [...artifacts.value]
+    for (const artifact of payload.summary.artifacts) {
+      const key = artifact.id || `${artifact.type}:${artifact.path || artifact.name}`
+      if (!existingArtifactKeys.has(key)) {
+        existingArtifactKeys.add(key)
+        nextArtifacts.push(artifact)
+      }
+    }
+    artifacts.value = nextArtifacts
     if (run.value) {
       run.value = { ...run.value, status: 'ready_for_next_segment' }
-      actionPrompt.value = {
+      actionPrompt.value = interactive ? {
         runId: run.value.id,
         segmentId: payload.segment.id || payload.summary.segment_id,
         rpaSessionId: payload.summary.session_id,
         intent: payload.summary.intent,
         publishTarget: run.value.publish_target || 'skill',
         testingStatus: run.value.testing?.status || 'idle',
-      }
+      } : null
     }
   }
 
@@ -132,10 +146,43 @@ export function createRecordingRunStore(chatSessionIdSource?: ChatSessionIdSourc
     summaries.value = next
   }
 
-  const onTestStarted = (payload: RecordingTestStartedPayload) => {
+  const onTestStarted = (payload: RecordingTestStartedPayload, options: RecordingEventOptions = {}) => {
+    const interactive = options.interactive ?? true
     run.value = payload.run
     workbenchOpen.value = false
+    if (!interactive) {
+      return
+    }
     const routeContext = buildRouteContext()
+    const testMode = typeof payload.test_payload?.mode === 'string'
+      ? payload.test_payload.mode
+      : 'segment'
+    if (testMode === 'workflow') {
+      if (payload.test_payload?.execution) {
+        window.sessionStorage?.setItem(
+          `recording-workflow-test:${payload.run.id}`,
+          JSON.stringify(payload.test_payload.execution),
+        )
+      }
+      recorderModalRoute.value = {
+        path: '/rpa/workflow-test',
+        query: {
+          chatSessionId: routeContext.chatSessionId,
+          runId: payload.run.id,
+          returnTo: routeContext.returnTo,
+          embedded: '1',
+        },
+      }
+      recorderModalOpen.value = true
+      if (actionPrompt.value) {
+        actionPrompt.value = {
+          ...actionPrompt.value,
+          testingStatus: payload.run.testing?.status || 'running',
+        }
+      }
+      return
+    }
+
     const rpaSessionId = typeof payload.test_payload?.rpa_session_id === 'string'
       ? payload.test_payload.rpa_session_id
       : ''
@@ -170,10 +217,11 @@ export function createRecordingRunStore(chatSessionIdSource?: ChatSessionIdSourc
     }
   }
 
-  const onPublishPrepared = (payload: RecordingPublishPreparedPayload) => {
+  const onPublishPrepared = (payload: RecordingPublishPreparedPayload, options: RecordingEventOptions = {}) => {
+    const interactive = options.interactive ?? true
     run.value = payload.run
     actionPrompt.value = null
-    publishDraft.value = payload.summary.draft || null
+    publishDraft.value = interactive ? payload.summary.draft || null : null
   }
 
   const setPublishDraft = (draft: SkillPublishDraft | null) => {
@@ -197,19 +245,12 @@ export function createRecordingRunStore(chatSessionIdSource?: ChatSessionIdSourc
     actionPrompt.value = null
   }
 
-  const consumeFullPageRecorderRoute = () => {
-    const route = fullPageRecorderRoute.value
-    fullPageRecorderRoute.value = null
-    return route
-  }
-
   return {
     run,
     activeSegment,
     artifacts,
     summaries,
     workbenchOpen,
-    fullPageRecorderRoute,
     recorderModalOpen,
     recorderModalRoute,
     actionPrompt,
@@ -227,6 +268,5 @@ export function createRecordingRunStore(chatSessionIdSource?: ChatSessionIdSourc
     openWorkbench,
     closeRecorderModal,
     dismissActionPrompt,
-    consumeFullPageRecorderRoute,
   }
 }

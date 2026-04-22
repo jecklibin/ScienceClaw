@@ -88,6 +88,14 @@
                 <svg class="size-3.5 text-gray-300 dark:text-gray-600 group-hover/proc:text-gray-400 dark:group-hover/proc:text-gray-500 transition-colors flex-shrink-0 ml-0.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 4l4 4-4 4"/></svg>
               </div>
             </div>
+            <RecordingSegmentCard
+              v-else-if="group.type === 'single' && group.message?.type === 'recording_segment'"
+              :summary="(group.message.content as RecordingSegmentContent).summary"
+              :session-id="sessionId || ''"
+              :run-id="recordingStore.run.value?.id || ''"
+              :summaries="recordingStore.summaries.value"
+              @segment-updated="handleRecordingSegmentUpdated"
+            />
             <ChatMessage v-else-if="group.type === 'single' && group.message" :message="group.message"
               @toolClick="handleToolClick" @suggestionClick="handleSuggestionClick" @convertToPdf="handleConvertToPdf" :mode="mode"
               :isLast="index === lastProcessGroupIndex" :isLoading="isLoading" />
@@ -96,11 +104,6 @@
           <!-- Loading indicator -->
           <LoadingIndicator v-if="isLoading" :text="$t('Thinking')" />
           <RecordingArtifactList :artifacts="recordingStore.artifacts.value" />
-          <RecordingSegmentCard
-            v-for="summary in recordingStore.summaries.value"
-            :key="summary.segment_id"
-            :summary="summary"
-          />
 
         </div>
 
@@ -132,7 +135,7 @@
             </button>
           </div>
           <!-- Skill Save Prompt Bar -->
-          <div v-if="pendingSkillSave && !isLoading"
+          <div v-if="pendingSkillSave"
             class="flex items-center gap-3 px-4 py-3 mb-2 rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50/80 dark:bg-blue-950/30 animate-fadeIn">
             <Package :size="18" class="text-blue-500 flex-shrink-0" />
             <div class="flex-1 min-w-0">
@@ -153,7 +156,7 @@
             </button>
           </div>
           <!-- Tool Save Prompt Bar -->
-          <div v-if="pendingToolSave && !isLoading"
+          <div v-if="pendingToolSave"
             class="flex items-center gap-3 px-4 py-3 mb-2 rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50/80 dark:bg-emerald-950/30 animate-fadeIn">
             <Wrench :size="18" class="text-emerald-500 flex-shrink-0" />
             <div class="flex-1 min-w-0">
@@ -242,7 +245,7 @@ import { useI18n } from 'vue-i18n';
 import ChatBox from '../components/ChatBox.vue';
 import ChatMessage from '../components/ChatMessage.vue';
 import * as agentApi from '../api/agent';
-import { Message, MessageContent, ToolContent, StepContent, AttachmentsContent, ThinkingContent } from '../types/message';
+import { Message, MessageContent, ToolContent, StepContent, AttachmentsContent, ThinkingContent, RecordingSegmentContent } from '../types/message';
 import {
   StepEventData,
   ToolEventData,
@@ -283,11 +286,13 @@ import RecordingPublishDraftModal from '@/components/RecordingPublishDraftModal.
 import { createRecordingRunStore } from '@/composables/useRecordingRun';
 import { prepareRecordingPublishDraft, publishRecordingRun } from '@/api/recording';
 import { normalizeToolContent } from '@/utils/recordingEvents';
+import { derivePublishSaveTarget } from '@/utils/recording';
 import type {
   RecordingPublishPreparedPayload,
   RecordingRunStartedPayload,
   RecordingSegmentCapturedPayload,
   RecordingSegmentCompletedPayload,
+  RecordingSegmentSummary,
   RecordingSegmentUpdatedPayload,
   RecordingTestStartedPayload,
   SkillPublishDraft,
@@ -548,17 +553,18 @@ const handleToolEvent = (toolData: ToolEventData) => {
   const { content, recordingPayload } = normalizeToolContent(toolContent.content);
   toolContent.content = content;
 
-  if (!isRestoringHistory.value && recordingPayload) {
+  if (recordingPayload) {
+    const interactive = !isRestoringHistory.value;
     if (recordingPayload.recording_event === 'recording_run_started') {
-      handleRecordingRunStarted(recordingPayload as RecordingRunStartedPayload);
+      handleRecordingRunStarted(recordingPayload as RecordingRunStartedPayload, interactive);
     } else if (recordingPayload.recording_event === 'recording_segment_completed') {
-      handleRecordingSegmentComplete(recordingPayload as RecordingSegmentCompletedPayload);
+      handleRecordingSegmentComplete(recordingPayload as RecordingSegmentCompletedPayload, interactive);
     } else if (recordingPayload.recording_event === 'recording_segment_updated') {
       handleRecordingSegmentUpdated(recordingPayload as RecordingSegmentUpdatedPayload);
     } else if (recordingPayload.recording_event === 'recording_test_started') {
-      handleRecordingTestStarted(recordingPayload as RecordingTestStartedPayload);
+      handleRecordingTestStarted(recordingPayload as RecordingTestStartedPayload, interactive);
     } else if (recordingPayload.recording_event === 'recording_publish_prepared') {
-      handleRecordingPublishPrepared(recordingPayload as RecordingPublishPreparedPayload);
+      handleRecordingPublishPrepared(recordingPayload as RecordingPublishPreparedPayload, interactive);
     }
   }
 
@@ -840,34 +846,71 @@ const handlePlanEvent = (planData: PlanEventData) => {
   }
 }
 
-const handleRecordingRunStarted = (payload: RecordingRunStartedPayload) => {
-  recordingStore.onRunStarted(payload);
+const upsertRecordingSegmentMessage = (summary: RecordingSegmentSummary, timestamp?: number) => {
+  const nextTimestamp = timestamp || Math.floor(Date.now() / 1000);
+  const index = messages.value.findIndex((message) =>
+    message.type === 'recording_segment'
+    && (message.content as RecordingSegmentContent).summary?.segment_id === summary.segment_id
+  );
+
+  if (index >= 0) {
+    const current = messages.value[index].content as RecordingSegmentContent;
+    messages.value[index] = {
+      ...messages.value[index],
+      content: {
+        ...current,
+        summary: {
+          ...current.summary,
+          ...summary,
+        },
+      } as RecordingSegmentContent,
+    };
+    return;
+  }
+
+  messages.value.push({
+    type: 'recording_segment',
+    content: {
+      timestamp: nextTimestamp,
+      summary,
+    } as RecordingSegmentContent,
+  });
 }
 
-const handleRecordingCaptured = (payload: RecordingSegmentCapturedPayload) => {
-  recordingStore.onRecordingCaptured(payload);
+const handleRecordingRunStarted = (payload: RecordingRunStartedPayload, interactive = !isRestoringHistory.value) => {
+  recordingStore.onRunStarted(payload, { interactive });
 }
 
-const handleRecordingSegmentComplete = (payload: RecordingSegmentCompletedPayload) => {
-  recordingStore.onSegmentCompleted(payload);
+const handleRecordingCaptured = (payload: RecordingSegmentCapturedPayload, interactive = !isRestoringHistory.value) => {
+  recordingStore.onRecordingCaptured(payload, { interactive });
+}
+
+const handleRecordingSegmentComplete = (payload: RecordingSegmentCompletedPayload, interactive = !isRestoringHistory.value) => {
+  recordingStore.onSegmentCompleted(payload, { interactive });
+  upsertRecordingSegmentMessage(payload.summary, (payload as any).timestamp);
 }
 
 const handleRecordingSegmentUpdated = (payload: RecordingSegmentUpdatedPayload) => {
   recordingStore.onSegmentUpdated(payload);
+  for (const summary of payload.summaries) {
+    upsertRecordingSegmentMessage(summary, (payload as any).timestamp);
+  }
 }
 
-const handleRecordingTestStarted = (payload: RecordingTestStartedPayload) => {
-  recordingStore.onTestStarted(payload);
+const handleRecordingTestStarted = (payload: RecordingTestStartedPayload, interactive = !isRestoringHistory.value) => {
+  recordingStore.onTestStarted(payload, { interactive });
 }
 
-const handleRecordingPublishPrepared = (payload: RecordingPublishPreparedPayload) => {
-  recordingStore.onPublishPrepared(payload);
-  if (!payload.summary.draft) {
-    if (payload.prompt_kind === 'skill') {
-      pendingSkillSave.value = payload.summary.name || payload.summary.title || 'recorded_workflow';
-    } else {
-      pendingToolSave.value = payload.summary.name || payload.summary.title || 'recorded_workflow';
-    }
+const handleRecordingPublishPrepared = (payload: RecordingPublishPreparedPayload, interactive = !isRestoringHistory.value) => {
+  recordingStore.onPublishPrepared(payload, { interactive });
+  if (!interactive) {
+    return;
+  }
+  const saveTarget = derivePublishSaveTarget(payload);
+  if (saveTarget?.kind === 'skill') {
+    pendingSkillSave.value = saveTarget.name;
+  } else if (saveTarget?.kind === 'tool') {
+    pendingToolSave.value = saveTarget.name;
   }
 }
 
@@ -893,9 +936,13 @@ const handleSaveRecordingPublishDraft = async (draft: SkillPublishDraft) => {
 
   recordingActionBusy.value = 'save';
   try {
-    await publishRecordingRun(sessionId.value, draft.run_id, draft.publish_target, draft);
+    const payload = await publishRecordingRun(sessionId.value, draft.run_id, draft.publish_target, draft);
+    recordingStore.onPublishPrepared(payload, { interactive: false });
     recordingStore.setPublishDraft(null);
-    pendingSkillSave.value = draft.skill_name;
+    const saveTarget = derivePublishSaveTarget(payload, { includeDraft: true });
+    pendingSkillSave.value = saveTarget?.kind === 'skill' ? saveTarget.name : null;
+    pendingToolSave.value = saveTarget?.kind === 'tool' ? saveTarget.name : null;
+    showSuccessToast(saveTarget?.kind === 'skill' ? '技能已生成，请确认保存到技能库' : '工具已生成，请确认保存到工具库');
   } catch (error) {
     console.error('Failed to save recording publish draft:', error);
     showErrorToast('保存录制技能失败');

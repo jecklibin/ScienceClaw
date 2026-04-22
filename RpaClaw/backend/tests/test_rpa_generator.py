@@ -715,6 +715,59 @@ class PlaywrightGeneratorTests(unittest.TestCase):
         self.assertIn("raise StepExecutionError(step_index=0,", script)
         self.assertIn('await current_page.goto("https://example.com")', script)
 
+    def test_generate_script_navigation_uses_target_when_url_is_empty(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "navigate",
+                "target": "https://example.com/from-target",
+                "url": "",
+                "description": "打开目标页面",
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn('await current_page.goto("https://example.com/from-target")', script)
+        self.assertNotIn('await current_page.goto("")', script)
+
+    def test_generate_script_goto_uses_target_when_url_is_empty(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "goto",
+                "target": "https://example.com/from-goto-target",
+                "url": "",
+                "description": "打开目标页面",
+            }
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertIn('await current_page.goto("https://example.com/from-goto-target")', script)
+        self.assertNotIn('await current_page.goto("")', script)
+
+    def test_generate_script_navigation_does_not_use_description_as_url_source(self):
+        generator = PlaywrightGenerator()
+        steps = [
+            {
+                "action": "navigate",
+                "target": "",
+                "url": "",
+                "description": "导航到 https://github.com/trending",
+            },
+            {
+                "action": "extract_text",
+                "target": json.dumps({"method": "css", "value": "h2 a"}),
+                "description": "提取趋势列表第一个项目名称",
+            },
+        ]
+
+        script = generator.generate_script(steps, is_local=True)
+
+        self.assertNotIn('await current_page.goto("https://github.com/trending")', script)
+        self.assertNotIn('await current_page.goto("")', script)
+
     def test_generate_script_test_mode_false_produces_unchanged_output(self):
         generator = PlaywrightGenerator()
         steps = [

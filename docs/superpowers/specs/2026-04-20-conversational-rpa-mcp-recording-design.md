@@ -1,220 +1,131 @@
 # 会话内技能化 RPA / MCP 录制最终方案
 
+## 文档状态
+
+- 状态：已按当前实现更新
+- 适用范围：主对话中的对话式录制、segment 编排、测试与发布
+- 当前入口技能：`recording-creator`
+- 当前交互形态：大弹窗录制/测试 + 聊天流内联 segment 卡片
+
 ## 目标
 
-把当前“独立录制页 + 工具库/技能库入口”的 RPA / MCP 录制能力，彻底改造成和 `skill-creator` / `tool-creator` 同等级的主对话内置能力。
+把原本依赖独立录制页面、技能库/工具库入口的录制能力，改造成和 `skill-creator` / `tool-creator` 同等级的主对话内置能力。
 
-本方案必须同时满足以下目标：
+本方案要求：
 
-- 用户可以直接在主对话中说“我要录制个业务流程技能”“帮我录一个 MCP 工具”“先下载文件再继续处理”。
-- 录制入口由内置技能接管，而不是 `sessions.py` 基于正则或关键词旁路处理。
-- 聊天右侧录制台与 `/rpa/recorder`、`/rpa/test` 共享同一套录制核心，不再维护缩水版 workbench。
-- 录制结果支持多段编排：`segment -> artifact -> next segment`。
-- 录制能力具备完整生命周期：生成、测试验证、修复、发布。
-- 发布路径与 `skill-creator` / `tool-creator` 对齐，最终走统一的保存确认与发布机制。
+- 用户可以直接在主对话中发起 RPA、MCP 或多段 workflow 录制。
+- 入口由 `recording-creator` 接管，而不是 `sessions.py` 做关键词旁路。
+- 录制结果以 `segment -> artifact -> next segment` 的方式显式编排。
+- 非交互段可以直接在聊天里生成脚本片段，不强制重新打开浏览器。
+- 录制能力具备完整生命周期：生成、测试、修复、发布。
+- 发布收口继续复用 `propose_skill_save` / `propose_tool_save`。
 
-## 非目标
+## 已落地架构
 
-本期不做以下内容：
+### 1. 入口层：内置技能接管
 
-- 可视化流程画布
-- 任意拖拽重排步骤
-- 手写 Playwright 代码编辑器
-- 通用循环/条件 DSL
-- 自由拾取新元素生成任意新定位器
-- 多个并行录制 workbench
-
-## 当前问题
-
-当前实现存在三类结构性问题：
-
-### 1. 入口错误
-
-当前主对话内的录制触发依赖 `sessions.py` 中的显式意图识别与短路逻辑。这种模式：
-
-- 强侵入
-- 强定制
-- 不可扩展
-- 与 `skill-creator` / `tool-creator` 的技能化入口不一致
-
-这会导致录制能力不是“主对话内置技能”，而只是“聊天路由上的特判分支”。
-
-### 2. 前端分叉
-
-当前聊天右侧使用了单独实现的 `RecordingWorkbench.vue`，它只保留了：
-
-- 大画布
-- 地址栏
-- 标签页
-- 输入转发
-
-但没有复用现有录制页的关键能力：
-
-- 步骤列表
-- 录制助手
-- Agent/确认流
-- 录制状态同步
-- 诊断与定位信息
-- 测试验证与失败修复
-
-结果就是右侧录制台和 `/rpa/recorder`、`/rpa/test` 成为两套能力完全不对齐的系统。
-
-### 3. 生命周期缺失
-
-当前实现只打通了“创建 run -> 录一段 -> 回灌摘要”的局部链路，没有形成类似 `skill-creator` / `tool-creator` 的完整闭环：
-
-- 生成
-- 测试验证
-- 失败修复
-- 用户确认发布
-- 保存到正式技能/工具库
-
-这意味着它还不是一个“产品级录制能力”，只是一个录制原型。
-
-## 最终方案概述
-
-采用“三层统一”架构：
-
-1. 入口层：由新的内置技能 `recording-creator` 完全接管主对话中的录制诉求。
-2. 编排层：由 `recording` 域负责 run / segment / artifact / lifecycle 状态机。
-3. 交互层：由共享录制内核同时支撑聊天右侧录制台、录制页、测试页。
-
-这三层的边界如下：
-
-- `recording-creator` 负责理解意图、驱动录制流程、决定何时进入录制/测试/发布阶段。
-- `recording orchestrator` 负责结构化状态与跨段产物。
-- `rpa` / `mcp` adapter 负责具体录制执行。
-- 前端共享录制内核负责所有真实录制交互，不再由独立页面和聊天面板各自实现。
-
-## 一、入口改成内置技能
-
-### 核心原则
-
-彻底删除 `sessions.py` 中任何“识别到录制意图后直接短路聊天”的逻辑。
-
-主对话中的录制能力必须像 `skill-creator` / `tool-creator` 一样工作：
-
-- agent 在主对话中命中 `recording-creator`
-- 读取技能说明
-- 按技能工作流决定创建录制 run、推进 segment、测试、发布
-
-### recording-creator 的定位
-
-`recording-creator` 是一个新的内置技能，职责不是“只识别一句话”，而是完整管理会话内录制生命周期。
-
-它的职责包括：
-
-- 识别用户是在要求录制技能、录制工具、录制 MCP 工作流，还是继续已有录制 run
-- 创建或恢复 `Recording Run`
-- 决定当前段是交互录制段还是非交互处理段
-- 将上一段 artifact 显式绑定到下一段
-- 在用户准备发布时，切换到测试验证阶段
-- 测试通过后，引导进入保存确认与发布
-
-### 触发范围
-
-它必须覆盖的典型表达包括：
+主 agent 在识别到以下意图时读取 `recording-creator/SKILL.md`：
 
 - “我要录制个业务流程技能”
-- “帮我录一个下载流程”
 - “录制一个 MCP 工具”
-- “把这个网页操作录成技能”
-- “继续处理刚下载的文件”
-- “把这个录制流程发布成技能”
+- “再录一段”
+- “把上一段输出作为下一段输入”
+- “开始整体测试”
+- “准备发布”
 
-### 与 skill-creator / tool-creator 的关系
+已不再依赖聊天路由中的关键词短路逻辑。
 
-`recording-creator` 不是二者的替代品，而是上游入口。
+### 2. 生命周期工具层
 
-关系如下：
+`backend/deepagent/tools.py` 提供录制生命周期工具：
 
-- 用户要通过对话录一个可复用流程时，先进入 `recording-creator`
-- 当录制产物已经准备发布成 skill 时，发布阶段复用 `skill-creator` 的保存要求与出口
-- 当录制产物本质上是 MCP / 工具能力时，发布阶段复用 `tool-creator` 的保存要求与出口
+- `inspect_recording_runs`
+- `start_recording_run`
+- `continue_recording_run`
+- `add_script_recording_segment`
+- `bind_recording_segment_io`
+- `begin_recording_test`
+- `prepare_recording_publish`
 
-也就是：
+边界约束：
 
-- `recording-creator` 负责“录”
-- `skill-creator` / `tool-creator` 负责“收口发布标准”
+- 技能负责判断何时调用这些工具。
+- 工具负责执行，不再自行重新判断“这是不是录制意图”。
 
-## 二、统一录制生命周期
+### 3. 状态编排层
 
-录制能力必须拥有和 `skill-creator` / `tool-creator` 同等级的完整生命周期。
+`backend/recording/*` 维护 `RecordingRun`、`RecordingSegment`、`RecordingArtifact`。
 
-### 生命周期阶段
+当前运行状态包含：
 
-定义如下状态链：
+- `draft`
+- `recording`
+- `waiting_user`
+- `processing_artifacts`
+- `ready_for_next_segment`
+- `testing`
+- `needs_repair`
+- `ready_to_publish`
+- `saved`
+- `failed`
 
-1. `draft`
-2. `recording`
-3. `processing_artifacts`
-4. `ready_for_next_segment`
-5. `testing`
-6. `needs_repair`
-7. `ready_to_publish`
-8. `saved`
-9. `failed`
+### 4. 发布层
 
-### 1. 生成阶段
+发布前会把 recording run 转换为 workflow 结构，再生成：
 
-生成阶段负责：
+- `workflow.json`
+- `params.json`
+- `SKILL.md`
+- `skill.py`
+- `segments/*`
 
-- 创建 `Recording Run`
-- 创建第一个 `Segment`
-- 打开录制工作台
-- 捕获步骤、信号、产物
-- 在段落结束后生成结构化摘要
+其中 `params.json` 与普通 RPA 技能录制保持一致，是技能页面默认参数、参数说明、敏感参数 `credential_id` 以及应用内执行时自动注入凭证的唯一事实来源。workflow runner 也直接读取 `params.json` 的 `original_value` 作为默认值，再用调用时传入的参数覆盖。当前实现不再生成 `params.schema.json` 或空的 `credentials.example.json`。
 
-### 2. 测试验证阶段
+最终仍通过已有保存确认机制进入正式技能库或工具库。
 
-测试验证阶段必须成为最终方案的一部分，而不是后补。
+## 交互设计
 
-测试验证需复用现有 `/rpa/test` 核心能力，至少包括：
+### 录制交互
 
-- 生成可测试脚本
-- 在测试环境执行
-- 展示执行结果
-- 显示失败步骤
-- 给出失败候选定位器
-- 支持切换候选定位器后重试
+当前实现不再使用“聊天右侧固定大面板”作为最终交互形态，而是：
 
-也就是当前 `TestPage` 里已有的“失败步骤 + 候选定位器 + 重试”逻辑要被纳入共享内核。
+- 在主对话中触发录制
+- 自动打开大弹窗录制页
+- 在弹窗内完成录制、配置与测试
+- 完成后返回主对话
 
-### 3. 修复阶段
+这样可以直接复用 `/rpa/recorder`、`/rpa/configure`、`/rpa/test`、`/rpa/workflow-test` 的共享录制核心，而不是再维护一套缩水版 workbench。
 
-当测试失败或录制步骤失效时，进入 `needs_repair`。
+### 聊天区展示
 
-第一期修复能力只做轻量版本：
+录制完成后，segment 不再统一堆在输入框上方，而是以 `recording_segment` 消息内联插入聊天流：
 
-- 查看当前定位器
-- 查看候选定位器
-- 切换候选定位器
-- 立即重新校验
-- 单步重放
-- 重录本步
-- 重录本段
+- 位置和触发该段录制的用户消息相邻
+- 默认折叠
+- 展开后可查看步骤、参数、输入、输出、候选定位器
 
-不做：
+历史会话恢复时只恢复状态和卡片，不会再次自动弹出录制/测试/发布弹窗。
 
-- 手工自由编写定位器
-- 页面重新选点
-- 任意改步骤语义
+### 测试交互
 
-### 4. 发布阶段
+测试分两类：
 
-发布阶段必须对齐现有主对话里的保存机制。
+- 单段测试：进入 `/rpa/test`
+- 多段整体测试：进入 `/rpa/workflow-test`
 
-录制 run 在进入 `ready_to_publish` 后：
+二者都通过录制模态承载，不再跳到完全脱离聊天上下文的新流程页。
 
-- 先把产物整理到 session workspace/staging
-- 如果目标是 skill，则走 `propose_skill_save`
-- 如果目标是 tool / MCP tool，则走 `propose_tool_save`
-- 前端继续使用现有保存确认条
-- 最终落到现有 `save_skill_from_session` / `save_tool_from_session`
+### 发布交互
 
-这保证录制能力不是另造一套发布机制，而是复用成熟的保存出口。
+当 run 进入可发布状态后：
 
-## 三、统一数据模型
+- 前端展示发布草稿弹窗
+- 用户确认名称、描述、输入输出、纳入的 segments
+- 确认后继续走 `propose_skill_save` / `propose_tool_save`
+
+不会要求用户通过固定话术再次输入“开始测试”“准备发布”才能继续。
+
+## 数据模型
 
 ### Recording Run
 
@@ -224,7 +135,7 @@
   "session_id": "chat_session_id",
   "user_id": "user_id",
   "type": "rpa | mcp | mixed",
-  "status": "draft | recording | processing_artifacts | ready_for_next_segment | testing | needs_repair | ready_to_publish | saved | failed",
+  "status": "draft | recording | waiting_user | processing_artifacts | ready_for_next_segment | testing | needs_repair | ready_to_publish | saved | failed",
   "active_segment_id": "seg_xxx",
   "segments": [],
   "artifact_index": [],
@@ -232,14 +143,21 @@
 }
 ```
 
-### Segment
+### Recording Segment
+
+录制域当前支持：
+
+- `rpa`
+- `mcp`
+- `script`
+- `mixed`
 
 ```json
 {
   "id": "seg_xxx",
   "run_id": "run_xxx",
-  "kind": "rpa | mcp | chat_process | mixed",
-  "intent": "下载论文 PDF",
+  "kind": "rpa | mcp | script | mixed",
+  "intent": "下载报表",
   "status": "recording | completed | failed | blocked",
   "imports": {},
   "exports": {},
@@ -248,20 +166,6 @@
 }
 ```
 
-### Step
-
-分为：
-
-- `ui_step`
-- `tool_step`
-
-并保留两层表示：
-
-- 底层原始执行信息
-- 上层语义步骤
-
-语义步骤用于摘要、编排、测试、发布，不直接依赖原始事件流。
-
 ### Artifact
 
 ```json
@@ -269,309 +173,69 @@
   "id": "artifact_xxx",
   "run_id": "run_xxx",
   "segment_id": "seg_xxx",
-  "name": "downloaded_pdf",
+  "name": "downloaded_file",
   "type": "file | text | json | table",
-  "path": "/workspace/xxx/paper.pdf",
-  "value": null,
-  "labels": ["download", "pdf"]
+  "path": "/workspace/xxx/report.xlsx",
+  "value": null
 }
 ```
 
-## 四、多段编排
+## 多段编排规则
 
-### 核心原则
+### 输入输出必须结构化
 
-下一段不能依赖模型记忆“刚才那个文件”，而要依赖显式 artifact 绑定。
+每个 segment 都应沉淀：
 
-### 规则
+- `inputs`
+- `outputs`
+- `artifacts`
 
-1. 每个 segment 必须定义输入、输出和产物。
-2. 每个 segment 结束后必须完成 artifact 注册。
-3. 下一段只能引用已注册 artifact。
-4. 若引用不唯一，必须回问。
-5. 若 artifact 丢失或失效，进入 `blocked`。
+跨段依赖不能只靠自然语言记忆，必须通过 `bind_recording_segment_io` 建立 `source_ref`。
 
-### 例子
+### 支持的典型场景
 
-第一段：
+- 第一段下载文件，第二段脚本转换文件
+- 第一段提取文本，第二段把文本作为搜索词
+- 第一段输出 JSON，第二段继续用 MCP 工具处理 JSON
 
-```json
-{
-  "intent": "下载财报 PDF",
-  "exports": {
-    "report_pdf": "{{artifacts.downloaded_pdf.path}}"
-  }
-}
-```
+### 当前不做
 
-第二段：
-
-```json
-{
-  "intent": "把刚下载的 PDF 转成 Markdown",
-  "imports": {
-    "input_pdf": "{{seg_1.exports.report_pdf}}"
-  }
-}
-```
-
-### 第一阶段支持的跨段输入
-
-- 单个文件
-- 单个文本
-- 单个 JSON
-
-暂不支持：
-
-- 多文件批量映射
 - 条件分支
 - 循环
-- 自由表达式编辑器
+- 可视化 DAG 画布
+- 任意拖拽重排
 
-## 五、共享录制内核
+## 修复与定位器编辑
 
-### 目标
+当前支持的轻量修复能力：
 
-聊天右侧录制台和录制页、测试页必须共用同一套录制核心。
+- 查看步骤和当前定位器
+- 查看候选定位器
+- 切换候选定位器
+- 立即重校验
 
-### 当前问题
+当前不支持：
 
-当前的 `RecordingWorkbench.vue` 是单独实现，能力远少于：
+- 完整 Playwright 手写编辑器
+- 页面重新选点生成任意新定位器
+- 通用流程图式编辑
 
-- `RecorderPage.vue`
-- `TestPage.vue`
+## 与 `skill-creator` / `tool-creator` 的关系
 
-这导致：
+三者职责分工如下：
 
-- 功能缺失
-- 显示效果差
-- 修复和测试能力断裂
-- 两套逻辑分叉
+- `recording-creator`：录制、编排、测试、修复、发布准备
+- `skill-creator`：普通技能创建与保存规范
+- `tool-creator`：普通工具创建与保存规范
 
-### 共享内核拆分方案
+录制能力不是替代后二者，而是在“录制型工作流”场景下作为上游入口，并在发布阶段复用它们的保存机制。
 
-从现有 `RecorderPage.vue` 与 `TestPage.vue` 抽出以下共享模块：
+## 已清理的旧方案
 
-- `useRecorderSession`
-- `useRecorderScreencast`
-- `useRecorderTabs`
-- `useRecorderSteps`
-- `useRecorderAssistant`
-- `useRecorderValidation`
-- `useRecorderTesting`
-- `RecorderWorkbenchShell.vue`
-- `RecorderSidebar.vue`
-- `RecorderCanvasStage.vue`
+以下方案不再是当前实现：
 
-### 页面与面板的关系
-
-- `/rpa/recorder` 使用完整页面壳 + 共享内核
-- `/rpa/test` 使用测试页面壳 + 共享内核
-- 聊天右侧录制台使用右侧面板壳 + 同一共享内核
-
-也就是：
-
-- 页面不同
-- 核心同一份
-
-### 聊天右侧录制台要求
-
-右侧录制台不是“预览面板”，而是嵌入式完整录制台。
-
-必须至少具备以下能力：
-
-- 步骤列表
-- 录制助手
-- 地址栏
-- tab 管理
-- 大尺寸画布
-- 状态提示
-- 风险确认
-- 本段结束
-- 测试入口
-- 修复入口
-
-### 布局要求
-
-- 左侧主对话：`35% ~ 45%`
-- 右侧录制台：`55% ~ 65%`
-- 最小宽度不低于 `880px`
-- 支持拖拽调宽
-
-录制中自动展开，段落结束自动收起。
-
-## 六、后端架构
-
-### 保留
-
-- `backend/rpa/*`
-- 现有 Playwright 录制与测试逻辑
-- 现有 skill/tool 保存接口
-
-### 新增
-
-```text
-backend/recording/
-├── models.py
-├── orchestrator.py
-├── artifact_registry.py
-├── lifecycle.py
-├── publishing.py
-├── testing.py
-├── step_repair_service.py
-└── adapters/
-    ├── rpa_adapter.py
-    └── mcp_adapter.py
-```
-
-### 职责
-
-#### orchestrator
-
-- 创建/恢复 run
-- 推进 segment
-- 产物注册
-- 生命周期切换
-
-#### testing
-
-- 从 run / segment 构建测试输入
-- 触发共享测试流程
-- 汇总失败点与修复状态
-
-#### publishing
-
-- 根据 `publish_target` 生成 staging 产物
-- 触发保存提示
-- 调用现有保存出口
-
-#### step_repair_service
-
-- 候选定位器切换
-- 重新校验
-- 单步重放
-
-## 七、API 设计
-
-录制 API 仍然保留在 `sessions` 下，但只负责“状态操作”，不再负责“意图识别”。
-
-### 核心接口
-
-- `POST /api/v1/sessions/{session_id}/recordings`
-  - 创建 run
-- `GET /api/v1/sessions/{session_id}/recordings/{run_id}`
-  - 获取 run
-- `POST /api/v1/sessions/{session_id}/recordings/{run_id}/segments`
-  - 创建 segment
-- `POST /api/v1/sessions/{session_id}/recordings/{run_id}/segments/{segment_id}/complete`
-  - 完成本段
-- `POST /api/v1/sessions/{session_id}/recordings/{run_id}/test`
-  - 进入测试验证
-- `POST /api/v1/sessions/{session_id}/recordings/{run_id}/repair`
-  - 执行修复动作
-- `POST /api/v1/sessions/{session_id}/recordings/{run_id}/publish`
-  - 生成 staging 并触发发布
-- `POST /api/v1/sessions/{session_id}/recordings/{run_id}/resume`
-  - 恢复 run
-
-### 删除项
-
-删除或停用：
-
-- `sessions.py` 中对录制意图的聊天短路逻辑
-
-## 八、发布机制
-
-### Skill 发布
-
-当目标是 skill：
-
-1. 录制 run 汇总为 skill 工作流描述与所需文件
-2. 生成到 session workspace/staging
-3. 触发 `propose_skill_save`
-4. 前端显示保存确认
-5. 调用 `save_skill_from_session`
-
-### Tool / MCP 发布
-
-当目标是 tool：
-
-1. 录制 run 汇总为工具封装或 MCP wrapper 描述
-2. 生成到 session workspace/staging
-3. 触发 `propose_tool_save`
-4. 前端显示保存确认
-5. 调用 `save_tool_from_session`
-
-### 与测试的关系
-
-发布前必须至少满足以下条件之一：
-
-- 测试通过
-- 用户明确接受未完全验证的发布
-
-默认要求通过测试后再发布。
-
-## 九、迁移策略
-
-### Step 1
-
-先把 spec、plan 和最终边界确定，不再继续扩展当前旁路方案。
-
-### Step 2
-
-拆 `RecorderPage` / `TestPage` 共享内核，但暂不改变页面行为。
-
-### Step 3
-
-让聊天右侧录制台切到共享内核，删除当前简化 `RecordingWorkbench` 实现。
-
-### Step 4
-
-删除 `sessions.py` 中录制短路，把入口完全切到 `recording-creator`。
-
-### Step 5
-
-接通测试验证与发布闭环。
-
-## 十、验收标准
-
-### 入口
-
-- 输入“我要录制个业务流程技能”时，不依赖 `sessions.py` 旁路，也能进入录制流程。
-- 输入“录制一个 MCP 工具”时，能进入 MCP 录制路径。
-
-### 录制体验
-
-- 聊天右侧录制台和 `/rpa/recorder` 共享同一套核心能力。
-- 右侧录制台必须具备步骤区、录制助手、地址栏、tab、状态与确认流。
-- 不再出现当前这种“只有大画布”的缩水版工作台。
-
-### 多段处理
-
-- 第一段下载文件后，第二段可以在主对话中显式引用该文件继续处理。
-
-### 测试验证
-
-- 录制结果可以进入测试验证。
-- 测试失败时可以定位到失败步骤并切换候选定位器重试。
-
-### 发布
-
-- 测试通过后，可走现有 `propose_skill_save` / `propose_tool_save` 发布。
-- 最终成功保存到技能库或工具库。
-
-## 结论
-
-最终实现不再接受以下过渡方案继续扩展：
-
-- `sessions.py` 正则/关键词旁路
-- 独立简化版 `RecordingWorkbench`
-- 录制页和聊天页两套分叉逻辑
-
-必须一次性收束为：
-
-- 技能化入口
-- 共享录制内核
-- 完整生成/测试/修复/发布闭环
-
-只有这样，这项能力才真正和 `skill-creator` / `tool-creator` 处于同一产品层级。
+- `sessions.py` 里的录制关键词旁路
+- 聊天页自研缩水版 `RecordingWorkbench`
+- 录制完成后把所有 segment 固定堆在输入框上方
+- 录制后要求用户通过固定文案回复才能继续测试/发布
+- 用 run id 或第一个 segment 名直接生成技能名称并立即落库

@@ -110,6 +110,41 @@ describe('createRecordingRunStore', () => {
     expect(store.summaries.value.map((summary) => summary.segment_id)).toEqual(['seg-1', 'seg-2'])
   })
 
+  it('reopens the recorder modal when continuing with a second interactive segment', () => {
+    const store = createRecordingRunStore('chat-1')
+
+    store.onRunStarted({
+      run: { id: 'run-1', status: 'recording', type: 'rpa' },
+      segment: { id: 'seg-1', status: 'recording', kind: 'rpa', intent: 'first' },
+      open_workbench: true,
+    })
+    store.onSegmentCompleted({
+      segment: { id: 'seg-1', status: 'completed' },
+      summary: { segment_id: 'seg-1', intent: 'first', artifacts: [] },
+    })
+
+    expect(store.recorderModalOpen.value).toBe(false)
+
+    store.onRunStarted({
+      run: { id: 'run-1', status: 'recording', type: 'rpa' },
+      segment: { id: 'seg-2', status: 'recording', kind: 'rpa', intent: 'second' },
+      open_workbench: true,
+    })
+
+    expect(store.actionPrompt.value).toBeNull()
+    expect(store.activeSegment.value?.id).toBe('seg-2')
+    expect(store.recorderModalOpen.value).toBe(true)
+    expect(store.recorderModalRoute.value).toMatchObject({
+      path: '/rpa/recorder',
+      query: {
+        chatSessionId: 'chat-1',
+        runId: 'run-1',
+        segmentId: 'seg-2',
+        embedded: '1',
+      },
+    })
+  })
+
   it('stores publish draft from recording publish prepared event', () => {
     const store = createRecordingRunStore('chat-1')
 
@@ -139,6 +174,67 @@ describe('createRecordingRunStore', () => {
     expect(store.publishDraft.value?.skill_name).toBe('download_and_convert_report')
   })
 
+  it('does not reopen publish draft or action prompt while restoring recording history', () => {
+    const store = createRecordingRunStore('chat-1')
+
+    store.onRunStarted({
+      run: { id: 'run-1', status: 'recording', type: 'rpa' },
+      segment: { id: 'seg-1', status: 'recording', kind: 'rpa', intent: 'first' },
+      open_workbench: true,
+    }, { interactive: false })
+
+    expect(store.recorderModalOpen.value).toBe(false)
+
+    store.onSegmentCompleted({
+      segment: { id: 'seg-1', status: 'completed' },
+      summary: { segment_id: 'seg-1', intent: 'first', artifacts: [] },
+    }, { interactive: false })
+
+    expect(store.actionPrompt.value).toBeNull()
+
+    store.onPublishPrepared({
+      run: { id: 'run-1', status: 'ready_to_publish', type: 'rpa' },
+      prompt_kind: 'skill',
+      staging_paths: [],
+      summary: {
+        draft: {
+          id: 'draft_run-1',
+          run_id: 'run-1',
+          publish_target: 'skill',
+          skill_name: 'download_and_convert_report',
+          display_title: 'download and convert report',
+          description: 'download and convert report',
+          trigger_examples: [],
+          inputs: [],
+          outputs: [],
+          credentials: [],
+          segments: [],
+          warnings: [],
+        },
+      },
+    }, { interactive: false })
+
+    expect(store.publishDraft.value).toBeNull()
+  })
+
+  it('does not reopen workflow test modal while restoring recording history', () => {
+    const store = createRecordingRunStore('chat-1')
+
+    store.onTestStarted({
+      run: { id: 'run-1', status: 'testing', type: 'mixed', testing: { status: 'running' } },
+      test_payload: {
+        mode: 'workflow',
+        segments: [
+          { segment_id: 'seg-1', kind: 'rpa', title: '下载报表', rpa_session_id: 'rpa-1' },
+          { segment_id: 'seg-2', kind: 'script', title: '转换报表' },
+        ],
+      },
+    }, { interactive: false })
+
+    expect(store.recorderModalOpen.value).toBe(false)
+    expect(store.recorderModalRoute.value).toBeNull()
+  })
+
   it('opens the embedded test route when recording testing starts from chat', () => {
     const store = createRecordingRunStore('chat-1')
 
@@ -166,6 +262,31 @@ describe('createRecordingRunStore', () => {
         chatSessionId: 'chat-1',
         runId: 'run-1',
         segmentId: 'seg-1',
+        embedded: '1',
+      },
+    })
+  })
+
+  it('opens the workflow test route when multi-segment recording testing starts from chat', () => {
+    const store = createRecordingRunStore('chat-1')
+
+    store.onTestStarted({
+      run: { id: 'run-1', status: 'testing', type: 'mixed', testing: { status: 'running' } },
+      test_payload: {
+        mode: 'workflow',
+        segments: [
+          { segment_id: 'seg-1', kind: 'rpa', title: '下载报表', rpa_session_id: 'rpa-1' },
+          { segment_id: 'seg-2', kind: 'script', title: '转换报表' },
+        ],
+      },
+    })
+
+    expect(store.recorderModalOpen.value).toBe(true)
+    expect(store.recorderModalRoute.value).toMatchObject({
+      path: '/rpa/workflow-test',
+      query: {
+        chatSessionId: 'chat-1',
+        runId: 'run-1',
         embedded: '1',
       },
     })

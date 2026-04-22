@@ -50,7 +50,7 @@ class RecordingArtifact(BaseModel):
 class RecordingSegment(BaseModel):
     id: str
     run_id: str
-    kind: Literal["rpa", "mcp", "chat_process", "mixed"]
+    kind: Literal["rpa", "mcp", "script", "mixed"]
     intent: str
     status: RecordingSegmentStatus = "draft"
     steps: list[dict[str, Any]] = Field(default_factory=list)

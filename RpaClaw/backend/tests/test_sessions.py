@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import unittest
 import tempfile
 import shutil
@@ -8,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any, Optional, List
 from unittest.mock import AsyncMock, MagicMock
 
+from backend.recording.models import RecordingArtifact
 from backend.recording.orchestrator import RecordingOrchestrator
 
 # Load sessions module directly to avoid import issues
@@ -21,6 +23,12 @@ SESSIONS_MODULE.ApiResponse.model_rebuild(_types_namespace={"Any": Any})
 SESSIONS_MODULE.ChatRequest.model_rebuild(_types_namespace={"Optional": Optional, "List": List})
 SESSIONS_MODULE.CompleteRecordingSegmentRequest.model_rebuild(
     _types_namespace={"Optional": Optional, "List": List, "Dict": dict, "Any": Any}
+)
+SESSIONS_MODULE.UpdateRecordingSegmentBindingsRequest.model_rebuild(
+    _types_namespace={"List": List, "Dict": dict, "Any": Any}
+)
+SESSIONS_MODULE.PromoteRecordingSegmentLocatorRequest.model_rebuild(
+    _types_namespace={"Optional": Optional}
 )
 
 
@@ -333,7 +341,12 @@ class TestSaveToolFromSession(unittest.IsolatedAsyncioTestCase):
 class TestRecordingRoutes(unittest.IsolatedAsyncioTestCase):
     async def test_create_recording_run_route(self):
         session = SimpleNamespace(user_id="u1")
-        request_model = SESSIONS_MODULE.CreateRecordingRunRequest(message="帮我录一个下载流程")
+        request_model = SESSIONS_MODULE.CreateRecordingRunRequest(
+            message="帮我录一个下载流程",
+            kind="mixed",
+            publish_target="skill",
+            requires_workbench=True,
+        )
         current_user = SimpleNamespace(id="u1")
 
         with (
@@ -359,6 +372,17 @@ class TestRecordingRoutes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data.data["run_id"], "run-1")
         self.assertEqual(data.data["segment_id"], "seg-1")
         self.assertTrue(data.data["open_workbench"])
+        orchestrator.create_run.assert_called_once_with(
+            session_id="session-1",
+            user_id="u1",
+            kind="mixed",
+        )
+        orchestrator.start_segment.assert_called_once_with(
+            orchestrator.create_run.return_value,
+            kind="mixed",
+            intent="帮我录一个下载流程",
+            requires_workbench=True,
+        )
 
     async def test_chat_with_session_does_not_short_circuit_recording_requests(self):
         events = []
@@ -443,10 +467,18 @@ class TestRecordingRoutes(unittest.IsolatedAsyncioTestCase):
                         {
                             "id": "step-1",
                             "step_index": 0,
-                            "action": "click",
-                            "description": "点击下载按钮",
+                            "action": "extract_text",
+                            "description": "提取项目名称",
+                            "result_key": "project_name",
                             "locator_candidates": [{"kind": "role", "selected": True}],
                             "validation": {"status": "ok"},
+                        },
+                        {
+                            "id": "step-2",
+                            "step_index": 1,
+                            "action": "fill",
+                            "description": "输入搜索词",
+                            "value": "paper",
                         }
                     ],
                     artifacts=[
@@ -475,8 +507,298 @@ class TestRecordingRoutes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data.data["summary"]["auth_config"]["credential_ids"], ["cred-1"])
         self.assertEqual(data.data["summary"]["description"], "下载 GitHub 趋势项目详情")
         self.assertEqual(data.data["summary"]["testing_status"], "passed")
+        self.assertEqual(data.data["summary"]["inputs"][0]["name"], "keyword")
+        self.assertEqual(data.data["summary"]["outputs"][0]["name"], "project_name")
         self.assertEqual(events[0]["event"], "recording_segment_completed")
         self.assertEqual(events[0]["data"]["summary"]["artifacts"][0]["name"], "downloaded_pdf")
+
+    async def test_complete_recording_segment_route_keeps_explicit_inputs_and_outputs(self):
+        events = []
+
+        async def _save():
+            return None
+
+        session = SimpleNamespace(
+            user_id="u1",
+            events=events,
+            save=_save,
+        )
+        current_user = SimpleNamespace(id="u1")
+        orchestrator = RecordingOrchestrator()
+        run = orchestrator.create_run(session_id="session-1", user_id="u1", kind="rpa")
+        segment = orchestrator.start_segment(run, kind="rpa", intent="下载 PDF", requires_workbench=True)
+
+        with (
+            unittest.mock.patch.object(
+                SESSIONS_MODULE,
+                "async_get_science_session",
+                AsyncMock(return_value=session),
+            ),
+            unittest.mock.patch.object(
+                SESSIONS_MODULE,
+                "recording_orchestrator",
+                orchestrator,
+            ),
+        ):
+            data = await SESSIONS_MODULE.complete_recording_segment(
+                "session-1",
+                run.id,
+                segment.id,
+                SESSIONS_MODULE.CompleteRecordingSegmentRequest(
+                    steps=[],
+                    artifacts=[],
+                    params={"keyword": {"original_value": "paper", "sensitive": False}},
+                    inputs=[{"name": "query", "type": "string", "source": "segment_output", "source_ref": "seg-1.outputs.project_name"}],
+                    outputs=[{"name": "project_name", "type": "string"}],
+                ),
+                current_user=current_user,
+            )
+
+        self.assertEqual(data.data["summary"]["inputs"][0]["name"], "query")
+        self.assertEqual(data.data["summary"]["inputs"][0]["source_ref"], "seg-1.outputs.project_name")
+        self.assertEqual(data.data["summary"]["outputs"][0]["name"], "project_name")
+
+    async def test_promote_recording_segment_step_locator_persists_selected_candidate(self):
+        async def _save():
+            return None
+
+        session = SimpleNamespace(user_id="u1", events=[], save=_save)
+        current_user = SimpleNamespace(id="u1")
+        orchestrator = RecordingOrchestrator()
+        run = orchestrator.create_run(session_id="session-1", user_id="u1", kind="rpa")
+        segment = orchestrator.start_segment(run, kind="rpa", intent="点击保存", requires_workbench=True)
+        segment.exports["rpa_session_id"] = "rpa-session-1"
+        segment.steps = [
+            {
+                "id": "step-1",
+                "action": "click",
+                "target": '{"method":"role","role":"button","name":"Save"}',
+                "locator_candidates": [
+                    {
+                        "kind": "role",
+                        "selected": True,
+                        "locator": {"method": "role", "role": "button", "name": "Save"},
+                        "status": "fallback",
+                    },
+                    {
+                        "kind": "css",
+                        "selected": False,
+                        "locator": {"method": "css", "value": "button.save"},
+                        "status": "ok",
+                    },
+                ],
+                "validation": {"status": "fallback", "selected_candidate_index": 0},
+            }
+        ]
+        orchestrator.complete_segment(run, segment)
+
+        with (
+            unittest.mock.patch.object(
+                SESSIONS_MODULE,
+                "async_get_science_session",
+                AsyncMock(return_value=session),
+            ),
+            unittest.mock.patch.object(
+                SESSIONS_MODULE,
+                "recording_orchestrator",
+                orchestrator,
+            ),
+        ):
+            data = await SESSIONS_MODULE.promote_recording_segment_step_locator(
+                "session-1",
+                run.id,
+                segment.id,
+                0,
+                SESSIONS_MODULE.PromoteRecordingSegmentLocatorRequest(candidate_index=1),
+                current_user=current_user,
+            )
+
+        updated_step = data.data["step"]
+        self.assertEqual(updated_step["step_index"], 0)
+        self.assertEqual(json.loads(updated_step["target"]), {"method": "css", "value": "button.save"})
+        self.assertFalse(updated_step["locator_candidates"][0]["selected"])
+        self.assertTrue(updated_step["locator_candidates"][1]["selected"])
+        self.assertEqual(segment.steps[0]["target"], updated_step["target"])
+        self.assertEqual(data.data["summary"]["steps"][0]["step_index"], 0)
+        self.assertEqual(data.data["summary"]["rpa_session_id"], "rpa-session-1")
+        self.assertEqual(session.events[0]["event"], "recording_segment_updated")
+
+    async def test_get_recording_segment_mapping_sources_route_returns_historical_pool(self):
+        async def _save():
+            return None
+
+        session = SimpleNamespace(user_id="u1", events=[], save=_save)
+        current_user = SimpleNamespace(id="u1")
+        orchestrator = RecordingOrchestrator()
+        run = orchestrator.create_run(session_id="session-1", user_id="u1", kind="mixed")
+
+        first = orchestrator.start_segment(run, kind="rpa", intent="获取项目名称", requires_workbench=True)
+        first.steps = [
+            {
+                "id": "step-1",
+                "action": "extract_text",
+                "description": "提取项目名称",
+                "result_key": "project_name",
+            }
+        ]
+        first.exports["title"] = "获取项目名称"
+        orchestrator.complete_segment(run, first)
+
+        second = orchestrator.start_segment(run, kind="script", intent="转换文件", requires_workbench=False)
+        second.exports["outputs"] = [{"name": "normalized_csv", "type": "file"}]
+        second.artifacts.append(
+            RecordingArtifact(
+                id="artifact-1",
+                run_id=run.id,
+                segment_id=second.id,
+                name="normalized_csv",
+                type="file",
+                path="/tmp/normalized.csv",
+            )
+        )
+        orchestrator.complete_segment(run, second)
+
+        current = orchestrator.start_segment(run, kind="rpa", intent="搜索项目", requires_workbench=True)
+
+        with (
+            unittest.mock.patch.object(
+                SESSIONS_MODULE,
+                "async_get_science_session",
+                AsyncMock(return_value=session),
+            ),
+            unittest.mock.patch.object(
+                SESSIONS_MODULE,
+                "recording_orchestrator",
+                orchestrator,
+            ),
+        ):
+            data = await SESSIONS_MODULE.get_recording_segment_mapping_sources(
+                "session-1",
+                run.id,
+                current.id,
+                current_user=current_user,
+            )
+
+        self.assertEqual(data.data["segment_id"], current.id)
+        self.assertEqual(data.data["source_pool"]["segment_outputs"][0]["source_ref"], f"{first.id}.outputs.project_name")
+        self.assertEqual(data.data["source_pool"]["artifacts"][0]["source_ref"], "artifact:artifact-1")
+        self.assertEqual(data.data["summary"]["segment_id"], current.id)
+
+    async def test_update_recording_segment_bindings_route_appends_segment_updated_event(self):
+        events = []
+
+        async def _save():
+            return None
+
+        session = SimpleNamespace(user_id="u1", events=events, save=_save)
+        current_user = SimpleNamespace(id="u1")
+        orchestrator = RecordingOrchestrator()
+        run = orchestrator.create_run(session_id="session-1", user_id="u1", kind="mixed")
+
+        source = orchestrator.start_segment(run, kind="rpa", intent="提取标题", requires_workbench=True)
+        source.steps = [
+            {
+                "id": "step-1",
+                "action": "extract_text",
+                "description": "提取标题",
+                "result_key": "issue_title",
+            }
+        ]
+        orchestrator.complete_segment(run, source)
+
+        target = orchestrator.start_segment(run, kind="rpa", intent="搜索标题", requires_workbench=True)
+        target.steps = [
+            {
+                "id": "step-2",
+                "action": "fill",
+                "description": "输入搜索词",
+                "value": "test",
+            }
+        ]
+        target.exports["params"] = {}
+        orchestrator.complete_segment(run, target)
+
+        with (
+            unittest.mock.patch.object(
+                SESSIONS_MODULE,
+                "async_get_science_session",
+                AsyncMock(return_value=session),
+            ),
+            unittest.mock.patch.object(
+                SESSIONS_MODULE,
+                "recording_orchestrator",
+                orchestrator,
+            ),
+        ):
+            data = await SESSIONS_MODULE.update_recording_segment_bindings(
+                "session-1",
+                run.id,
+                target.id,
+                SESSIONS_MODULE.UpdateRecordingSegmentBindingsRequest(
+                    inputs=[
+                        {
+                            "name": "search",
+                            "type": "string",
+                            "required": True,
+                            "source": "segment_output",
+                            "source_ref": f"{source.id}.outputs.issue_title",
+                            "description": "来自上一段的标题",
+                        }
+                    ]
+                ),
+                current_user=current_user,
+            )
+
+        self.assertEqual(data.data["summary"]["inputs"][0]["source_ref"], f"{source.id}.outputs.issue_title")
+        self.assertEqual(data.data["segment"]["id"], target.id)
+        self.assertEqual(events[0]["event"], "recording_segment_updated")
+        self.assertEqual(events[0]["data"]["summary"]["segment_id"], target.id)
+
+    async def test_resolve_recording_segment_steps_prefers_raw_rpa_session_steps(self):
+        from backend.rpa.manager import RPASession, RPAStep, rpa_manager
+
+        rpa_manager.sessions["rpa-session-raw"] = RPASession(
+            id="rpa-session-raw",
+            user_id="u1",
+            sandbox_session_id="sandbox-1",
+            steps=[
+                RPAStep(
+                    id="raw-step-1",
+                    action="navigate",
+                    target="",
+                    value="",
+                    url="https://github.com/trending",
+                    description="导航到 https://github.com/trending",
+                ),
+                RPAStep(
+                    id="raw-step-2",
+                    action="fill",
+                    target='{"method":"role","role":"textbox","name":"搜索……"}',
+                    value="test",
+                    url="https://www.runoob.com",
+                    description='输入 "test" 到 textbox("搜索……")',
+                ),
+            ],
+        )
+        try:
+            resolved = await SESSIONS_MODULE._resolve_recording_segment_steps(
+                SESSIONS_MODULE.CompleteRecordingSegmentRequest(
+                    rpa_session_id="rpa-session-raw",
+                    steps=[
+                        {
+                            "id": "lossy-step-1",
+                            "action": "navigate",
+                            "description": "导航到 https://github.com/trending",
+                        }
+                    ],
+                    artifacts=[],
+                )
+            )
+        finally:
+            rpa_manager.sessions.pop("rpa-session-raw", None)
+
+        self.assertEqual(resolved[0]["url"], "https://github.com/trending")
+        self.assertEqual(resolved[1]["value"], "test")
 
     async def test_create_script_segment_route_appends_completion_event(self):
         events = []
@@ -519,7 +841,7 @@ class TestRecordingRoutes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data.data["summary"]["title"], "转换报表")
         self.assertEqual(data.data["summary"]["inputs"][0]["name"], "source_file")
         self.assertEqual(events[0]["event"], "recording_segment_completed")
-        self.assertEqual(run.segments[0].kind, "chat_process")
+        self.assertEqual(run.segments[0].kind, "script")
 
     async def test_begin_recording_test_route_sets_testing_status(self):
         async def _save():
@@ -558,6 +880,141 @@ class TestRecordingRoutes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data.data["test_payload"]["run_id"], run.id)
         self.assertEqual(data.data["test_payload"]["rpa_session_id"], "rpa-1")
         self.assertEqual(data.data["test_payload"]["title"], "下载 PDF")
+
+    async def test_recording_test_route_can_restart_after_publish_is_prepared(self):
+        async def _save():
+            return None
+
+        session = SimpleNamespace(user_id="u1", events=[], save=_save)
+        current_user = SimpleNamespace(id="u1")
+        orchestrator = RecordingOrchestrator()
+        run = orchestrator.create_run(session_id="session-1", user_id="u1", kind="rpa")
+        segment = orchestrator.start_segment(run, kind="rpa", intent="download PDF", requires_workbench=True)
+        segment.exports["rpa_session_id"] = "rpa-1"
+        orchestrator.complete_segment(run, segment)
+        orchestrator.mark_ready_to_publish(run, "skill")
+
+        with (
+            unittest.mock.patch.object(
+                SESSIONS_MODULE,
+                "async_get_science_session",
+                AsyncMock(return_value=session),
+            ),
+            unittest.mock.patch.object(
+                SESSIONS_MODULE,
+                "recording_orchestrator",
+                orchestrator,
+            ),
+        ):
+            data = await SESSIONS_MODULE.test_recording_run(
+                "session-1",
+                run.id,
+                current_user=current_user,
+            )
+
+        self.assertEqual(data.data["run"]["status"], "testing")
+        self.assertEqual(data.data["run"]["testing"]["status"], "running")
+
+    async def test_begin_recording_test_route_executes_multi_segment_workflow(self):
+        async def _save():
+            return None
+
+        session = SimpleNamespace(user_id="u1", events=[], save=_save)
+        current_user = SimpleNamespace(id="u1")
+        orchestrator = RecordingOrchestrator()
+        run = orchestrator.create_run(session_id="session-1", user_id="u1", kind="mixed")
+        first = orchestrator.start_segment(run, kind="rpa", intent="get project", requires_workbench=True)
+        first.exports["testing_status"] = "passed"
+        orchestrator.complete_segment(run, first)
+        second = orchestrator.start_segment(run, kind="rpa", intent="search project", requires_workbench=True)
+        second.exports["testing_status"] = "passed"
+        orchestrator.complete_segment(run, second)
+        execution = {
+            "skill_dir": "/tmp/skill",
+            "workflow_path": "/tmp/skill/workflow.json",
+            "segments": [],
+            "result": {"success": True, "logs": ["workflow ok"], "result": {"outputs": {}}},
+        }
+
+        with (
+            unittest.mock.patch.object(
+                SESSIONS_MODULE,
+                "async_get_science_session",
+                AsyncMock(return_value=session),
+            ),
+            unittest.mock.patch.object(
+                SESSIONS_MODULE,
+                "recording_orchestrator",
+                orchestrator,
+            ),
+            unittest.mock.patch.object(
+                SESSIONS_MODULE.recording_testing,
+                "execute_recording_workflow_test",
+                AsyncMock(return_value=execution),
+            ) as execute_test,
+        ):
+            data = await SESSIONS_MODULE.test_recording_run(
+                "session-1",
+                run.id,
+                current_user=current_user,
+            )
+
+        execute_test.assert_awaited_once()
+        self.assertEqual(data.data["test_payload"]["mode"], "workflow")
+        self.assertEqual(data.data["test_payload"]["execution"]["result"]["logs"], ["workflow ok"])
+        self.assertTrue(session.events[0]["data"]["test_payload"]["execution"]["result"]["success"])
+
+    async def test_execute_workflow_test_route_returns_segments_and_result(self):
+        async def _save():
+            return None
+
+        session = SimpleNamespace(user_id="u1", events=[], save=_save)
+        current_user = SimpleNamespace(id="u1")
+        orchestrator = RecordingOrchestrator()
+        run = orchestrator.create_run(session_id="session-1", user_id="u1", kind="mixed")
+        first = orchestrator.start_segment(run, kind="rpa", intent="download pdf", requires_workbench=True)
+        first.exports["rpa_session_id"] = "rpa-1"
+        first.exports["title"] = "下载 PDF"
+        first.exports["description"] = "下载并检查 PDF 文件"
+        first.exports["testing_status"] = "passed"
+        orchestrator.complete_segment(run, first)
+        second = orchestrator.start_segment(run, kind="script", intent="parse pdf", requires_workbench=False)
+        second.exports["title"] = "解析 PDF"
+        second.exports["description"] = "解析下载文件"
+        second.exports["script"] = "def run(context):\n    return {'parsed': True}\n"
+        second.exports["entry"] = "segments/segment_2_script.py"
+        second.exports["testing_status"] = "passed"
+        orchestrator.complete_segment(run, second)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with (
+                unittest.mock.patch.object(
+                    SESSIONS_MODULE,
+                    "async_get_science_session",
+                    AsyncMock(return_value=session),
+                ),
+                unittest.mock.patch.object(
+                    SESSIONS_MODULE,
+                    "recording_orchestrator",
+                    orchestrator,
+                ),
+                unittest.mock.patch.object(SESSIONS_MODULE, "_WORKSPACE_DIR", tmp_dir),
+                unittest.mock.patch.object(
+                    SESSIONS_MODULE.recording_testing,
+                    "execute_workflow_test",
+                    AsyncMock(return_value={"success": True, "logs": ["ok"], "result": {"outputs": {"seg-1": {}}}}),
+                ),
+            ):
+                data = await SESSIONS_MODULE.execute_recording_workflow_test(
+                    "session-1",
+                    run.id,
+                    current_user=current_user,
+                )
+
+        self.assertEqual(data.data["run"]["id"], run.id)
+        self.assertEqual(len(data.data["segments"]), 2)
+        self.assertTrue(data.data["result"]["success"])
+        self.assertEqual(data.data["result"]["logs"], ["ok"])
 
     async def test_publish_recording_run_returns_prompt_kind(self):
         async def _save():

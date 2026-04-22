@@ -1,7 +1,8 @@
 import type { FileInfo } from '../api/file';
 import type { ToolMetaData, StatisticsData, RoundFileInfo } from './event';
+import type { RecordingSegmentSummary } from './recording';
 
-export type MessageType = "user" | "assistant" | "tool" | "step" | "attachments" | "thinking";
+export type MessageType = "user" | "assistant" | "tool" | "step" | "attachments" | "thinking" | "recording_segment";
 
 export interface Message {
   type: MessageType;
@@ -47,4 +48,8 @@ export interface AttachmentsContent extends BaseContent {
 
 export interface ThinkingContent extends BaseContent {
   content: string;
+}
+
+export interface RecordingSegmentContent extends BaseContent {
+  summary: RecordingSegmentSummary;
 }

@@ -144,9 +144,9 @@ class StepExecutionError(Exception):
         prev_action = None
         # Add initial navigation if first step isn't a navigate action
         if deduped and deduped[0].get("action") not in ("navigate", "goto"):
-            first_url = deduped[0].get("url", "")
+            first_url = self._step_url(deduped[0])
             if first_url:
-                lines.append(f'    await current_page.goto("{first_url}")')
+                lines.append(f'    await current_page.goto("{self._escape(first_url)}")')
                 lines.append('    await current_page.wait_for_load_state("domcontentloaded")')
                 lines.append("")
                 prev_url = first_url
@@ -155,7 +155,7 @@ class StepExecutionError(Exception):
             action = step.get("action", "")
             target = step.get("target", "")
             value = step.get("value", "")
-            url = step.get("url", "")
+            url = self._step_url(step)
             desc = step.get("description", "")
             frame_path = step.get("frame_path") or []
 
@@ -178,8 +178,13 @@ class StepExecutionError(Exception):
                 continue
 
             # Navigation
-            if action == "navigate" or (action == "goto" and url):
-                step_lines.append(f'    await current_page.goto("{url}")')
+            if action in {"navigate", "goto"}:
+                if not url:
+                    logger.warning("Skipping navigation step without URL: %s", step)
+                    prev_action = "navigate"
+                    lines.append("")
+                    continue
+                step_lines.append(f'    await current_page.goto("{self._escape(url)}")')
                 step_lines.append('    await current_page.wait_for_load_state("domcontentloaded")')
                 prev_url = url
                 prev_action = "navigate"
@@ -723,6 +728,41 @@ class StepExecutionError(Exception):
         import re
         s = re.sub(r'\s+', ' ', s).strip()
         return s.replace('\\', '\\\\').replace('"', '\\"')
+
+    @classmethod
+    def _step_url(cls, step: Dict[str, Any]) -> str:
+        """Return a usable URL from recorder variants.
+
+        Some recorder clients store the destination in `target` or `value`
+        instead of `url`; navigation generation must not emit goto("").
+        """
+        candidates = [
+            step.get("url"),
+            step.get("target"),
+            step.get("value"),
+        ]
+        for candidate in candidates:
+            normalized = cls._normalize_navigation_url(candidate)
+            if normalized:
+                return normalized
+        return ""
+
+    @staticmethod
+    def _normalize_navigation_url(raw_value: Any) -> str:
+        value = str(raw_value or "").strip()
+        if not value:
+            return ""
+        if value.startswith(("{", "[")):
+            return ""
+        value = value.strip('\'"')
+        if re.match(r"^(https?://|about:|file:|data:)", value, flags=re.IGNORECASE):
+            return value.rstrip(".,;，。；")
+        if value.lower().startswith("www."):
+            return f"https://{value.rstrip('.,;，。；')}"
+        if re.match(r"^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}([/:?#].*)?$", value):
+            return f"https://{value.rstrip('.,;，。；')}"
+
+        return ""
 
     def _maybe_parameterize(self, value: str, params: Dict[str, Any]) -> str:
         """Check if value should be a parameter."""

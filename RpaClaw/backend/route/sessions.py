@@ -53,11 +53,12 @@ from backend.models import get_model_config
 from backend.config import settings
 from backend.browser_preview import browser_preview_registry
 from backend.rpa.screencast import ScreencastService
-from backend.recording.intent import detect_recording_intent
 from backend.recording.models import RecordingArtifact
 from backend.recording.service import artifact_registry, recording_orchestrator
+from backend.recording.step_repair_service import StepRepairService
 from backend.recording import publishing as recording_publishing
 from backend.recording import testing as recording_testing
+from backend.rpa.manager import RPAStep
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -123,6 +124,9 @@ class ChatRequest(BaseModel):
 
 class CreateRecordingRunRequest(BaseModel):
     message: str = Field(..., description="Original user message used to start a recording run")
+    kind: str = Field(default="rpa", description="Recording kind: rpa, mcp, or mixed")
+    publish_target: str | None = Field(default=None, description="Optional publish target: skill or tool")
+    requires_workbench: bool = Field(default=True, description="Whether the first segment needs the recorder workbench")
 
 
 class CompleteRecordingSegmentRequest(BaseModel):
@@ -131,9 +135,20 @@ class CompleteRecordingSegmentRequest(BaseModel):
     artifacts: List[Dict[str, Any]] = Field(default_factory=list, description="Artifacts produced by this segment")
     params: Dict[str, Any] = Field(default_factory=dict, description="Parameter configuration captured for this segment")
     auth_config: Dict[str, Any] = Field(default_factory=dict, description="Credential/auth configuration for this segment")
+    inputs: List[Dict[str, Any]] = Field(default_factory=list, description="Optional explicit workflow inputs for this segment")
+    outputs: List[Dict[str, Any]] = Field(default_factory=list, description="Optional explicit workflow outputs for this segment")
     title: Optional[str] = Field(default=None, description="User-facing segment title")
     description: Optional[str] = Field(default=None, description="User-facing segment description")
     testing_status: Optional[str] = Field(default=None, description="Inline test status for this segment")
+
+
+class UpdateRecordingSegmentBindingsRequest(BaseModel):
+    inputs: List[Dict[str, Any]] = Field(default_factory=list, description="Updated workflow inputs and bindings for this segment")
+
+
+class PromoteRecordingSegmentLocatorRequest(BaseModel):
+    candidate_index: int = Field(..., ge=0, description="Locator candidate index to promote for the target step")
+    rpa_session_id: Optional[str] = Field(default=None, description="Optional backing RPA session ID to keep transient recorder state in sync")
 
 
 class PrepareRecordingPublishDraftRequest(BaseModel):
@@ -153,6 +168,22 @@ class CreateScriptSegmentRequest(BaseModel):
     params: dict = Field(default_factory=dict)
     inputs: list[dict] = Field(default_factory=list)
     outputs: list[dict] = Field(default_factory=list)
+
+
+async def _resolve_recording_segment_steps(body: CompleteRecordingSegmentRequest) -> List[Dict[str, Any]]:
+    """Prefer authoritative RPA session steps over iframe-posted summaries."""
+    if not body.rpa_session_id:
+        return body.steps
+    try:
+        from backend.rpa.manager import rpa_manager
+
+        rpa_session = await rpa_manager.get_session(body.rpa_session_id)
+    except Exception:
+        logger.warning("Failed to resolve RPA session steps for %s", body.rpa_session_id, exc_info=True)
+        return body.steps
+    if not rpa_session or not rpa_session.steps:
+        return body.steps
+    return [step.model_dump(mode="json") for step in rpa_session.steps]
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1914,27 +1945,27 @@ async def create_recording_run(
     except ScienceSessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    intent = detect_recording_intent(body.message)
-    if intent is None:
-        raise HTTPException(status_code=400, detail="No recording intent detected")
+    resolved_kind = body.kind if body.kind in {"rpa", "mcp", "mixed"} else "rpa"
 
     run = recording_orchestrator.create_run(
         session_id=session_id,
         user_id=str(current_user.id),
-        kind=intent.kind,
+        kind=resolved_kind,
     )
-    run.save_intent = intent.save_intent
+    if body.publish_target in {"skill", "tool"}:
+        run.save_intent = body.publish_target
+        run.publish_target = body.publish_target
     segment = recording_orchestrator.start_segment(
         run,
-        kind=intent.kind,
+        kind=resolved_kind,
         intent=body.message,
-        requires_workbench=intent.requires_workbench,
+        requires_workbench=body.requires_workbench,
     )
 
     return ApiResponse(data={
         "run_id": getattr(run, "id", ""),
         "segment_id": getattr(segment, "id", ""),
-        "open_workbench": intent.requires_workbench,
+        "open_workbench": body.requires_workbench,
     })
 
 
@@ -1965,13 +1996,17 @@ async def complete_recording_segment(
     if segment is None:
         raise HTTPException(status_code=404, detail="Recording segment not found")
 
-    segment.steps = body.steps
+    segment.steps = await _resolve_recording_segment_steps(body)
     if body.rpa_session_id:
         segment.exports["rpa_session_id"] = body.rpa_session_id
     if body.params:
         segment.exports["params"] = body.params
     if body.auth_config:
         segment.exports["auth_config"] = body.auth_config
+    if body.inputs:
+        segment.exports["inputs"] = body.inputs
+    if body.outputs:
+        segment.exports["outputs"] = body.outputs
     if body.title:
         segment.exports["title"] = body.title
     if body.description:
@@ -2015,6 +2050,178 @@ async def complete_recording_segment(
     })
 
 
+@router.get("/{session_id}/recordings/{run_id}/segments/{segment_id}/mapping-sources", response_model=ApiResponse)
+async def get_recording_segment_mapping_sources(
+    session_id: str,
+    run_id: str,
+    segment_id: str,
+    current_user: User = Depends(require_user),
+) -> ApiResponse:
+    try:
+        session = await async_get_science_session(session_id)
+        if session.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Access denied")
+    except ScienceSessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    try:
+        run = recording_orchestrator.get_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Recording run not found") from exc
+
+    if run.session_id != session_id or run.user_id != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    segment = next((item for item in run.segments if item.id == segment_id), None)
+    if segment is None:
+        raise HTTPException(status_code=404, detail="Recording segment not found")
+
+    return ApiResponse(data={
+        "run_id": run.id,
+        "segment_id": segment.id,
+        "summary": recording_orchestrator.build_segment_summary(segment),
+        "source_pool": recording_orchestrator.build_segment_mapping_sources(run, segment),
+    })
+
+
+@router.post("/{session_id}/recordings/{run_id}/segments/{segment_id}/steps/{step_index}/locator", response_model=ApiResponse)
+async def promote_recording_segment_step_locator(
+    session_id: str,
+    run_id: str,
+    segment_id: str,
+    step_index: int,
+    body: PromoteRecordingSegmentLocatorRequest,
+    current_user: User = Depends(require_user),
+) -> ApiResponse:
+    try:
+        session = await async_get_science_session(session_id)
+        if session.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Access denied")
+    except ScienceSessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    try:
+        run = recording_orchestrator.get_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Recording run not found") from exc
+
+    if run.session_id != session_id or run.user_id != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    segment = next((item for item in run.segments if item.id == segment_id), None)
+    if segment is None:
+        raise HTTPException(status_code=404, detail="Recording segment not found")
+
+    step_list_index: int | None = None
+    for index, step in enumerate(segment.steps):
+        if not isinstance(step, dict):
+            continue
+        raw_step_index = step.get("step_index", index)
+        try:
+            normalized_step_index = int(raw_step_index)
+        except (TypeError, ValueError):
+            normalized_step_index = index
+        if normalized_step_index == step_index:
+            step_list_index = index
+            break
+    if step_list_index is None:
+        raise HTTPException(status_code=400, detail="Invalid step index")
+
+    stored_step = dict(segment.steps[step_list_index])
+    rpa_session_id = body.rpa_session_id or segment.exports.get("rpa_session_id")
+    updated_step: RPAStep | None = None
+
+    if rpa_session_id:
+        try:
+            from backend.rpa.manager import rpa_manager
+
+            updated_step = await rpa_manager.select_step_locator_candidate(
+                str(rpa_session_id),
+                step_index,
+                body.candidate_index,
+            )
+        except Exception:
+            logger.debug("Falling back to stored segment locator promotion", exc_info=True)
+
+    if updated_step is None:
+        try:
+            updated_step = StepRepairService().select_locator_candidate(
+                RPAStep.model_validate(stored_step),
+                body.candidate_index,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    updated_step_data = updated_step.model_dump(mode="json")
+    updated_step_data["step_index"] = step_index
+    segment.steps[step_list_index] = updated_step_data
+    run.updated_at = datetime.now()
+
+    summary = recording_orchestrator.build_segment_summary(segment)
+    updated_data = {
+        "event_id": _new_event_id(),
+        "timestamp": _now_ts(),
+        "segment": _serialize_recording_obj(segment),
+        "summary": summary,
+    }
+    _append_session_event(session, _wrap_event("recording_segment_updated", updated_data))
+    await session.save()
+
+    return ApiResponse(data={
+        "run": _serialize_recording_obj(run),
+        "segment": _serialize_recording_obj(segment),
+        "summary": summary,
+        "step": updated_step_data,
+    })
+
+
+@router.put("/{session_id}/recordings/{run_id}/segments/{segment_id}/bindings", response_model=ApiResponse)
+async def update_recording_segment_bindings(
+    session_id: str,
+    run_id: str,
+    segment_id: str,
+    body: UpdateRecordingSegmentBindingsRequest,
+    current_user: User = Depends(require_user),
+) -> ApiResponse:
+    try:
+        session = await async_get_science_session(session_id)
+        if session.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Access denied")
+    except ScienceSessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    try:
+        run = recording_orchestrator.get_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Recording run not found") from exc
+
+    if run.session_id != session_id or run.user_id != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    segment = next((item for item in run.segments if item.id == segment_id), None)
+    if segment is None:
+        raise HTTPException(status_code=404, detail="Recording segment not found")
+
+    recording_orchestrator.update_segment_bindings(run, segment, inputs=body.inputs)
+    summary = recording_orchestrator.build_segment_summary(segment)
+
+    updated_data = {
+        "event_id": _new_event_id(),
+        "timestamp": _now_ts(),
+        "segment": _serialize_recording_obj(segment),
+        "summary": summary,
+    }
+    _append_session_event(session, _wrap_event("recording_segment_updated", updated_data))
+    await session.save()
+
+    return ApiResponse(data={
+        "run": _serialize_recording_obj(run),
+        "segment": _serialize_recording_obj(segment),
+        "summary": summary,
+        "source_pool": recording_orchestrator.build_segment_mapping_sources(run, segment),
+    })
+
+
 @router.post("/{session_id}/recordings/{run_id}/test", response_model=ApiResponse)
 async def test_recording_run(
     session_id: str,
@@ -2038,6 +2245,8 @@ async def test_recording_run(
 
     recording_orchestrator.begin_testing(run)
     test_payload = await recording_testing.build_test_payload(run)
+    if test_payload.get("mode") == "workflow":
+        test_payload["execution"] = await recording_testing.execute_recording_workflow_test(run, _Path(_WORKSPACE_DIR))
     event_data = {
         "event_id": _new_event_id(),
         "timestamp": _now_ts(),
@@ -2050,6 +2259,38 @@ async def test_recording_run(
     return ApiResponse(data={
         "run": _serialize_recording_obj(run),
         "test_payload": test_payload,
+    })
+
+
+@router.post("/{session_id}/recordings/{run_id}/workflow-test", response_model=ApiResponse)
+async def execute_recording_workflow_test(
+    session_id: str,
+    run_id: str,
+    current_user: User = Depends(require_user),
+) -> ApiResponse:
+    try:
+        session = await async_get_science_session(session_id)
+        if session.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Access denied")
+    except ScienceSessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    try:
+        run = recording_orchestrator.get_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Recording run not found") from exc
+
+    if run.session_id != session_id or run.user_id != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    execution = await recording_testing.execute_recording_workflow_test(run, _Path(_WORKSPACE_DIR))
+
+    return ApiResponse(data={
+        "run": _serialize_recording_obj(run),
+        "skill_dir": execution["skill_dir"],
+        "workflow_path": execution["workflow_path"],
+        "segments": execution["segments"],
+        "result": execution["result"],
     })
 
 
@@ -2077,7 +2318,7 @@ async def create_recording_script_segment(
 
     segment = recording_orchestrator.start_segment(
         run,
-        kind="chat_process",
+        kind="script",
         intent=body.purpose,
         requires_workbench=False,
     )

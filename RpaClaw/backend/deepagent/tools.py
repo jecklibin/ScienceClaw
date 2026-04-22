@@ -83,6 +83,38 @@ def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_di
         except json.JSONDecodeError as exc:
             raise ValueError(f"invalid json payload: {exc}") from exc
 
+    def _compact_run_payload(run):
+        return run.model_dump(
+            mode="json",
+            include={
+                "id",
+                "session_id",
+                "user_id",
+                "type",
+                "status",
+                "active_segment_id",
+                "save_intent",
+                "publish_target",
+                "testing",
+                "created_at",
+                "updated_at",
+            },
+        )
+
+    def _compact_segment_payload(segment):
+        return segment.model_dump(
+            mode="json",
+            include={
+                "id",
+                "run_id",
+                "kind",
+                "intent",
+                "status",
+                "started_at",
+                "ended_at",
+            },
+        )
+
     def _segment_by_id(run, segment_id: str):
         for segment in run.segments:
             if segment.id == segment_id:
@@ -101,11 +133,9 @@ def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_di
         Returns:
             JSON payload with recording_event=recording_run_started. The frontend opens the recorder workbench from it.
         """
-        from backend.recording.intent import detect_recording_intent
         from backend.recording.service import recording_orchestrator
 
-        intent = detect_recording_intent(message)
-        resolved_kind = kind if kind in {"rpa", "mcp", "mixed"} else (intent.kind if intent else "rpa")
+        resolved_kind = kind if kind in {"rpa", "mcp", "mixed"} else "rpa"
         run = recording_orchestrator.create_run(
             session_id=session_id,
             user_id=str(user_id),
@@ -114,8 +144,6 @@ def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_di
         if publish_target in {"skill", "tool"}:
             run.save_intent = publish_target
             run.publish_target = publish_target
-        elif intent and intent.save_intent:
-            run.save_intent = intent.save_intent
         segment = recording_orchestrator.start_segment(
             run,
             kind=resolved_kind,
@@ -125,8 +153,8 @@ def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_di
         return json.dumps(
             {
                 "recording_event": "recording_run_started",
-                "run": run.model_dump(mode="json"),
-                "segment": segment.model_dump(mode="json"),
+                "run": _compact_run_payload(run),
+                "segment": _compact_segment_payload(segment),
                 "open_workbench": True,
             },
             ensure_ascii=False,
@@ -183,8 +211,8 @@ def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_di
         return json.dumps(
             {
                 "recording_event": "recording_run_started",
-                "run": run.model_dump(mode="json"),
-                "segment": segment.model_dump(mode="json"),
+                "run": _compact_run_payload(run),
+                "segment": _compact_segment_payload(segment),
                 "open_workbench": requires_workbench,
             },
             ensure_ascii=False,
@@ -210,7 +238,7 @@ def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_di
         outputs = _parse_json_payload(outputs_json, [])
         segment = recording_orchestrator.start_segment(
             run,
-            kind="chat_process",
+            kind="script",
             intent=purpose or title or "脚本处理片段",
             requires_workbench=False,
         )
@@ -229,8 +257,8 @@ def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_di
         return json.dumps(
             {
                 "recording_event": "recording_segment_completed",
-                "run": run.model_dump(mode="json"),
-                "segment": segment.model_dump(mode="json"),
+                "run": _compact_run_payload(run),
+                "segment": _compact_segment_payload(segment),
                 "summary": summary,
             },
             ensure_ascii=False,
@@ -253,19 +281,11 @@ def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_di
         source_segment = _segment_by_id(run, source_segment_id)
         target_segment = _segment_by_id(run, target_segment_id)
 
-        source_outputs = list(source_segment.exports.get("outputs", []))
-        source_outputs = [item for item in source_outputs if item.get("name") != output_name]
-        source_outputs.append(
-            {
-                "name": output_name,
-                "type": output_type,
-                "description": f"{source_segment.intent} 的输出变量 {output_name}",
-            }
-        )
-        source_segment.exports["outputs"] = source_outputs
-
-        target_inputs = list(target_segment.exports.get("inputs", []))
-        target_inputs = [item for item in target_inputs if item.get("name") != input_name]
+        target_inputs = [
+            dict(item)
+            for item in target_segment.exports.get("inputs", [])
+            if isinstance(item, dict) and item.get("name") != input_name
+        ]
         target_inputs.append(
             {
                 "name": input_name,
@@ -276,13 +296,12 @@ def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_di
                 "description": f"来自片段 {source_segment_id} 的输出 {output_name}",
             }
         )
-        target_segment.exports["inputs"] = target_inputs
-        run.updated_at = source_segment.ended_at or target_segment.ended_at or run.updated_at
+        recording_orchestrator.update_segment_bindings(run, target_segment, inputs=target_inputs)
 
         return json.dumps(
             {
                 "recording_event": "recording_segment_updated",
-                "run": run.model_dump(mode="json"),
+                "run": _compact_run_payload(run),
                 "summaries": [
                     recording_orchestrator.build_segment_summary(source_segment),
                     recording_orchestrator.build_segment_summary(target_segment),
@@ -293,9 +312,9 @@ def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_di
 
     @tool
     def begin_recording_test(run_id: str = "") -> str:
-        """Move an existing recording run into testing state and return a test payload."""
+        """Move an existing recording run into testing state and execute workflow tests for multi-segment runs."""
         from backend.recording.service import recording_orchestrator
-        from backend.recording.testing import build_test_payload
+        from backend.recording.testing import build_test_payload, execute_recording_workflow_test
 
         try:
             run = _resolve_run(run_id)
@@ -303,10 +322,12 @@ def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_di
             return f"Error: {exc}"
         recording_orchestrator.begin_testing(run)
         payload = _run_async(build_test_payload(run))
+        if payload.get("mode") == "workflow":
+            payload["execution"] = _run_async(execute_recording_workflow_test(run, workspace_dir=workspace_dir))
         return json.dumps(
             {
                 "recording_event": "recording_test_started",
-                "run": run.model_dump(mode="json"),
+                "run": _compact_run_payload(run),
                 "test_payload": payload,
             },
             ensure_ascii=False,
@@ -328,7 +349,7 @@ def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_di
         return json.dumps(
             {
                 "recording_event": "recording_publish_prepared",
-                "run": run.model_dump(mode="json"),
+                "run": _compact_run_payload(run),
                 "prompt_kind": prepared.prompt_kind,
                 "staging_paths": prepared.staging_paths,
                 "summary": summary,

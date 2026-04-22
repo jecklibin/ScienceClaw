@@ -5,6 +5,14 @@ import re
 from pathlib import Path
 from typing import Any, Literal
 
+from backend.config import settings
+from backend.rpa.generator import (
+    PlaywrightGenerator,
+    RPA_NAVIGATION_TIMEOUT_MS,
+    RPA_PLAYWRIGHT_TIMEOUT_MS,
+)
+from backend.rpa.playwright_security import get_chromium_launch_kwargs, get_context_kwargs
+
 from .models import (
     CredentialRequirement,
     PublishInput,
@@ -15,7 +23,7 @@ from .models import (
     WorkflowRun,
     WorkflowSegment,
 )
-from .runner_template import WORKFLOW_RUNNER_TEMPLATE
+from .runner_template import render_workflow_runner
 
 
 def safe_skill_name(value: str, fallback: str) -> str:
@@ -40,6 +48,15 @@ def build_publish_draft(
                     segment_id=segment.id,
                 )
             )
+        for item in segment.inputs:
+            if item.source in {"segment_output", "artifact", "workflow_param"} and not item.source_ref:
+                warnings.append(
+                    PublishWarning(
+                        code="segment_input_unbound",
+                        message=f"片段「{segment.title}」的输入「{item.name}」尚未绑定来源。",
+                        segment_id=segment.id,
+                    )
+                )
 
     return SkillPublishDraft(
         id=f"draft_{run.id}",
@@ -79,16 +96,21 @@ def write_skill_artifacts(run: WorkflowRun, draft: SkillPublishDraft, base_dir: 
         json.dumps(workflow, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    (skill_dir / "params.schema.json").write_text(
-        json.dumps(_build_params_schema(draft), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    (skill_dir / "credentials.example.json").write_text(
-        json.dumps(_build_credentials_example(draft), ensure_ascii=False, indent=2),
+    (skill_dir / "params.json").write_text(
+        json.dumps(_build_params_config(run, draft), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     (skill_dir / "SKILL.md").write_text(_build_skill_md(draft, safe_name), encoding="utf-8")
-    (skill_dir / "skill.py").write_text(WORKFLOW_RUNNER_TEMPLATE, encoding="utf-8")
+    (skill_dir / "skill.py").write_text(
+        render_workflow_runner(
+            is_local=settings.storage_backend == "local",
+            launch_kwargs=repr(get_chromium_launch_kwargs(headless=False)),
+            context_kwargs=repr(get_context_kwargs()),
+            default_timeout_ms=RPA_PLAYWRIGHT_TIMEOUT_MS,
+            navigation_timeout_ms=RPA_NAVIGATION_TIMEOUT_MS,
+        ),
+        encoding="utf-8",
+    )
 
     for segment in run.ordered_segments():
         if segment.kind == "rpa":
@@ -142,13 +164,30 @@ def _collect_credentials(segments: list[WorkflowSegment]) -> list[CredentialRequ
     credentials: dict[str, CredentialRequirement] = {}
     for segment in segments:
         auth_config = segment.config.get("auth_config")
-        if not isinstance(auth_config, dict):
+        if isinstance(auth_config, dict):
+            for name in auth_config.get("credential_ids", []):
+                credentials[str(name)] = CredentialRequirement(
+                    name=str(name),
+                    type="browser_session",
+                    description=f"片段「{segment.title}」需要的浏览器登录态。",
+                )
+
+        segment_params = segment.config.get("params", {})
+        if not isinstance(segment_params, dict):
             continue
-        for name in auth_config.get("credential_ids", []):
-            credentials[str(name)] = CredentialRequirement(
-                name=str(name),
-                type="browser_session",
-                description=f"片段「{segment.title}」需要的浏览器登录态。",
+        for param_name, config in segment_params.items():
+            if not isinstance(config, dict):
+                continue
+            credential_id = config.get("credential_id")
+            if not credential_id:
+                continue
+            credentials.setdefault(
+                str(credential_id),
+                CredentialRequirement(
+                    name=str(param_name),
+                    type="secret",
+                    description=str(config.get("description") or f"片段「{segment.title}」需要的凭证参数。"),
+                ),
             )
     return list(credentials.values())
 
@@ -188,6 +227,18 @@ def _build_skill_md(draft: SkillPublishDraft, safe_name: str) -> str:
             "## 触发示例",
             "",
             *trigger_lines,
+            "",
+            "## 使用方式",
+            "",
+            "执行该技能时应进入技能目录并运行：",
+            "",
+            "```bash",
+            "python skill.py",
+            "```",
+            "",
+            "在应用内执行时，技能会复用同目录 `params.json` 中的默认值和已绑定凭证；用户显式传入的参数会覆盖这些默认配置。",
+            "",
+            "如需在命令行覆盖普通输入参数，请使用 `--参数名=参数值` 的形式传入。命令行直接运行不会自行解密凭证，敏感凭证应由应用执行链路注入，或在调试时手动传参。",
             "",
             "## 输入参数",
             "",
@@ -233,7 +284,7 @@ def _segment_to_workflow_json(segment: WorkflowSegment) -> dict[str, Any]:
         "outputs": [item.model_dump(mode="json") for item in segment.outputs],
     }
     if segment.kind == "rpa":
-        base["config_path"] = f"segments/{segment.id}_rpa.json"
+        base["entry"] = f"segments/{segment.id}_rpa.py"
     elif segment.kind == "script":
         base["entry"] = segment.config.get("entry") or f"segments/{segment.id}_script.py"
     else:
@@ -241,51 +292,75 @@ def _segment_to_workflow_json(segment: WorkflowSegment) -> dict[str, Any]:
     return base
 
 
-def _build_params_schema(draft: SkillPublishDraft) -> dict[str, Any]:
-    properties: dict[str, Any] = {}
-    required: list[str] = []
+def _build_params_config(run: WorkflowRun, draft: SkillPublishDraft) -> dict[str, Any]:
+    params: dict[str, dict[str, Any]] = {}
+    input_descriptions: dict[str, str] = {
+        item.name: item.description
+        for segment in run.ordered_segments()
+        for item in segment.inputs
+        if item.description
+    }
+    input_descriptions.update({
+        item.name: item.description
+        for item in draft.inputs
+        if item.description
+    })
+
+    for segment in run.ordered_segments():
+        segment_params = segment.config.get("params", {})
+        if not isinstance(segment_params, dict):
+            continue
+        for name, config in segment_params.items():
+            if not isinstance(name, str) or not name or not isinstance(config, dict):
+                continue
+            params[name] = _normalize_param_config(
+                name,
+                config,
+                description=input_descriptions.get(name, ""),
+            )
+
     for item in draft.inputs:
         if item.type == "secret":
             continue
-        json_type = "string" if item.type == "file" else item.type
-        properties[item.name] = {
-            "type": json_type,
-            "description": item.description,
-        }
-        if item.default is not None:
-            properties[item.name]["default"] = item.default
-        if item.required:
-            required.append(item.name)
-    return {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": properties,
-        "required": required,
-    }
+        params.setdefault(
+            item.name,
+            {
+                "type": "string" if item.type == "file" else item.type,
+                "description": item.description,
+                "original_value": item.default if item.default is not None else "",
+                "sensitive": False,
+                "required": item.required,
+            },
+        )
+
+    return params
 
 
-def _build_credentials_example(draft: SkillPublishDraft) -> dict[str, Any]:
-    return {
-        item.name: {
-            "type": item.type,
-            "description": item.description,
-        }
-        for item in draft.credentials
+def _normalize_param_config(name: str, config: dict[str, Any], *, description: str = "") -> dict[str, Any]:
+    sensitive = bool(config.get("sensitive"))
+    normalized: dict[str, Any] = {
+        "type": str(config.get("type") or "string"),
+        "description": str(config.get("description") or description or f"参数 {name}"),
+        "original_value": "{{credential}}" if sensitive else config.get("original_value", ""),
+        "sensitive": sensitive,
+        "required": bool(config.get("required", False)),
     }
+    credential_id = config.get("credential_id")
+    if credential_id:
+        normalized["credential_id"] = str(credential_id)
+    return normalized
 
 
 def _write_rpa_segment(segments_dir: Path, segment: WorkflowSegment) -> None:
-    payload = {
-        "id": segment.id,
-        "title": segment.title,
-        "purpose": segment.purpose,
-        "steps": segment.config.get("steps", []),
-        "browser": segment.config.get("browser", {}),
-    }
-    (segments_dir / f"{segment.id}_rpa.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    generator = PlaywrightGenerator()
+    script = generator.generate_script(
+        segment.config.get("steps", []),
+        params=segment.config.get("params", {}),
+        is_local=settings.storage_backend == "local",
+        test_mode=False,
     )
+    module_source = _convert_rpa_script_to_segment_module(script)
+    (segments_dir / f"{segment.id}_rpa.py").write_text(module_source, encoding="utf-8")
 
 
 def _write_script_segment(segments_dir: Path, segment: WorkflowSegment) -> None:
@@ -301,3 +376,34 @@ def _write_metadata_segment(segments_dir: Path, segment: WorkflowSegment) -> Non
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def _convert_rpa_script_to_segment_module(script: str) -> str:
+    marker = "async def execute_skill(page, **kwargs):"
+    if marker not in script:
+        raise ValueError("generated RPA script is missing execute_skill")
+
+    start = script.index(marker)
+    main_marker = "\n\nasync def main():"
+    end = script.find(main_marker, start)
+    if end == -1:
+        raise ValueError("generated RPA script is missing main() wrapper")
+
+    function_block = script[start:end].strip()
+    function_block = function_block.replace(
+        marker,
+        "async def execute_segment(page, workflow_context=None, **kwargs):",
+        1,
+    )
+
+    if "    return _results" not in function_block:
+        raise ValueError("generated RPA script is missing result return")
+
+    function_block = function_block.replace(
+        "    return _results",
+        "    if workflow_context is not None:\n"
+        "        workflow_context['current_page'] = current_page\n"
+        "    return _results",
+        1,
+    )
+    return function_block + "\n"
