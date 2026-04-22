@@ -3,7 +3,7 @@ from __future__ import annotations
 
 SNAPSHOT_V2_JS = r"""() => {
     const ACTIONABLE = 'a,button,input,textarea,select,[role=button],[role=link],[role=menuitem],[role=menuitemradio],[role=tab],[role=checkbox],[role=radio],[contenteditable=true]';
-    const CONTENT = 'h1,h2,h3,h4,h5,h6,th,td,dt,dd,li,p,label,[role=heading],[role=cell],[role=rowheader],[role=columnheader]';
+    const CONTENT = 'h1,h2,h3,h4,h5,h6,th,td,dt,dd,li,p,span,label,[data-field],[data-label],[data-value],[role=heading],[role=cell],[role=rowheader],[role=columnheader]';
     const recorder = globalThis.__rpaPlaywrightRecorder || null;
     const result = { actionable_nodes: [], content_nodes: [], containers: [] };
     const containerMap = new Map();
@@ -50,6 +50,14 @@ SNAPSHOT_V2_JS = r"""() => {
             width: Math.round(rect.width),
             height: Math.round(rect.height),
         };
+    }
+
+    function escapeCssAttributeValue(value) {
+        return String(value || '')
+            .replace(/\\/g, '\\\\')
+            .replace(/"/g, '\\"')
+            .replace(/\s+/g, ' ')
+            .trim();
     }
 
     function fallbackRole(el) {
@@ -99,6 +107,7 @@ SNAPSHOT_V2_JS = r"""() => {
             return '';
         const tag = el.tagName.toLowerCase();
         const role = el.getAttribute('role') || '';
+        const className = normalizeText(el.className || '', 120).toLowerCase();
         if (tag === 'table' || role === 'table' || role === 'grid')
             return 'table';
         if (tag === 'ul' || tag === 'ol' || role === 'list')
@@ -111,6 +120,22 @@ SNAPSHOT_V2_JS = r"""() => {
             return 'form_section';
         if (tag === 'article')
             return 'card_group';
+        if (/\bcard\b/.test(className))
+            return 'card';
+        if (/\bpanel\b/.test(className))
+            return 'panel';
+        if (/\bform\b/.test(className))
+            return 'form_section';
+        if (/\bdetail\b|\binfo\b|\bsummary\b|\bprofile\b/.test(className))
+            return 'detail_section';
+        if (el.hasAttribute('data-section') || el.hasAttribute('data-region'))
+            return 'section';
+        if (role === 'region')
+            return 'section';
+        if (el.querySelector('table,[role=table],[role=grid]'))
+            return 'detail_section';
+        if (el.querySelector('label,[data-field],[data-value],[data-label],dt,dd'))
+            return 'detail_section';
         return '';
     }
 
@@ -127,8 +152,60 @@ SNAPSHOT_V2_JS = r"""() => {
         return direct;
     }
 
+    function isMeaningfulBusinessContainer(el) {
+        if (!el)
+            return false;
+        const tag = el.tagName.toLowerCase();
+        const role = el.getAttribute('role') || '';
+        if (!['div', 'main', 'aside', 'nav', 'header', 'footer'].includes(tag) && !['region', 'group'].includes(role))
+            return false;
+
+        const className = normalizeText(el.className || '', 120).toLowerCase();
+        const directLabel = normalizeText(
+            [
+                el.getAttribute('aria-label'),
+                el.getAttribute('title'),
+                el.getAttribute('data-section'),
+                el.getAttribute('data-region'),
+                el.getAttribute('data-card'),
+                el.getAttribute('data-panel'),
+            ].filter(Boolean).join(' '),
+            120
+        ).toLowerCase();
+        const hasExplicitCue = Boolean(
+            directLabel ||
+            el.hasAttribute('aria-label') ||
+            el.hasAttribute('title') ||
+            el.hasAttribute('data-section') ||
+            el.hasAttribute('data-region') ||
+            el.hasAttribute('data-card') ||
+            el.hasAttribute('data-panel')
+        );
+        const keywordHit = /\b(card|panel|section|form|detail|info|summary|profile|content|record)\b/.test(className + ' ' + directLabel);
+        if (!hasExplicitCue && !keywordHit)
+            return false;
+
+        const structuralHit = Boolean(el.querySelector('h1,h2,h3,h4,h5,h6,table,[role=table],[role=grid],label,[data-field],[data-value],[data-label],dt,dd'));
+        const meaningfulChildren = el.querySelectorAll('h1,h2,h3,h4,h5,h6,table,[role=table],[role=grid],label,[data-field],[data-value],[data-label],dt,dd,button,a,input,textarea,select').length;
+        return structuralHit || meaningfulChildren >= 3;
+    }
+
+    function findContainerElement(el) {
+        const explicitContainer = el.closest('table,[role=table],[role=grid],ul,ol,[role=list],form,[role=toolbar],section,article');
+        if (explicitContainer)
+            return explicitContainer;
+
+        let current = el.parentElement;
+        while (current) {
+            if (isMeaningfulBusinessContainer(current))
+                return current;
+            current = current.parentElement;
+        }
+        return null;
+    }
+
     function ensureContainer(el) {
-        const containerEl = el.closest('table,[role=table],[role=grid],ul,ol,[role=list],form,[role=toolbar],section,article');
+        const containerEl = findContainerElement(el);
         if (!containerEl)
             return '';
         if (containerMap.has(containerEl))
@@ -147,6 +224,36 @@ SNAPSHOT_V2_JS = r"""() => {
         containerMap.set(containerEl, container);
         result.containers.push(container);
         return container.container_id;
+    }
+
+    function buildContentLocator(el, role, name, text, placeholder, title) {
+        const dataField = normalizeText(el.getAttribute('data-field') || '', 80);
+        const dataLabel = normalizeText(el.getAttribute('data-label') || '', 80);
+        const dataValue = normalizeText(el.getAttribute('data-value') || '', 80);
+        const stableAttributes = [
+            { attr: 'data-field', value: dataField, reason: 'stable data-field locator' },
+            { attr: 'data-label', value: dataLabel, reason: 'stable data-label locator' },
+            { attr: 'data-value', value: dataValue, reason: 'stable data-value locator' },
+        ];
+        for (const item of stableAttributes) {
+            if (!item.value)
+                continue;
+            const cssValue = escapeCssAttributeValue(item.value);
+            const cssSelector = '[' + item.attr + '="' + cssValue + '"]';
+            return {
+                primary: { method: 'css', value: cssSelector },
+                candidates: [{
+                    kind: 'css',
+                    selected: true,
+                    locator: { method: 'css', value: cssSelector },
+                    strict_match_count: 1,
+                    visible_match_count: 1,
+                    reason: item.reason,
+                }],
+                validation: { status: 'stable', details: item.reason, selected_candidate_index: 0, selected_candidate_kind: 'css' },
+            };
+        }
+        return buildFallbackLocator(el, role, name, text, placeholder, title);
     }
 
     function buildFallbackLocator(el, role, name, text, placeholder, title) {
@@ -219,6 +326,10 @@ SNAPSHOT_V2_JS = r"""() => {
 
     function semanticKind(el, role) {
         const tag = el.tagName.toLowerCase();
+        const className = normalizeText(el.className || '', 80);
+        const dataField = normalizeText(el.getAttribute('data-field') || '', 80);
+        const dataLabel = normalizeText(el.getAttribute('data-label') || '', 80);
+        const dataValue = normalizeText(el.getAttribute('data-value') || '', 80);
         if (role === 'heading' || /^h[1-6]$/.test(tag))
             return 'heading';
         if (tag === 'td' || role === 'cell')
@@ -227,8 +338,10 @@ SNAPSHOT_V2_JS = r"""() => {
             return 'header_cell';
         if (tag === 'li')
             return 'item';
-        if (tag === 'label')
+        if (tag === 'label' || /label/i.test(className) || dataLabel)
             return 'label';
+        if (dataField || dataValue || /value/i.test(className))
+            return 'field_value';
         return 'text';
     }
 
@@ -309,10 +422,14 @@ SNAPSHOT_V2_JS = r"""() => {
             role,
             text,
             bbox: bbox(rect),
-            locator: buildFallbackLocator(el, role, '', text, '', '').primary,
+            locator: buildContentLocator(el, role, '', text, '', '').primary,
             element_snapshot: {
                 tag: el.tagName.toLowerCase(),
                 text,
+                class: normalizeText(el.className || '', 80),
+                data_field: normalizeText(el.getAttribute('data-field') || '', 80),
+                data_label: normalizeText(el.getAttribute('data-label') || '', 80),
+                data_value: normalizeText(el.getAttribute('data-value') || '', 80),
             },
         };
         result.content_nodes.push(node);

@@ -1,18 +1,20 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import inspect
 import json
+import os
 import re
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import urljoin, urlparse
+from uuid import uuid4
 
-from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
-
-from backend.deepagent.engine import get_llm_model
 
 from .assistant_runtime import build_page_snapshot
 from .frame_selectors import build_frame_path
+from .snapshot_compression import compact_recording_snapshot
 from .trace_models import RPAAcceptedTrace, RPAAIExecution, RPAPageState, RPATraceDiagnostic, RPATraceType
 
 
@@ -41,6 +43,11 @@ Rules:
 - For search-engine tasks, if the user's goal is to search/open results, prefer navigating to the results URL with an encoded query. If the user explicitly asks to fill a search box, first target visible, enabled, editable input candidates instead of filling hidden DOM matches.
 - Do not leave the browser on API, JSON, raw, or other machine endpoints after an extract-only command.
 - For extract-only commands, prefer user-facing pages and restore the most recent user-facing page after any temporary helper navigation.
+- For extract-only commands, prefer snapshot.expanded_regions and snapshot.sampled_regions before broad DOM scans.
+- Use the region title, heading, or catalogue summary as context when it matches the requested area.
+- If an expanded region is a label_value_group and the user asks for field names or values, keep extraction focused on that region or supporting locator evidence instead of scanning every table.
+- Avoid treating tables as the default fallback for field extraction when a more relevant label_value_group is present.
+- snapshot.region_catalogue is page context only.
 - Do not include a separate done-check.
 - If extracting data, return structured JSON-serializable Python values.
 - For extract-only commands, do not return null/empty output unless the user explicitly allows empty results.
@@ -84,12 +91,21 @@ class RecordingRuntimeAgent:
         runtime_results = runtime_results if runtime_results is not None else {}
         before = await _page_state(page)
         snapshot = await _safe_page_snapshot(page)
+        compact_snapshot = _compact_snapshot(snapshot, instruction)
         payload = {
             "instruction": instruction,
             "page": before.model_dump(mode="json"),
-            "snapshot": _compact_snapshot(snapshot),
+            "snapshot": compact_snapshot,
             "runtime_results": runtime_results,
         }
+        _write_recording_snapshot_debug(
+            "initial",
+            instruction=instruction,
+            page_state=before.model_dump(mode="json"),
+            raw_snapshot=snapshot,
+            compact_snapshot=compact_snapshot,
+            runtime_results=runtime_results,
+        )
 
         first_plan = await self.planner(payload)
         first_result = await self.executor(page, first_plan, runtime_results)
@@ -119,9 +135,22 @@ class RecordingRuntimeAgent:
 
         failed_page = await _page_state(page)
         failed_snapshot = await _safe_page_snapshot(page)
-        compact_failed_snapshot = _compact_snapshot(failed_snapshot)
+        compact_failed_snapshot = _compact_snapshot(failed_snapshot, instruction)
         first_error = str(first_result.get("error") or "recording command failed")
         first_failure_analysis = _classify_recording_failure(first_error)
+        _write_recording_snapshot_debug(
+            "repair",
+            instruction=instruction,
+            page_state=failed_page.model_dump(mode="json"),
+            raw_snapshot=failed_snapshot,
+            compact_snapshot=compact_failed_snapshot,
+            runtime_results=runtime_results,
+            extra={
+                "failed_plan": _safe_jsonable(first_plan),
+                "error": first_error,
+                "failure_analysis": first_failure_analysis,
+            },
+        )
         diagnostics = [
             RPATraceDiagnostic(
                 source="ai",
@@ -223,6 +252,9 @@ class RecordingRuntimeAgent:
         )
 
     async def _default_planner(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        from backend.deepagent.engine import get_llm_model
+        from langchain_core.messages import HumanMessage, SystemMessage
+
         model = get_llm_model(config=self.model_config, streaming=False)
         response = await model.ainvoke(
             [
@@ -476,13 +508,6 @@ async def _ensure_expected_effect(
     expected_effect = _expected_effect(plan, instruction)
     if expected_effect in {"none", "extract"}:
         result = await _restore_extract_surface_if_needed(page=page, before=before, result=result)
-        if expected_effect == "extract" and not _normalize_bool(plan.get("allow_empty_output")):
-            if not _has_meaningful_extract_output(result.get("output")):
-                return {
-                    **result,
-                    "success": False,
-                    "error": "Extract step returned no meaningful output; all extracted values were empty or null.",
-                }
         return result
 
     if expected_effect in {"navigate", "mixed"}:
@@ -570,23 +595,6 @@ def _normalize_bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "y"}
     return bool(value)
-
-
-def _has_meaningful_extract_output(value: Any) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, bool):
-        return True
-    if isinstance(value, (int, float)):
-        return True
-    if isinstance(value, str):
-        normalized = value.strip()
-        return bool(normalized) and normalized.lower() not in {"none", "null", "undefined", "n/a"}
-    if isinstance(value, dict):
-        return any(_has_meaningful_extract_output(item) for item in value.values())
-    if isinstance(value, (list, tuple, set)):
-        return any(_has_meaningful_extract_output(item) for item in value)
-    return True
 
 
 def _contains_any(text: str, patterns: tuple[str, ...]) -> bool:
@@ -697,7 +705,14 @@ async def _safe_page_snapshot(page: Any) -> Dict[str, Any]:
         return {"url": getattr(page, "url", ""), "title": "", "frames": []}
 
 
-def _compact_snapshot(snapshot: Dict[str, Any], limit: int = 80) -> Dict[str, Any]:
+def _compact_snapshot(snapshot: Dict[str, Any], instruction: str, limit: int = 80) -> Dict[str, Any]:
+    try:
+        compact_snapshot = compact_recording_snapshot(snapshot, instruction)
+        if isinstance(compact_snapshot, dict):
+            return compact_snapshot
+    except Exception:
+        pass
+
     compact_frames = []
     for frame in list(snapshot.get("frames") or [])[:5]:
         nodes = []
@@ -725,6 +740,63 @@ def _compact_snapshot(snapshot: Dict[str, Any], limit: int = 80) -> Dict[str, An
         "title": snapshot.get("title"),
         "frames": compact_frames,
     }
+
+
+def _write_recording_snapshot_debug(
+    stage: str,
+    *,
+    instruction: str,
+    page_state: Dict[str, Any],
+    raw_snapshot: Dict[str, Any],
+    compact_snapshot: Dict[str, Any],
+    runtime_results: Dict[str, Any],
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    debug_dir = _resolve_recording_snapshot_debug_dir()
+    if not debug_dir:
+        return
+
+    try:
+        target_dir = _resolve_recording_snapshot_debug_path(debug_dir)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        filename = f"recording-snapshot-{timestamp}-{stage}-{uuid4().hex[:8]}.json"
+        payload: Dict[str, Any] = {
+            "stage": stage,
+            "instruction": instruction,
+            "page": page_state,
+            "raw_snapshot": raw_snapshot,
+            "compact_snapshot": compact_snapshot,
+            "runtime_results": runtime_results,
+        }
+        if extra:
+            payload.update(extra)
+        (target_dir / filename).write_text(
+            json.dumps(_safe_jsonable(payload), ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+    except Exception:
+        return
+
+
+def _resolve_recording_snapshot_debug_dir() -> str:
+    debug_dir = str(os.environ.get("RPA_RECORDING_DEBUG_SNAPSHOT_DIR") or "").strip()
+    if debug_dir:
+        return debug_dir
+
+    try:
+        from backend.config import settings
+
+        return str(getattr(settings, "rpa_recording_debug_snapshot_dir", "") or "").strip()
+    except Exception:
+        return ""
+
+
+def _resolve_recording_snapshot_debug_path(debug_dir: str) -> Path:
+    path = Path(str(debug_dir or "").strip()).expanduser()
+    if path.is_absolute():
+        return path
+    return Path(__file__).resolve().parents[3] / path
 
 
 def _safe_jsonable(value: Any) -> Any:

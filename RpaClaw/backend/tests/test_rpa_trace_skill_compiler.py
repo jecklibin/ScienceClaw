@@ -77,6 +77,30 @@ def test_compiler_preserves_pr_record_extraction_as_python_playwright():
     assert "_validate_non_empty_records('top10_prs', _result)" in script
 
 
+def test_compiler_uniquifies_duplicate_ai_output_keys():
+    traces = [
+        RPAAcceptedTrace(
+            trace_id=f"basic-{index}",
+            trace_type=RPATraceType.AI_OPERATION,
+            source="ai",
+            user_instruction=f"extract PR basic info {index}",
+            output_key="pr_basic_info",
+            output={"requestor": f"user-{index}"},
+            ai_execution=RPAAIExecution(
+                language="python",
+                code=f"async def run(page, results):\n    return {{'requestor': 'user-{index}'}}",
+            ),
+        )
+        for index in range(1, 4)
+    ]
+
+    script = TraceSkillCompiler().generate_script(traces, is_local=True)
+
+    assert "_results['pr_basic_info'] = _result" in script
+    assert "_results['pr_basic_info_2'] = _result" in script
+    assert "_results['pr_basic_info_3'] = _result" in script
+
+
 def test_compiler_uses_source_ref_for_dataflow_fill():
     trace = RPAAcceptedTrace(
         trace_id="fill-1",

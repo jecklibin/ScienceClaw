@@ -18,6 +18,7 @@ class TraceSkillCompiler:
         is_local: bool = False,
         test_mode: bool = False,
     ) -> str:
+        self._compiled_output_keys: Dict[int, str] = {}
         trace_list = list(traces)
         execute_skill_func = "\n".join(self._render_execute_skill(trace_list))
         return _runner_template(is_local).format(
@@ -108,12 +109,19 @@ class TraceSkillCompiler:
             "    _results = {}",
             "    current_page = page",
         ]
+        used_output_keys: Dict[str, int] = {}
         for index, trace in enumerate(traces):
-            lines.extend(self._render_trace(index, trace, traces[:index]))
+            lines.extend(self._render_trace(index, trace, traces[:index], used_output_keys))
         lines.append("    return _results")
         return lines
 
-    def _render_trace(self, index: int, trace: RPAAcceptedTrace, previous_traces: List[RPAAcceptedTrace]) -> List[str]:
+    def _render_trace(
+        self,
+        index: int,
+        trace: RPAAcceptedTrace,
+        previous_traces: List[RPAAcceptedTrace],
+        used_output_keys: Dict[str, int],
+    ) -> List[str]:
         if trace.trace_type == RPATraceType.NAVIGATION:
             return self._render_navigation_trace(index, trace, previous_traces)
         if trace.trace_type == RPATraceType.DATAFLOW_FILL and trace.dataflow:
@@ -121,9 +129,9 @@ class TraceSkillCompiler:
         if trace.trace_type == RPATraceType.MANUAL_ACTION:
             return self._render_manual_action_trace(index, trace, previous_traces)
         if trace.trace_type == RPATraceType.DATA_CAPTURE:
-            return self._render_data_capture_trace(index, trace)
+            return self._render_data_capture_trace(index, trace, used_output_keys)
         if trace.trace_type == RPATraceType.AI_OPERATION:
-            return self._render_ai_operation_trace(index, trace, previous_traces)
+            return self._render_ai_operation_trace(index, trace, previous_traces, used_output_keys)
         return ["", f"    # trace {index}: unsupported trace type {trace.trace_type.value}"]
 
     def _render_navigation_trace(
@@ -182,9 +190,14 @@ class TraceSkillCompiler:
             lines.append(f"    # Unsupported manual action preserved as no-op: {action}")
         return lines
 
-    def _render_data_capture_trace(self, index: int, trace: RPAAcceptedTrace) -> List[str]:
+    def _render_data_capture_trace(
+        self,
+        index: int,
+        trace: RPAAcceptedTrace,
+        used_output_keys: Dict[str, int],
+    ) -> List[str]:
         locator = self._best_locator(trace.locator_candidates)
-        key = trace.output_key or f"capture_{index}"
+        key = self._allocate_output_key(trace, trace.output_key or f"capture_{index}", used_output_keys)
         lines = ["", f"    # trace {index}: {trace.description or 'data capture'}"]
         if locator:
             lines.append(f"    _result = await {_locator_expression('current_page', locator)}.inner_text()")
@@ -198,20 +211,26 @@ class TraceSkillCompiler:
         index: int,
         trace: RPAAcceptedTrace,
         previous_traces: List[RPAAcceptedTrace],
+        used_output_keys: Dict[str, int],
     ) -> List[str]:
         instruction = f"{trace.user_instruction or ''} {trace.description or ''}".lower()
         if _looks_like_highest_star(instruction):
-            return self._render_highest_star_trace(index, trace)
+            return self._render_highest_star_trace(index, trace, used_output_keys)
         if _looks_like_pr_extraction(instruction, trace.output):
-            return self._render_pr_extraction_trace(index, trace, previous_traces)
+            return self._render_pr_extraction_trace(index, trace, previous_traces, used_output_keys)
         if _looks_like_semantic_repo_selection(instruction, trace.output):
-            return self._render_semantic_repo_selection_trace(index, trace)
+            return self._render_semantic_repo_selection_trace(index, trace, used_output_keys)
         if trace.ai_execution and trace.ai_execution.code:
-            return self._render_embedded_ai_code_trace(index, trace, previous_traces)
+            return self._render_embedded_ai_code_trace(index, trace, previous_traces, used_output_keys)
         return ["", f"    # trace {index}: AI operation has no executable body"]
 
-    def _render_highest_star_trace(self, index: int, trace: RPAAcceptedTrace) -> List[str]:
-        key = trace.output_key or "selected_project"
+    def _render_highest_star_trace(
+        self,
+        index: int,
+        trace: RPAAcceptedTrace,
+        used_output_keys: Dict[str, int],
+    ) -> List[str]:
+        key = self._allocate_output_key(trace, trace.output_key or "selected_project", used_output_keys)
         return [
             "",
             f"    # trace {index}: generalized highest-star repository selection",
@@ -245,8 +264,13 @@ class TraceSkillCompiler:
             f"    _results[{key!r}] = _result",
         ]
 
-    def _render_semantic_repo_selection_trace(self, index: int, trace: RPAAcceptedTrace) -> List[str]:
-        key = trace.output_key or "selected_project"
+    def _render_semantic_repo_selection_trace(
+        self,
+        index: int,
+        trace: RPAAcceptedTrace,
+        used_output_keys: Dict[str, int],
+    ) -> List[str]:
+        key = self._allocate_output_key(trace, trace.output_key or "selected_project", used_output_keys)
         return [
             "",
             f"    # trace {index}: runtime semantic repository selection",
@@ -260,8 +284,9 @@ class TraceSkillCompiler:
         index: int,
         trace: RPAAcceptedTrace,
         previous_traces: List[RPAAcceptedTrace],
+        used_output_keys: Dict[str, int],
     ) -> List[str]:
-        key = trace.output_key or "top10_prs"
+        key = self._allocate_output_key(trace, trace.output_key or "top10_prs", used_output_keys)
         allow_empty = isinstance(trace.output, list) and not trace.output
         instruction = f"{trace.user_instruction or ''} {trace.description or ''}"
         page_count = _extract_requested_page_count(instruction)
@@ -342,8 +367,9 @@ class TraceSkillCompiler:
         index: int,
         trace: RPAAcceptedTrace,
         previous_traces: List[RPAAcceptedTrace],
+        used_output_keys: Dict[str, int],
     ) -> List[str]:
-        key = trace.output_key
+        key = self._allocate_output_key(trace, trace.output_key, used_output_keys) if trace.output_key else ""
         code = self._rewrite_dynamic_urls_in_code(
             (trace.ai_execution.code if trace.ai_execution else "").strip(),
             previous_traces,
@@ -400,13 +426,14 @@ class TraceSkillCompiler:
         return ""
 
     def _trace_result_url_expression(self, trace: RPAAcceptedTrace) -> str:
-        if not trace.output_key:
+        key = self._compiled_output_keys.get(id(trace), trace.output_key or "")
+        if not key:
             return ""
         output = trace.output if isinstance(trace.output, dict) else {}
         if output.get("url"):
-            return f"_resolve_result_ref(_results, {trace.output_key + '.url'!r})"
+            return f"_resolve_result_ref(_results, {key + '.url'!r})"
         if output.get("value"):
-            return f"_resolve_result_ref(_results, {trace.output_key + '.value'!r})"
+            return f"_resolve_result_ref(_results, {key + '.value'!r})"
         instruction = f"{trace.user_instruction or ''} {trace.description or ''}".lower()
         if (
             trace.trace_type == RPATraceType.AI_OPERATION
@@ -416,7 +443,7 @@ class TraceSkillCompiler:
                 or _is_github_repo_url(trace.after_page.url)
             )
         ):
-            return f"_resolve_first_result_ref(_results, [{trace.output_key + '.url'!r}, {trace.output_key + '.value'!r}])"
+            return f"_resolve_first_result_ref(_results, [{key + '.url'!r}, {key + '.value'!r}])"
         return ""
 
     def _manual_github_subpage_navigation(
@@ -456,6 +483,21 @@ class TraceSkillCompiler:
             replace,
             code,
         )
+
+    def _allocate_output_key(
+        self,
+        trace: RPAAcceptedTrace,
+        raw_key: Optional[str],
+        used_output_keys: Dict[str, int],
+    ) -> str:
+        key = str(raw_key or "").strip()
+        if not key:
+            return ""
+        count = used_output_keys.get(key, 0) + 1
+        used_output_keys[key] = count
+        allocated = key if count == 1 else f"{key}_{count}"
+        self._compiled_output_keys[id(trace)] = allocated
+        return allocated
 
 
 def _locator_expression(scope: str, locator: Dict[str, Any]) -> str:
