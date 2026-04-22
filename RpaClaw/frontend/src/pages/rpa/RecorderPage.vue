@@ -20,9 +20,11 @@ import {
   isTerminalScreencastClose,
   shouldShowScreencastReconnectNotice,
 } from '@/utils/screencastReconnect';
+import { buildRpaToolEditorLocation } from '@/utils/rpaMcpConvert';
 
 const router = useRouter();
 const route = useRoute();
+const launchSource = ref(typeof route.query.source === 'string' ? route.query.source : '');
 
 const sessionId = ref<string | null>(null);
 const isEmbedded = computed(() => route.query.embedded === '1');
@@ -667,6 +669,10 @@ const stopRecording = async () => {
       return;
     }
     router.push(returnTo);
+  } else if (launchSource.value === 'mcp-tool-studio') {
+    router.push(buildRpaToolEditorLocation({
+      sessionId: sessionId.value || '',
+    }));
   } else {
     router.push(`/rpa/configure?sessionId=${sessionId.value}`);
   }

@@ -136,7 +136,7 @@
                       <span class="badge-blue">{{ t('Platform') }}</span>
                       <span class="badge-muted">{{ server.transport }}</span>
                     </div>
-                    <p class="mt-2 line-clamp-2 text-sm leading-6 text-[var(--text-secondary)]">{{ server.description || t('No description') }}</p>
+                    <p class="mt-2 line-clamp-2 text-sm leading-6 text-[var(--text-secondary)]">{{ formatMcpServerDescription(server, t) }}</p>
                     <p class="mt-3 flex min-w-0 items-center gap-1.5 text-xs text-[var(--text-tertiary)]">
                       <Link2 :size="14" />
                       <span class="max-w-[520px] truncate font-mono">{{ formatServerEndpointText(server) }}</span>
@@ -157,50 +157,103 @@
           <div class="flex flex-col gap-3 border-b border-slate-200 pb-4 dark:border-white/10 sm:flex-row sm:items-end sm:justify-between">
             <div>
               <h2 class="text-xl font-black tracking-tight text-[var(--text-primary)]">{{ t('My MCP') }}</h2>
-              <p class="mt-1 text-sm text-[var(--text-tertiary)]">{{ t('Private MCP servers for your account.') }}</p>
+              <p class="mt-1 text-sm text-[var(--text-tertiary)]">{{ t('Manage private MCP servers and RPA-recorded MCP tools together.') }}</p>
             </div>
-            <div class="flex items-center gap-2">
-              <span class="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-[var(--text-secondary)] dark:bg-white/10">{{ t('server count summary', { count: groupedMcpServers.user.length }) }}</span>
-              <button class="inline-flex items-center gap-2 rounded-xl bg-gradient-to-br from-[#8930b0] to-[#004be2] px-4 py-2 text-sm font-bold text-white shadow-lg transition hover:-translate-y-0.5 active:translate-y-0" @click="openCreateDialog">
+            <div class="relative flex items-center gap-2">
+              <span class="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-[var(--text-secondary)] dark:bg-white/10">{{ t('mcp inventory count summary', { count: unifiedUserMcpItems.length }) }}</span>
+              <button class="inline-flex items-center gap-2 rounded-xl bg-gradient-to-br from-[#8930b0] to-[#004be2] px-4 py-2 text-sm font-bold text-white shadow-lg transition hover:-translate-y-0.5 active:translate-y-0" @click="createChoiceOpen = !createChoiceOpen">
                 <Plus :size="16" />
                 {{ t('Add MCP') }}
               </button>
+              <div v-if="createChoiceOpen" class="absolute right-0 top-full z-20 mt-2 w-72 overflow-hidden rounded-2xl border border-slate-200 bg-white p-2 text-sm shadow-xl dark:border-white/10 dark:bg-[#17181d]">
+                <button class="flex w-full items-start gap-3 rounded-xl px-3 py-3 text-left transition hover:bg-slate-50 dark:hover:bg-white/[0.06]" @click="startCreateServer">
+                  <Server :size="18" class="mt-0.5 text-blue-600 dark:text-blue-300" />
+                  <span>
+                    <span class="block font-bold text-[var(--text-primary)]">{{ t('Connect MCP server') }}</span>
+                    <span class="mt-0.5 block text-xs leading-5 text-[var(--text-tertiary)]">{{ t('Connect an existing stdio, SSE, or Streamable HTTP MCP endpoint.') }}</span>
+                  </span>
+                </button>
+                <button class="flex w-full items-start gap-3 rounded-xl px-3 py-3 text-left transition hover:bg-slate-50 dark:hover:bg-white/[0.06]" @click="startCreateRpaMcpTool">
+                  <Wrench :size="18" class="mt-0.5 text-cyan-600 dark:text-cyan-200" />
+                  <span>
+                    <span class="block font-bold text-[var(--text-primary)]">{{ t('Create from RPA recording') }}</span>
+                    <span class="mt-0.5 block text-xs leading-5 text-[var(--text-tertiary)]">{{ t('Record browser automation and publish it as an MCP tool.') }}</span>
+                  </span>
+                </button>
+              </div>
             </div>
           </div>
-          <div v-if="groupedMcpServers.user.length === 0" class="rounded-3xl border border-dashed border-slate-300 bg-white/80 p-10 text-center text-sm text-[var(--text-tertiary)] dark:border-white/10 dark:bg-white/[0.04]">
+          <div v-if="unifiedUserMcpItems.length === 0" class="rounded-3xl border border-dashed border-slate-300 bg-white/80 p-10 text-center text-sm text-[var(--text-tertiary)] dark:border-white/10 dark:bg-white/[0.04]">
             <Database class="mx-auto mb-3" :size="30" />
-            {{ t('No private MCP servers yet.') }}
+            <p>{{ t('No private MCP servers or RPA MCP tools yet.') }}</p>
+            <p class="mt-2">{{ t('Use Add MCP to connect a server or create one from an RPA recording.') }}</p>
           </div>
           <div v-else class="space-y-4">
-            <article v-for="server in groupedMcpServers.user" :key="server.server_key" class="mcp-card">
+            <article v-for="item in unifiedUserMcpItems" :key="`${item.kind}:${item.id}`" class="mcp-card">
               <div class="mcp-card-layout">
-                <div class="mcp-card-main">
+                <div v-if="item.kind === 'server'" class="mcp-card-main">
                   <div class="mcp-icon bg-slate-100 text-[var(--text-secondary)] dark:bg-white/10 dark:text-slate-200">
-                    <Terminal v-if="server.transport === 'stdio'" :size="22" />
+                    <Terminal v-if="item.server.transport === 'stdio'" :size="22" />
                     <Server v-else :size="22" />
                   </div>
                   <div class="min-w-0">
                     <div class="flex flex-wrap items-center gap-2">
-                      <h3 class="truncate text-base font-bold text-[var(--text-primary)]">{{ server.name }}</h3>
-                      <span class="badge-violet">{{ t('Private') }}</span>
-                      <span class="badge-muted">{{ server.transport }}</span>
+                      <h3 class="truncate text-base font-bold text-[var(--text-primary)]">{{ item.server.name }}</h3>
+                      <span class="badge-violet">{{ t('MCP server') }}</span>
+                      <span class="badge-muted">{{ item.server.transport }}</span>
                     </div>
-                    <p class="mt-2 line-clamp-2 text-sm leading-6 text-[var(--text-secondary)]">{{ server.description || t('No description') }}</p>
+                    <p class="mt-2 line-clamp-2 text-sm leading-6 text-[var(--text-secondary)]">{{ item.server.description || t('No description') }}</p>
                     <p class="mt-3 flex min-w-0 items-center gap-1.5 text-xs text-[var(--text-tertiary)]">
                       <Link2 :size="14" />
-                      <span class="max-w-[520px] truncate font-mono">{{ formatServerEndpointText(server) }}</span>
+                      <span class="max-w-[520px] truncate font-mono">{{ formatServerEndpointText(item.server) }}</span>
                     </p>
                   </div>
                 </div>
-                <div class="mcp-actions">
-                  <span class="status-pill" :class="server.enabled ? 'status-on' : 'status-warn'">{{ server.enabled ? t('Enabled') : t('Disabled') }}</span>
-                  <button class="action-muted" @click="openEditDialog(server)">
+                <div v-else class="mcp-card-main">
+                  <div class="mcp-icon bg-cyan-100 text-cyan-700 dark:bg-cyan-400/15 dark:text-cyan-200"><Wrench :size="22" /></div>
+                  <div class="min-w-0">
+                    <div class="flex flex-wrap items-center gap-2">
+                      <h3 class="truncate text-base font-bold text-[var(--text-primary)]">{{ item.tool.name }}</h3>
+                      <span class="badge-blue">{{ t('RPA MCP tool') }}</span>
+                      <span class="badge-muted">{{ item.tool.tool_name }}</span>
+                    </div>
+                    <p class="mt-2 line-clamp-2 text-sm leading-6 text-[var(--text-secondary)]">{{ item.tool.description || t('No description') }}</p>
+                    <p class="mt-3 text-xs text-[var(--text-tertiary)]">{{ t('Allowed domains') }}: {{ item.tool.allowed_domains.join(', ') || '-' }}</p>
+                    <p class="mt-1 text-xs text-[var(--text-tertiary)]">{{ t('Cookie auth') }}: {{ item.tool.requires_cookies ? t('Required') : t('Optional') }}</p>
+                    <details class="mt-3 rounded-2xl border border-slate-200 bg-slate-50/80 p-3 text-xs dark:border-white/10 dark:bg-white/[0.04]">
+                      <summary class="cursor-pointer font-semibold text-[var(--text-primary)]">{{ t('Preview') }}</summary>
+                      <div class="mt-3 font-semibold text-[var(--text-primary)]">{{ t('Input schema') }}</div>
+                      <pre class="mt-3 overflow-x-auto rounded-xl border border-slate-200 bg-white p-3 text-xs text-[var(--text-secondary)] dark:border-white/10 dark:bg-[#101115]"><code>{{ JSON.stringify(item.tool.input_schema || {}, null, 2) }}</code></pre>
+                      <div class="mt-3 font-semibold text-[var(--text-primary)]">{{ t('Output schema') }}</div>
+                      <pre class="mt-3 overflow-x-auto rounded-xl border border-slate-200 bg-white p-3 text-xs text-[var(--text-secondary)] dark:border-white/10 dark:bg-[#101115]"><code>{{ JSON.stringify(item.tool.output_schema || item.tool.recommended_output_schema || {}, null, 2) }}</code></pre>
+                      <div class="mt-3 text-[var(--text-secondary)]">{{ t('Removed login steps') }}: {{ item.tool.sanitize_report?.removed_steps?.join(', ') || '-' }}</div>
+                      <div class="mt-1 text-[var(--text-secondary)]">{{ t('Sanitize warnings') }}: {{ item.tool.sanitize_report?.warnings?.join(' | ') || '-' }}</div>
+                    </details>
+                  </div>
+                </div>
+                <div v-if="item.kind === 'server'" class="mcp-actions">
+                  <span class="status-pill" :class="item.server.enabled ? 'status-on' : 'status-warn'">{{ item.server.enabled ? t('Enabled') : t('Disabled') }}</span>
+                  <button class="action-muted" @click="openEditDialog(item.server)">
                     <Pencil :size="14" class="inline" />
                     {{ t('Edit') }}
                   </button>
-                  <button class="action-blue" @click="runTest(server)">{{ t('Test') }}</button>
-                  <button class="action-blue" @click="openToolsDialog(server)">{{ t('Tools') }}</button>
-                  <button class="action-danger" @click="deletePrivateServer(server)">{{ t('Delete') }}</button>
+                  <button class="action-blue" @click="runTest(item.server)">{{ t('Test') }}</button>
+                  <button class="action-blue" @click="openToolsDialog(item.server)">{{ t('Tools') }}</button>
+                  <button class="action-danger" @click="deletePrivateServer(item.server)">{{ t('Delete') }}</button>
+                </div>
+                <div v-else class="mcp-actions">
+                  <span class="status-pill" :class="item.tool.enabled ? 'status-on' : 'status-warn'">{{ item.tool.enabled ? t('Enabled') : t('Disabled') }}</span>
+                  <button class="action-muted" @click="openGatewayToolView(item.tool)">
+                    <Eye :size="14" class="inline" />
+                    {{ t('View') }}
+                  </button>
+                  <button class="action-muted" @click="openGatewayToolEdit(item.tool)">
+                    <Pencil :size="14" class="inline" />
+                    {{ t('Edit') }}
+                  </button>
+                  <button class="action-muted" @click="toggleRpaMcpTool(item.tool)">{{ item.tool.enabled ? t('Disable') : t('Enable') }}</button>
+                  <button class="action-blue" @click="openGatewayToolTestDialog(item.tool)">{{ t('Test') }}</button>
+                  <button class="action-danger" @click="deleteGatewayTool(item.tool)">{{ t('Delete') }}</button>
                 </div>
               </div>
             </article>
@@ -400,6 +453,135 @@
           </div>
         </div>
       </div>
+      <div v-if="gatewayTestDialogOpen" class="fixed inset-0 z-[9999] flex items-center justify-center px-4 py-6">
+        <div class="absolute inset-0 bg-slate-950/55 backdrop-blur-sm" @click="closeGatewayToolTestDialog"></div>
+        <div class="relative z-10 flex max-h-full w-full max-w-4xl flex-col overflow-hidden rounded-3xl border border-slate-200 bg-[#f5f7fb] shadow-2xl dark:border-white/10 dark:bg-[#101115]">
+          <div class="flex items-center justify-between gap-4 border-b border-slate-200 bg-white px-6 py-5 dark:border-white/10 dark:bg-white/[0.055]">
+            <div>
+              <h3 class="text-xl font-black text-[var(--text-primary)]">{{ gatewayTestTool?.name || t('Test') }}</h3>
+              <p class="mt-1 text-sm text-[var(--text-tertiary)]">{{ gatewayTestTool?.description || t('Gateway test dialog description') }}</p>
+            </div>
+            <button class="rounded-xl p-2 text-[var(--text-tertiary)] transition hover:bg-slate-100 hover:text-[var(--text-primary)] dark:hover:bg-white/10" @click="closeGatewayToolTestDialog">
+              <X :size="18" />
+            </button>
+          </div>
+          <div class="space-y-5 overflow-y-auto p-6">
+            <section class="dialog-section">
+              <div class="flex items-center justify-between gap-3">
+                <h4 class="dialog-title !mb-0">{{ t('Arguments') }}</h4>
+                <span class="text-xs text-[var(--text-tertiary)]">{{ gatewayParamFields.length ? t('Gateway parameters hint') : t('No gateway parameters') }}</span>
+              </div>
+              <div v-if="gatewayParamFields.length" class="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
+                <label v-for="field in gatewayParamFields" :key="field.key" class="field">
+                  <span>{{ field.key }}<template v-if="field.required"> *</template></span>
+                  <select v-if="field.type === 'boolean'" v-model="gatewayArgumentValues[field.key]" class="tools-input">
+                    <option value="true">true</option>
+                    <option value="false">false</option>
+                  </select>
+                  <textarea
+                    v-else-if="field.type === 'array' || field.type === 'object'"
+                    v-model="gatewayArgumentValues[field.key]"
+                    class="tools-input min-h-[120px] resize-y"
+                    :placeholder="field.type === 'array' ? '[]' : '{}'"
+                  ></textarea>
+                  <input
+                    v-else
+                    v-model="gatewayArgumentValues[field.key]"
+                    class="tools-input"
+                    :type="field.type === 'number' || field.type === 'integer' ? 'number' : 'text'"
+                    :placeholder="field.defaultValue !== undefined ? String(field.defaultValue) : field.key"
+                  >
+                  <small>{{ field.description || field.type }}</small>
+                </label>
+              </div>
+            </section>
+
+            <section class="dialog-section">
+              <div class="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h4 class="dialog-title !mb-1">{{ t('Gateway test cookies') }}</h4>
+                  <p class="text-xs text-[var(--text-tertiary)]">{{ gatewayTestTool?.requires_cookies ? t('Cookie input required hint') : t('Cookie input optional hint') }}</p>
+                </div>
+                <button
+                  v-if="!gatewayTestTool?.requires_cookies"
+                  class="action-muted"
+                  @click="gatewayCookieSectionOpen = !gatewayCookieSectionOpen"
+                >
+                  {{ gatewayCookieSectionOpen ? t('Hide cookie input') : t('Show cookie input') }}
+                </button>
+                <span v-else class="status-pill status-on">{{ t('Required') }}</span>
+              </div>
+
+              <div v-if="gatewayCookieSectionOpen || gatewayTestTool?.requires_cookies" class="mt-4 space-y-4">
+                <div class="inline-flex rounded-full border border-slate-200 bg-slate-100 p-1 dark:border-white/10 dark:bg-white/10">
+                  <button
+                    class="rounded-full px-3 py-1.5 text-xs font-semibold transition"
+                    :class="gatewayCookieMode === 'cookie_header' ? 'bg-white text-[var(--text-primary)] shadow dark:bg-[#17181d]' : 'text-[var(--text-secondary)]'"
+                    @click="gatewayCookieMode = 'cookie_header'"
+                  >
+                    {{ t('Cookie header mode') }}
+                  </button>
+                  <button
+                    class="rounded-full px-3 py-1.5 text-xs font-semibold transition"
+                    :class="gatewayCookieMode === 'header_value' ? 'bg-white text-[var(--text-primary)] shadow dark:bg-[#17181d]' : 'text-[var(--text-secondary)]'"
+                    @click="gatewayCookieMode = 'header_value'"
+                  >
+                    {{ t('Cookie value mode') }}
+                  </button>
+                  <button
+                    class="rounded-full px-3 py-1.5 text-xs font-semibold transition"
+                    :class="gatewayCookieMode === 'playwright_json' ? 'bg-white text-[var(--text-primary)] shadow dark:bg-[#17181d]' : 'text-[var(--text-secondary)]'"
+                    @click="gatewayCookieMode = 'playwright_json'"
+                  >
+                    {{ t('Playwright JSON mode') }}
+                  </button>
+                </div>
+
+                <label v-if="gatewayCookieMode !== 'playwright_json'" class="field">
+                  <span>{{ t('Cookie domain') }}</span>
+                  <input v-model="gatewayCookieDomain" list="gateway-cookie-domain-list" class="tools-input" :placeholder="t('Cookie domain placeholder')">
+                  <datalist id="gateway-cookie-domain-list">
+                    <option v-for="domain in gatewayAllowedCookieDomains" :key="domain" :value="domain"></option>
+                  </datalist>
+                  <small>{{ t('Cookie domain hint') }}</small>
+                </label>
+
+                <label class="field">
+                  <span>{{ t('Cookie input') }}</span>
+                  <textarea
+                    v-model="gatewayCookieText"
+                    class="tools-input min-h-[150px] resize-y font-mono text-xs"
+                    :placeholder="gatewayCookieInputPlaceholder"
+                  ></textarea>
+                  <small>{{ t('Cookie input helper') }}</small>
+                </label>
+              </div>
+            </section>
+
+            <section v-if="gatewayTestResult" class="dialog-section">
+              <div class="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h4 class="dialog-title !mb-1">{{ t('Test result') }}</h4>
+                  <p class="text-xs text-[var(--text-tertiary)]">{{ gatewayTestResult.message || '-' }}</p>
+                </div>
+                <span class="status-pill" :class="gatewayTestResult.success ? 'status-on' : 'status-warn'">
+                  {{ gatewayTestResult.success ? t('Success') : t('Failed') }}
+                </span>
+              </div>
+              <pre class="mt-4 overflow-x-auto rounded-xl border border-slate-200 bg-white p-3 text-xs text-[var(--text-secondary)] dark:border-white/10 dark:bg-[#101115]"><code>{{ JSON.stringify(gatewayTestResult, null, 2) }}</code></pre>
+            </section>
+
+          </div>
+
+          <div class="flex items-center justify-end gap-3 border-t border-slate-200 bg-white px-6 py-5 dark:border-white/10 dark:bg-white/[0.055]">
+            <button class="action-muted" @click="closeGatewayToolTestDialog">{{ t('Cancel') }}</button>
+            <button class="inline-flex items-center gap-2 rounded-xl bg-gradient-to-br from-[#8930b0] to-[#004be2] px-5 py-2 text-sm font-bold text-white shadow-lg transition disabled:cursor-not-allowed disabled:opacity-60" :disabled="gatewayTestSubmitting" @click="submitGatewayToolTest">
+              <Loader2 v-if="gatewayTestSubmitting" class="animate-spin" :size="16" />
+              {{ gatewayTestSubmitting ? t('Sending...') : t('Run gateway test') }}
+            </button>
+          </div>
+        </div>
+      </div>
 
       <div v-if="toolsDialogOpen" class="fixed inset-0 z-[9999] flex items-center justify-center px-4 py-6">
         <div class="absolute inset-0 bg-slate-950/55 backdrop-blur-sm" @click="closeToolsDialog"></div>
@@ -415,7 +597,7 @@
           </div>
           <div class="max-h-[70vh] space-y-3 overflow-y-auto p-6">
             <div v-if="discoveredTools.length === 0" class="rounded-2xl border border-dashed border-slate-300 p-8 text-center text-sm text-[var(--text-tertiary)] dark:border-white/10">
-              {{ t('No tools returned by this MCP server.') }}
+              {{ isRpaGatewayServer(selectedServer) ? t('No RPA MCP tools published for gateway.') : t('No tools returned by this MCP server.') }}
             </div>
             <div v-for="tool in discoveredTools" :key="tool.name" class="rounded-2xl border border-slate-200 bg-slate-50/80 p-4 dark:border-white/10 dark:bg-white/[0.04]">
               <h4 class="text-sm font-bold text-[var(--text-primary)]">{{ tool.name }}</h4>
@@ -451,10 +633,18 @@ import {
   Wrench,
   X,
 } from 'lucide-vue-next';
-import { useRouter } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import { getTools, blockTool, deleteTool as apiDeleteTool } from '../api/agent';
 import type { ExternalToolItem } from '../types/response';
 import { listCredentials, type Credential } from '../api/credential';
+import {
+  deleteRpaMcpTool,
+  listRpaMcpTools,
+  testRpaMcpTool,
+  updateRpaMcpTool,
+  type RpaMcpExecutionResult,
+  type RpaMcpToolItem,
+} from '../api/rpaMcp';
 import {
   createMcpServer,
   deleteMcpServer,
@@ -467,31 +657,57 @@ import {
 } from '../api/mcp';
 import { showErrorToast, showSuccessToast } from '../utils/toast';
 import {
+  buildUnifiedMcpItems,
+  formatMcpServerDescription,
   formatMcpServerEndpoint,
   groupMcpServers,
+  isRpaGatewayServer,
   parseKeyValueTemplateText,
   parseHttpHeaderText,
   splitCredentialTemplateMap,
   stringifyKeyValueTemplateMap,
   stringifyHttpHeaders,
 } from '../utils/mcpUi';
+import { convertCookieInputToPlaywrightCookies, type CookieInputMode } from '../utils/rpaMcpTest';
+import { resolveInitialToolsTab } from '../utils/toolsPage';
 
+const route = useRoute();
 const router = useRouter();
 const { t } = useI18n();
 
-const activeTab = ref<'external' | 'mcp'>('external');
+const activeTab = ref<'external' | 'mcp'>(resolveInitialToolsTab(route.query.tab));
 const searchQuery = ref('');
 const externalTools = ref<ExternalToolItem[]>([]);
 const extLoading = ref(false);
 const mcpServers = ref<McpServerItem[]>([]);
 const credentials = ref<Credential[]>([]);
 const formOpen = ref(false);
+const createChoiceOpen = ref(false);
 const editingServer = ref<McpServerItem | null>(null);
 const savingForm = ref(false);
 const showAdvancedQuery = ref(false);
 const toolsDialogOpen = ref(false);
 const selectedServer = ref<McpServerItem | null>(null);
 const discoveredTools = ref<McpToolDiscoveryItem[]>([]);
+const rpaMcpTools = ref<RpaMcpToolItem[]>([]);
+const gatewayTestDialogOpen = ref(false);
+const gatewayTestSubmitting = ref(false);
+const gatewayTestTool = ref<RpaMcpToolItem | null>(null);
+const gatewayTestResult = ref<RpaMcpExecutionResult | null>(null);
+const gatewayCookieSectionOpen = ref(false);
+const gatewayCookieMode = ref<CookieInputMode>('cookie_header');
+const gatewayCookieText = ref('');
+const gatewayCookieDomain = ref('');
+type GatewayArgumentValue = string;
+const gatewayArgumentValues = reactive<Record<string, GatewayArgumentValue>>({});
+
+type GatewayParamField = {
+  key: string;
+  type: string;
+  description: string;
+  required: boolean;
+  defaultValue?: unknown;
+};
 
 const form = reactive({
   name: '',
@@ -527,16 +743,75 @@ const filteredMcpServers = computed(() => {
   );
 });
 
+const filteredRpaMcpTools = computed(() => {
+  const query = searchQuery.value.trim().toLowerCase();
+  if (!query) return rpaMcpTools.value;
+  return rpaMcpTools.value.filter((tool) =>
+    [tool.name, tool.description, tool.tool_name, ...(tool.allowed_domains || [])]
+      .some((value) => value?.toLowerCase().includes(query)),
+  );
+});
+
 const groupedMcpServers = computed(() => groupMcpServers(filteredMcpServers.value));
+const unifiedUserMcpItems = computed(() => buildUnifiedMcpItems(groupedMcpServers.value.user, filteredRpaMcpTools.value));
 const activeSummary = computed(() => (
   activeTab.value === 'external'
     ? t('external tools count summary', { count: externalTools.value.length })
-    : t('MCP servers count summary', { count: mcpServers.value.length })
+    : t('mcp inventory count summary', { count: mcpServers.value.length + rpaMcpTools.value.length })
 ));
 const searchPlaceholder = computed(() => (
-  activeTab.value === 'external' ? t('Search tools...') : t('Search MCP servers...')
+  activeTab.value === 'external' ? t('Search tools...') : t('Search MCP servers or tools...')
 ));
 
+const clearGatewayArgumentValues = () => {
+  Object.keys(gatewayArgumentValues).forEach((key) => {
+    delete gatewayArgumentValues[key];
+  });
+};
+
+const getGatewayParamFields = (tool: RpaMcpToolItem | null): GatewayParamField[] => {
+  const schema = (tool?.input_schema || {}) as { properties?: Record<string, any>; required?: string[] };
+  const properties = schema.properties && typeof schema.properties === 'object' ? schema.properties : {};
+  const required = new Set(Array.isArray(schema.required) ? schema.required : []);
+  return Object.entries(properties)
+    .filter(([key]) => key !== 'cookies')
+    .map(([key, value]) => ({
+      key,
+      type: typeof value?.type === 'string' ? value.type : 'string',
+      description: typeof value?.description === 'string' ? value.description : '',
+      required: required.has(key),
+      defaultValue: value?.default,
+    }));
+};
+
+const getGatewayAllowedCookieDomains = (tool: RpaMcpToolItem | null): string[] => {
+  const domains = new Set<string>();
+  for (const domain of tool?.allowed_domains || []) {
+    if (domain) domains.add(domain);
+  }
+  const startUrl = tool?.post_auth_start_url || '';
+  if (startUrl) {
+    try {
+      const host = new URL(startUrl).hostname;
+      if (host) domains.add(host);
+    } catch {
+      // ignore invalid start URL here and leave validation to the backend
+    }
+  }
+  return Array.from(domains);
+};
+
+const gatewayParamFields = computed(() => getGatewayParamFields(gatewayTestTool.value));
+const gatewayAllowedCookieDomains = computed(() => getGatewayAllowedCookieDomains(gatewayTestTool.value));
+const gatewayCookieInputPlaceholder = computed(() => {
+  if (gatewayCookieMode.value === 'cookie_header') {
+    return 'Cookie: sid=abc; theme=dark';
+  }
+  if (gatewayCookieMode.value === 'header_value') {
+    return 'sid=abc; theme=dark';
+  }
+  return '[{"name":"sid","value":"abc","domain":".example.com","path":"/"}]';
+});
 const resetForm = () => {
   form.name = '';
   form.description = '';
@@ -591,14 +866,16 @@ const applyServerToForm = (server: McpServerItem) => {
 const loadData = async () => {
   extLoading.value = true;
   try {
-    const [tools, servers, creds] = await Promise.all([
+    const [tools, servers, creds, gatewayTools] = await Promise.all([
       getTools(),
       listMcpServers(),
       listCredentials().catch(() => []),
+      listRpaMcpTools().catch(() => []),
     ]);
     externalTools.value = tools;
     mcpServers.value = servers;
     credentials.value = creds;
+    rpaMcpTools.value = gatewayTools;
   } catch (error) {
     console.error(error);
     showErrorToast(t('Failed to load tools'));
@@ -639,15 +916,34 @@ const deleteExternalTool = async (tool: ExternalToolItem) => {
 };
 
 const openCreateDialog = () => {
+  createChoiceOpen.value = false;
   editingServer.value = null;
   resetForm();
   formOpen.value = true;
 };
 
+const startCreateServer = () => {
+  openCreateDialog();
+};
+
+const startCreateRpaMcpTool = () => {
+  createChoiceOpen.value = false;
+  router.push('/chat/tools/mcp/new');
+};
+
 const openEditDialog = (server: McpServerItem) => {
+  createChoiceOpen.value = false;
   editingServer.value = server;
   applyServerToForm(server);
   formOpen.value = true;
+};
+
+const openGatewayToolView = (tool: RpaMcpToolItem) => {
+  router.push({ path: `/chat/tools/mcp/${encodeURIComponent(tool.id)}`, query: { mode: 'view' } });
+};
+
+const openGatewayToolEdit = (tool: RpaMcpToolItem) => {
+  router.push({ path: `/chat/tools/mcp/${encodeURIComponent(tool.id)}`, query: { mode: 'edit' } });
 };
 
 const closeFormDialog = () => {
@@ -768,6 +1064,128 @@ const closeToolsDialog = () => {
   discoveredTools.value = [];
 };
 
+
+const toggleRpaMcpTool = async (tool: RpaMcpToolItem) => {
+  try {
+    const updated = await updateRpaMcpTool(tool.id, {
+      name: tool.name,
+      description: tool.description,
+      enabled: !tool.enabled,
+      allowed_domains: tool.allowed_domains,
+      post_auth_start_url: tool.post_auth_start_url,
+    });
+    rpaMcpTools.value = rpaMcpTools.value.map((item) => item.id === tool.id ? updated : item);
+    showSuccessToast(updated.enabled ? t('Enabled') : t('Disabled'));
+  } catch (error: any) {
+    console.error(error);
+    showErrorToast(error?.message || 'Failed to update RPA MCP tool');
+  }
+};
+
+const deleteGatewayTool = async (tool: RpaMcpToolItem) => {
+  if (!window.confirm(t('Delete MCP server confirm', { name: tool.name }))) return;
+  try {
+    await deleteRpaMcpTool(tool.id);
+    rpaMcpTools.value = rpaMcpTools.value.filter((item) => item.id !== tool.id);
+    showSuccessToast(t('Deleted successfully'));
+  } catch (error: any) {
+    console.error(error);
+    showErrorToast(error?.message || 'Failed to delete RPA MCP tool');
+  }
+};
+
+const openGatewayToolTestDialog = (tool: RpaMcpToolItem) => {
+  gatewayTestTool.value = tool;
+  gatewayTestDialogOpen.value = true;
+  gatewayTestResult.value = null;
+  gatewayCookieSectionOpen.value = Boolean(tool.requires_cookies);
+  gatewayCookieMode.value = 'cookie_header';
+  gatewayCookieText.value = '';
+  gatewayCookieDomain.value = getGatewayAllowedCookieDomains(tool)[0] || '';
+  clearGatewayArgumentValues();
+  for (const field of getGatewayParamFields(tool)) {
+    if (field.defaultValue !== undefined) {
+      gatewayArgumentValues[field.key] = field.type === 'boolean' ? String(Boolean(field.defaultValue)) : String(field.defaultValue);
+      continue;
+    }
+    gatewayArgumentValues[field.key] = field.type === 'boolean' ? 'false' : '';
+  }
+};
+
+const closeGatewayToolTestDialog = () => {
+  gatewayTestDialogOpen.value = false;
+  gatewayTestTool.value = null;
+  gatewayTestResult.value = null;
+  gatewayCookieSectionOpen.value = false;
+  gatewayCookieMode.value = 'cookie_header';
+  gatewayCookieText.value = '';
+  gatewayCookieDomain.value = '';
+  clearGatewayArgumentValues();
+};
+
+const buildGatewayTestArguments = () => {
+  const payload: Record<string, unknown> = {};
+  for (const field of gatewayParamFields.value) {
+    const rawValue = gatewayArgumentValues[field.key];
+    const isBlank = rawValue === '' || rawValue === null || rawValue === undefined;
+    if (isBlank) {
+      if (field.required) {
+        throw new Error(t('Gateway parameter required', { name: field.key }));
+      }
+      continue;
+    }
+    if (field.type === 'boolean') {
+      payload[field.key] = rawValue === 'true';
+      continue;
+    }
+    if (field.type === 'number' || field.type === 'integer') {
+      const numericValue = Number(rawValue);
+      if (Number.isNaN(numericValue) || (field.type === 'integer' && !Number.isInteger(numericValue))) {
+        throw new Error(t('Gateway parameter number invalid', { name: field.key }));
+      }
+      payload[field.key] = numericValue;
+      continue;
+    }
+    if (field.type === 'array' || field.type === 'object') {
+      try {
+        payload[field.key] = typeof rawValue === 'string' ? JSON.parse(rawValue) : rawValue;
+      } catch {
+        throw new Error(t('Gateway parameter JSON invalid', { name: field.key }));
+      }
+      continue;
+    }
+    payload[field.key] = String(rawValue);
+  }
+  return payload;
+};
+
+const submitGatewayToolTest = async () => {
+  if (!gatewayTestTool.value) return;
+  gatewayTestSubmitting.value = true;
+  try {
+    const argumentsPayload = buildGatewayTestArguments();
+    const cookies = convertCookieInputToPlaywrightCookies({
+      mode: gatewayCookieMode.value,
+      text: gatewayCookieText.value,
+      domain: gatewayCookieMode.value === 'playwright_json' ? undefined : gatewayCookieDomain.value,
+      required: Boolean(gatewayTestTool.value.requires_cookies),
+    });
+    const payload: { cookies?: Array<Record<string, unknown>>; arguments: Record<string, unknown> } = {
+      arguments: argumentsPayload,
+    };
+    if (cookies?.length) {
+      payload.cookies = cookies as Array<Record<string, unknown>>;
+    }
+    const result = await testRpaMcpTool(gatewayTestTool.value.id, payload);
+    gatewayTestResult.value = result;
+    showSuccessToast(result.message || t('Test message sent'));
+  } catch (error: any) {
+    console.error(error);
+    showErrorToast(error?.message ? t(error.message) : t('Test failed'));
+  } finally {
+    gatewayTestSubmitting.value = false;
+  }
+};
 const deletePrivateServer = async (server: McpServerItem) => {
   if (!window.confirm(t('Delete MCP server confirm', { name: server.name }))) return;
   try {
@@ -1033,3 +1451,4 @@ const deletePrivateServer = async (server: McpServerItem) => {
   background: rgba(255, 255, 255, 0.06);
 }
 </style>
+

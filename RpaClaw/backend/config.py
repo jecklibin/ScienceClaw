@@ -187,6 +187,8 @@ class Settings(BaseSettings):
     # 任务调度服务调用聊天接口时的 API Key（可选）
     task_service_api_key: str = os.environ.get("TASK_SERVICE_API_KEY", "")
     credential_key: str = os.environ.get("CREDENTIAL_KEY", "")
+    rpa_mcp_semantic_inference: bool = os.environ.get("RPA_MCP_SEMANTIC_INFERENCE", "true").lower() == "true"
+    rpa_mcp_semantic_timeout_seconds: int = int(os.environ.get("RPA_MCP_SEMANTIC_TIMEOUT_SECONDS", "20"))
     runtime_mode: str = os.environ.get("RUNTIME_MODE", "shared")
     runtime_idle_ttl_seconds: int = int(os.environ.get("RUNTIME_IDLE_TTL_SECONDS", "3600"))
     runtime_image: str = os.environ.get("SESSION_SANDBOX_IMAGE", "rpaclaw-sandbox:local")
