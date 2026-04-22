@@ -49,6 +49,11 @@ export interface RpaMcpPreview {
   output_inference_report?: Record<string, unknown>;
   schema_source?: RpaMcpSchemaSource;
   semantic_inference?: RpaMcpSemanticInference;
+  workflow_package?: {
+    workflow?: Record<string, unknown>;
+    params?: Record<string, unknown>;
+    files?: Record<string, string>;
+  };
   sanitize_report: {
     removed_steps: number[];
     removed_step_details?: Array<{

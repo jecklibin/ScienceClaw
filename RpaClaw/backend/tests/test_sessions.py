@@ -429,6 +429,52 @@ class TestRecordingRoutes(unittest.IsolatedAsyncioTestCase):
         create_task.assert_called_once()
         self.assertFalse(any(event["event"] == "recording_run_started" for event in events))
 
+    async def test_agent_background_worker_generates_fresh_user_event_id(self):
+        events = []
+
+        async def _save():
+            return None
+
+        async def _empty_stream(**kwargs):
+            if False:
+                yield kwargs
+
+        session = SimpleNamespace(
+            user_id="u1",
+            session_id="session-1",
+            status=SESSIONS_MODULE.SessionStatus.PENDING,
+            events=events,
+            save=AsyncMock(side_effect=_save),
+            model_config=None,
+            vm_root_dir="D:/tmp/workspace",
+            reset_cancel=MagicMock(),
+            is_cancelled=MagicMock(return_value=False),
+        )
+
+        repo = SimpleNamespace(find_many=AsyncMock(return_value=[]))
+
+        with (
+            unittest.mock.patch.object(SESSIONS_MODULE, "arun_science_task_stream", _empty_stream),
+            unittest.mock.patch.object(SESSIONS_MODULE, "_get_repo", return_value=repo),
+            unittest.mock.patch.object(SESSIONS_MODULE, "_snapshot_workspace_files", return_value={}),
+            unittest.mock.patch.object(SESSIONS_MODULE, "_diff_workspace_files", return_value=[]),
+            unittest.mock.patch.object(SESSIONS_MODULE, "_emit_to_sse"),
+        ):
+            await SESSIONS_MODULE._agent_background_worker(
+                session=session,
+                session_id="session-1",
+                message="第二轮用户消息",
+                attachments=[],
+                event_id="cursor-evt-123",
+                timestamp=1710000000,
+                language="zh",
+            )
+
+        self.assertEqual(events[0]["event"], "message")
+        self.assertEqual(events[0]["data"]["role"], "user")
+        self.assertNotEqual(events[0]["data"]["event_id"], "cursor-evt-123")
+        self.assertEqual(events[0]["data"]["content"], "第二轮用户消息")
+
     async def test_complete_recording_segment_route_appends_completion_event(self):
         events = []
 
@@ -843,7 +889,7 @@ class TestRecordingRoutes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[0]["event"], "recording_segment_completed")
         self.assertEqual(run.segments[0].kind, "script")
 
-    async def test_begin_recording_test_route_sets_testing_status(self):
+    async def test_begin_recording_test_route_executes_single_segment_run(self):
         async def _save():
             return None
 
@@ -857,6 +903,12 @@ class TestRecordingRoutes(unittest.IsolatedAsyncioTestCase):
         segment.exports["description"] = "下载并检查 PDF 文件"
         segment.exports["params"] = {"file_name": {"original_value": "paper.pdf"}}
         orchestrator.complete_segment(run, segment)
+        execution = {
+            "skill_dir": "/tmp/skill",
+            "workflow_path": "/tmp/skill/workflow.json",
+            "segments": [],
+            "result": {"success": True, "logs": ["segment ok"], "result": {"outputs": {}}},
+        }
 
         with (
             unittest.mock.patch.object(
@@ -869,6 +921,11 @@ class TestRecordingRoutes(unittest.IsolatedAsyncioTestCase):
                 "recording_orchestrator",
                 orchestrator,
             ),
+            unittest.mock.patch.object(
+                SESSIONS_MODULE.recording_testing,
+                "execute_recording_workflow_test",
+                AsyncMock(return_value=execution),
+            ) as execute_test,
         ):
             data = await SESSIONS_MODULE.test_recording_run(
                 "session-1",
@@ -876,8 +933,11 @@ class TestRecordingRoutes(unittest.IsolatedAsyncioTestCase):
                 current_user=current_user,
             )
 
-        self.assertEqual(data.data["run"]["status"], "testing")
+        execute_test.assert_awaited_once()
+        self.assertEqual(data.data["run"]["status"], "ready_to_publish")
+        self.assertEqual(data.data["run"]["testing"]["status"], "passed")
         self.assertEqual(data.data["test_payload"]["run_id"], run.id)
+        self.assertEqual(data.data["test_payload"]["execution"]["result"]["logs"], ["segment ok"])
         self.assertEqual(data.data["test_payload"]["rpa_session_id"], "rpa-1")
         self.assertEqual(data.data["test_payload"]["title"], "下载 PDF")
 
@@ -893,6 +953,12 @@ class TestRecordingRoutes(unittest.IsolatedAsyncioTestCase):
         segment.exports["rpa_session_id"] = "rpa-1"
         orchestrator.complete_segment(run, segment)
         orchestrator.mark_ready_to_publish(run, "skill")
+        execution = {
+            "skill_dir": "/tmp/skill",
+            "workflow_path": "/tmp/skill/workflow.json",
+            "segments": [],
+            "result": {"success": True, "logs": ["segment ok"], "result": {"outputs": {}}},
+        }
 
         with (
             unittest.mock.patch.object(
@@ -905,6 +971,11 @@ class TestRecordingRoutes(unittest.IsolatedAsyncioTestCase):
                 "recording_orchestrator",
                 orchestrator,
             ),
+            unittest.mock.patch.object(
+                SESSIONS_MODULE.recording_testing,
+                "execute_recording_workflow_test",
+                AsyncMock(return_value=execution),
+            ) as execute_test,
         ):
             data = await SESSIONS_MODULE.test_recording_run(
                 "session-1",
@@ -912,8 +983,9 @@ class TestRecordingRoutes(unittest.IsolatedAsyncioTestCase):
                 current_user=current_user,
             )
 
-        self.assertEqual(data.data["run"]["status"], "testing")
-        self.assertEqual(data.data["run"]["testing"]["status"], "running")
+        execute_test.assert_awaited_once()
+        self.assertEqual(data.data["run"]["status"], "ready_to_publish")
+        self.assertEqual(data.data["run"]["testing"]["status"], "passed")
 
     async def test_begin_recording_test_route_executes_multi_segment_workflow(self):
         async def _save():
@@ -963,6 +1035,65 @@ class TestRecordingRoutes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data.data["test_payload"]["mode"], "workflow")
         self.assertEqual(data.data["test_payload"]["execution"]["result"]["logs"], ["workflow ok"])
         self.assertTrue(session.events[0]["data"]["test_payload"]["execution"]["result"]["success"])
+        self.assertEqual(data.data["run"]["status"], "ready_to_publish")
+        self.assertEqual(data.data["run"]["testing"]["status"], "passed")
+
+    async def test_begin_recording_test_route_marks_multi_segment_workflow_failed(self):
+        async def _save():
+            return None
+
+        session = SimpleNamespace(user_id="u1", events=[], save=_save)
+        current_user = SimpleNamespace(id="u1")
+        orchestrator = RecordingOrchestrator()
+        run = orchestrator.create_run(session_id="session-1", user_id="u1", kind="mixed")
+        run.publish_target = "tool"
+        first = orchestrator.start_segment(run, kind="rpa", intent="get project", requires_workbench=True)
+        first.exports["testing_status"] = "passed"
+        orchestrator.complete_segment(run, first)
+        second = orchestrator.start_segment(run, kind="script", intent="transform data", requires_workbench=False)
+        second.exports["testing_status"] = "passed"
+        second.exports["script"] = "def run(context):\n    return {'ok': True}\n"
+        second.exports["entry"] = "segments/seg2.py"
+        orchestrator.complete_segment(run, second)
+        execution = {
+            "skill_dir": "/tmp/skill",
+            "workflow_path": "/tmp/skill/workflow.json",
+            "segments": [],
+            "result": {
+                "success": False,
+                "logs": ["workflow failed"],
+                "stderr": "boom",
+                "result": {},
+            },
+        }
+
+        with (
+            unittest.mock.patch.object(
+                SESSIONS_MODULE,
+                "async_get_science_session",
+                AsyncMock(return_value=session),
+            ),
+            unittest.mock.patch.object(
+                SESSIONS_MODULE,
+                "recording_orchestrator",
+                orchestrator,
+            ),
+            unittest.mock.patch.object(
+                SESSIONS_MODULE.recording_testing,
+                "execute_recording_workflow_test",
+                AsyncMock(return_value=execution),
+            ) as execute_test,
+        ):
+            data = await SESSIONS_MODULE.test_recording_run(
+                "session-1",
+                run.id,
+                current_user=current_user,
+            )
+
+        execute_test.assert_awaited_once()
+        self.assertEqual(data.data["run"]["status"], "needs_repair")
+        self.assertEqual(data.data["run"]["testing"]["status"], "failed")
+        self.assertIn("workflow failed", data.data["run"]["testing"]["error"])
 
     async def test_execute_workflow_test_route_returns_segments_and_result(self):
         async def _save():
@@ -1099,6 +1230,72 @@ class TestRecordingRoutes(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(data.data["prompt_kind"], "skill")
         self.assertTrue(data.data["staging_paths"])
+
+    async def test_publish_recording_run_with_tool_draft_returns_mcp_tool_prompt(self):
+        async def _save():
+            return None
+
+        session = SimpleNamespace(user_id="u1", events=[], save=_save)
+        current_user = SimpleNamespace(id="u1")
+        orchestrator = RecordingOrchestrator()
+        run = orchestrator.create_run(session_id="session-1", user_id="u1", kind="rpa")
+        run.publish_target = "tool"
+        segment = orchestrator.start_segment(run, kind="rpa", intent="录制工具", requires_workbench=True)
+        segment.steps = [{"action": "navigate", "url": "https://example.com"}]
+        segment.exports["rpa_session_id"] = "rpa-1"
+        orchestrator.complete_segment(run, segment)
+        orchestrator.begin_testing(run)
+
+        from backend.workflow.publishing import build_publish_draft
+        from backend.workflow.recording_adapter import recording_run_to_workflow
+
+        draft = build_publish_draft(recording_run_to_workflow(run), publish_target="tool")
+        prepared = SESSIONS_MODULE.recording_publishing.PublishPreparation(
+            prompt_kind="tool",
+            staging_paths=["rpa-mcp:tool-1"],
+            summary={
+                "name": "recorded_tool",
+                "title": "Recorded Tool",
+                "run_id": run.id,
+                "session_id": run.session_id,
+                "target": "mcp_tool",
+                "saved": True,
+                "tool_id": "tool-1",
+                "draft": draft.model_dump(mode="json"),
+            },
+        )
+
+        with (
+            unittest.mock.patch.object(
+                SESSIONS_MODULE,
+                "async_get_science_session",
+                AsyncMock(return_value=session),
+            ),
+            unittest.mock.patch.object(
+                SESSIONS_MODULE,
+                "recording_orchestrator",
+                orchestrator,
+            ),
+            unittest.mock.patch.object(
+                SESSIONS_MODULE.recording_publishing,
+                "build_mcp_tool_artifacts",
+                AsyncMock(return_value=prepared),
+            ) as build_mcp,
+        ):
+            data = await SESSIONS_MODULE.publish_recording_run(
+                "session-1",
+                run.id,
+                SESSIONS_MODULE.PublishRecordingRunRequest(
+                    publish_target="tool",
+                    draft=draft.model_dump(mode="json"),
+                ),
+                current_user=current_user,
+            )
+
+        self.assertEqual(data.data["prompt_kind"], "tool")
+        self.assertEqual(data.data["summary"]["target"], "mcp_tool")
+        self.assertTrue(data.data["summary"]["saved"])
+        build_mcp.assert_awaited_once()
 
 
 if __name__ == "__main__":

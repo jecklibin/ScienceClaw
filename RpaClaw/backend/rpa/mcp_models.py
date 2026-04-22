@@ -87,5 +87,9 @@ class RpaMcpToolDefinition(BaseModel):
     output_inference_report: dict[str, Any] = Field(default_factory=dict)
     semantic_inference: dict[str, Any] = Field(default_factory=build_rpa_mcp_semantic_report)
     sanitize_report: RpaMcpSanitizeReport = Field(default_factory=RpaMcpSanitizeReport)
+    # Conversational multi-segment tools store their executable workflow bundle
+    # here. Standalone MCP recordings leave this empty and execute generated
+    # Playwright from steps/params.
+    workflow_package: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)

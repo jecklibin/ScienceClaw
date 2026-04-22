@@ -451,8 +451,8 @@ const goToTest = () => {
 const goToMcpToolEditor = () => {
   router.push(buildRpaToolEditorLocation({
     sessionId: sessionId.value,
-    skillName: skillName.value,
-    skillDescription: skillDescription.value,
+    skillName: segmentTitle.value,
+    skillDescription: segmentPurpose.value,
   }));
 };
 

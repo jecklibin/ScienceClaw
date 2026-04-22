@@ -85,6 +85,34 @@ describe('createRecordingRunStore', () => {
     })
   })
 
+  it('routes embedded tool recordings to the segment configuration flow after capture', () => {
+    const store = createRecordingRunStore('chat-1')
+
+    store.onRunStarted({
+      run: { id: 'run-1', status: 'recording', type: 'mcp', publish_target: 'tool' },
+      segment: { id: 'seg-1', status: 'recording', kind: 'mcp', intent: 'fetch project name' },
+      open_workbench: true,
+    })
+
+    store.onRecordingCaptured({
+      rpaSessionId: 'rpa-1',
+      steps: [{ id: 'step-1', step_index: 0, action: 'navigate' }],
+      artifacts: [],
+    })
+
+    expect(store.recorderModalOpen.value).toBe(true)
+    expect(store.recorderModalRoute.value).toMatchObject({
+      path: '/rpa/segment-configure',
+      query: {
+        sessionId: 'rpa-1',
+        chatSessionId: 'chat-1',
+        runId: 'run-1',
+        segmentId: 'seg-1',
+        embedded: '1',
+      },
+    })
+  })
+
   it('appends completed segments in chronological order for bottom-of-chat rendering', () => {
     const store = createRecordingRunStore('chat-1')
 
@@ -172,6 +200,42 @@ describe('createRecordingRunStore', () => {
     })
 
     expect(store.publishDraft.value?.skill_name).toBe('download_and_convert_report')
+  })
+
+  it('clears a stale publish draft when recording continues with a new segment', () => {
+    const store = createRecordingRunStore('chat-1')
+
+    store.onPublishPrepared({
+      run: { id: 'run-1', status: 'ready_to_publish', type: 'rpa' },
+      prompt_kind: 'tool',
+      staging_paths: [],
+      summary: {
+        draft: {
+          id: 'draft_run-1',
+          run_id: 'run-1',
+          publish_target: 'tool',
+          skill_name: 'recorded_tool',
+          display_title: 'recorded tool',
+          description: 'recorded tool',
+          trigger_examples: [],
+          inputs: [],
+          outputs: [],
+          credentials: [],
+          segments: [],
+          warnings: [],
+        },
+      },
+    })
+
+    expect(store.publishDraft.value?.skill_name).toBe('recorded_tool')
+
+    store.onRunStarted({
+      run: { id: 'run-1', status: 'recording', type: 'rpa', publish_target: 'tool' },
+      segment: { id: 'seg-2', status: 'recording', kind: 'rpa', intent: 'continue' },
+      open_workbench: true,
+    })
+
+    expect(store.publishDraft.value).toBeNull()
   })
 
   it('does not reopen publish draft or action prompt while restoring recording history', () => {
@@ -267,7 +331,30 @@ describe('createRecordingRunStore', () => {
     })
   })
 
-  it('opens the workflow test route when multi-segment recording testing starts from chat', () => {
+  it('can update testing state without opening a modal when chat-triggered tests request background execution', () => {
+    const store = createRecordingRunStore('chat-1')
+
+    store.onSegmentCompleted({
+      segment: { id: 'seg-1', status: 'completed' },
+      summary: { segment_id: 'seg-1', session_id: 'rpa-1', artifacts: [] },
+    })
+
+    store.onTestStarted({
+      run: { id: 'run-1', status: 'testing', type: 'rpa', testing: { status: 'running' } },
+      test_payload: {
+        rpa_session_id: 'rpa-1',
+        segment_id: 'seg-1',
+        title: 'download PDF',
+      },
+    }, { openModal: false })
+
+    expect(store.recorderModalOpen.value).toBe(false)
+    expect(store.recorderModalRoute.value).toBeNull()
+    expect(store.run.value?.status).toBe('testing')
+    expect(store.testingState.value.status).toBe('running')
+  })
+
+  it('does not open a workflow test modal when multi-segment recording testing starts from chat', () => {
     const store = createRecordingRunStore('chat-1')
 
     store.onTestStarted({
@@ -281,15 +368,8 @@ describe('createRecordingRunStore', () => {
       },
     })
 
-    expect(store.recorderModalOpen.value).toBe(true)
-    expect(store.recorderModalRoute.value).toMatchObject({
-      path: '/rpa/workflow-test',
-      query: {
-        chatSessionId: 'chat-1',
-        runId: 'run-1',
-        embedded: '1',
-      },
-    })
+    expect(store.recorderModalOpen.value).toBe(false)
+    expect(store.recorderModalRoute.value).toBeNull()
   })
 
   it('updates existing segment summary when bindings are changed from chat', () => {

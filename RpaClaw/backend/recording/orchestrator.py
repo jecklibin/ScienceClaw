@@ -46,6 +46,7 @@ class RecordingOrchestrator:
         intent: str,
         requires_workbench: bool,
     ) -> RecordingSegment:
+        target_status = "recording" if requires_workbench else "waiting_user"
         segment = RecordingSegment(
             id=str(uuid.uuid4()),
             run_id=run.id,
@@ -53,9 +54,11 @@ class RecordingOrchestrator:
             intent=intent,
             status="recording",
         )
+        move_run_status(run, target_status)
+        if run.testing.get("status") != "idle":
+            run.testing = {"status": "idle"}
         run.segments.append(segment)
         run.active_segment_id = segment.id
-        move_run_status(run, "recording" if requires_workbench else "waiting_user")
         run.updated_at = datetime.now()
         return segment
 

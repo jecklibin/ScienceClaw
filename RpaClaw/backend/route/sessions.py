@@ -1747,7 +1747,7 @@ async def _agent_background_worker(
 
     if message.strip():
         user_event = _wrap_event("message", {
-            "event_id": event_id or _new_event_id(),
+            "event_id": _new_event_id(),
             "timestamp": timestamp or _now_ts(),
             "content": message,
             "role": "user",
@@ -2245,12 +2245,39 @@ async def test_recording_run(
 
     recording_orchestrator.begin_testing(run)
     test_payload = await recording_testing.build_test_payload(run)
-    if test_payload.get("mode") == "workflow":
-        test_payload["execution"] = await recording_testing.execute_recording_workflow_test(run, _Path(_WORKSPACE_DIR))
+    test_payload["execution"] = await recording_testing.execute_recording_workflow_test(run, _Path(_WORKSPACE_DIR))
+    execution_result = test_payload.get("execution", {}).get("result", {})
+    if execution_result.get("success"):
+        target = run.publish_target or run.save_intent or "skill"
+        recording_orchestrator.mark_ready_to_publish(run, target)
+    else:
+        error_parts: list[str] = []
+        logs = execution_result.get("logs")
+        if isinstance(logs, list):
+            error_parts.extend(str(item) for item in logs if str(item or "").strip())
+        stderr = str(execution_result.get("stderr") or "").strip()
+        if stderr:
+            error_parts.append(stderr)
+        error_text = "\n".join(error_parts).strip()
+        recording_orchestrator.mark_needs_repair(run, error=error_text or "workflow test failed")
+    compact_logs = execution_result.get("logs")
+    if isinstance(compact_logs, list):
+        compact_logs = [str(item) for item in compact_logs[:5] if str(item or "").strip()]
+    else:
+        compact_logs = []
     event_data = {
         "event_id": _new_event_id(),
         "timestamp": _now_ts(),
         "run": _serialize_recording_obj(run),
+        "summary": {
+            "mode": test_payload.get("mode"),
+            "executed": True,
+            "success": bool(execution_result.get("success")),
+            "run_status": run.status,
+            "testing_status": (run.testing or {}).get("status"),
+            "logs": compact_logs,
+            "stderr": str(execution_result.get("stderr") or "").strip(),
+        },
         "test_payload": test_payload,
     }
     _append_session_event(session, _wrap_event("recording_test_started", event_data))
@@ -2382,7 +2409,10 @@ async def prepare_recording_publish_draft(
     from backend.workflow.publishing import build_publish_draft
     from backend.workflow.recording_adapter import recording_run_to_workflow
 
-    target = body.publish_target if body.publish_target in {"skill", "tool", "mcp"} else "skill"
+    target = body.publish_target if body.publish_target in {"skill", "tool", "mcp"} else None
+    if target == "skill" and run.publish_target == "tool":
+        target = "tool"
+    target = target or run.publish_target or run.save_intent or "skill"
     workflow_run = recording_run_to_workflow(run)
     draft = build_publish_draft(workflow_run, publish_target=target)
     return ApiResponse(data={
@@ -2414,7 +2444,11 @@ async def publish_recording_run(
         raise HTTPException(status_code=403, detail="Access denied")
 
     try:
-        target_for_orchestrator = "tool" if body.publish_target == "mcp" else body.publish_target
+        requested_target = body.publish_target if body.publish_target in {"skill", "tool", "mcp"} else None
+        if requested_target == "skill" and run.publish_target == "tool":
+            requested_target = "tool"
+        requested_target = requested_target or run.publish_target or run.save_intent or "skill"
+        target_for_orchestrator = "tool" if requested_target == "mcp" else requested_target
         recording_orchestrator.mark_ready_to_publish(run, target_for_orchestrator)
         if body.draft:
             from backend.workflow.models import SkillPublishDraft
@@ -2423,22 +2457,25 @@ async def publish_recording_run(
 
             workflow_run = recording_run_to_workflow(run)
             draft = SkillPublishDraft.model_validate(body.draft)
-            workspace_root = _Path(_WORKSPACE_DIR)
-            staging_root = workspace_root / run.session_id / "skills_staging"
-            save_ready_root = workspace_root / run.session_id / ".agents" / "skills"
-            staging_result = write_skill_artifacts(workflow_run, draft, staging_root)
-            save_ready_result = write_skill_artifacts(workflow_run, draft, save_ready_root)
-            prepared = recording_publishing.PublishPreparation(
-                prompt_kind="skill",
-                staging_paths=[staging_result["skill_dir"], save_ready_result["skill_dir"]],
-                summary={
-                    "name": staging_result["name"],
-                    "title": draft.display_title,
-                    "run_id": run.id,
-                    "session_id": run.session_id,
-                    "draft": draft.model_dump(mode="json"),
-                },
-            )
+            if target_for_orchestrator == "tool" or draft.publish_target in {"tool", "mcp"}:
+                prepared = await recording_publishing.build_mcp_tool_artifacts(run, draft)
+            else:
+                workspace_root = _Path(_WORKSPACE_DIR)
+                staging_root = workspace_root / run.session_id / "skills_staging"
+                save_ready_root = workspace_root / run.session_id / ".agents" / "skills"
+                staging_result = write_skill_artifacts(workflow_run, draft, staging_root)
+                save_ready_result = write_skill_artifacts(workflow_run, draft, save_ready_root)
+                prepared = recording_publishing.PublishPreparation(
+                    prompt_kind="skill",
+                    staging_paths=[staging_result["skill_dir"], save_ready_result["skill_dir"]],
+                    summary={
+                        "name": staging_result["name"],
+                        "title": draft.display_title,
+                        "run_id": run.id,
+                        "session_id": run.session_id,
+                        "draft": draft.model_dump(mode="json"),
+                    },
+                )
         else:
             prepared = await recording_publishing.build_publish_artifacts(run, workspace_dir=str(_WORKSPACE_DIR))
     except ValueError as exc:

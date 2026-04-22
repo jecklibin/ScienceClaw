@@ -85,19 +85,44 @@ def build_publish_draft(
     )
 
 
+def build_workflow_artifact_payload(run: WorkflowRun, draft: SkillPublishDraft) -> dict[str, Any]:
+    workflow = _build_workflow_json(run, draft)
+    files: dict[str, str] = {}
+    for segment in run.ordered_segments():
+        if segment.kind == "rpa":
+            files[f"segments/{segment.id}_rpa.py"] = _build_rpa_segment_source(segment)
+        elif segment.kind == "script":
+            entry = segment.config.get("entry") or f"segments/{segment.id}_script.py"
+            files[f"segments/{Path(str(entry)).name}"] = str(
+                segment.config.get("source") or "def run(context):\n    return {}\n"
+            )
+        else:
+            files[f"segments/{segment.id}_{segment.kind}.json"] = json.dumps(
+                segment.model_dump(mode="json"),
+                ensure_ascii=False,
+                indent=2,
+            )
+    return {
+        "schema_version": "1.0",
+        "workflow": workflow,
+        "params": _build_params_config(run, draft),
+        "files": files,
+    }
+
+
 def write_skill_artifacts(run: WorkflowRun, draft: SkillPublishDraft, base_dir: Path) -> dict[str, Any]:
     safe_name = safe_skill_name(draft.skill_name, f"workflow_{run.id[:8]}")
     skill_dir = base_dir / safe_name
     segments_dir = skill_dir / "segments"
     segments_dir.mkdir(parents=True, exist_ok=True)
 
-    workflow = _build_workflow_json(run, draft)
+    payload = build_workflow_artifact_payload(run, draft)
     (skill_dir / "workflow.json").write_text(
-        json.dumps(workflow, ensure_ascii=False, indent=2),
+        json.dumps(payload["workflow"], ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     (skill_dir / "params.json").write_text(
-        json.dumps(_build_params_config(run, draft), ensure_ascii=False, indent=2),
+        json.dumps(payload["params"], ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     (skill_dir / "SKILL.md").write_text(_build_skill_md(draft, safe_name), encoding="utf-8")
@@ -112,13 +137,10 @@ def write_skill_artifacts(run: WorkflowRun, draft: SkillPublishDraft, base_dir: 
         encoding="utf-8",
     )
 
-    for segment in run.ordered_segments():
-        if segment.kind == "rpa":
-            _write_rpa_segment(segments_dir, segment)
-        elif segment.kind == "script":
-            _write_script_segment(segments_dir, segment)
-        else:
-            _write_metadata_segment(segments_dir, segment)
+    for relative_path, source in payload["files"].items():
+        target_path = skill_dir / relative_path
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(source, encoding="utf-8")
 
     return {
         "name": safe_name,
@@ -351,7 +373,7 @@ def _normalize_param_config(name: str, config: dict[str, Any], *, description: s
     return normalized
 
 
-def _write_rpa_segment(segments_dir: Path, segment: WorkflowSegment) -> None:
+def _build_rpa_segment_source(segment: WorkflowSegment) -> str:
     generator = PlaywrightGenerator()
     script = generator.generate_script(
         segment.config.get("steps", []),
@@ -359,23 +381,7 @@ def _write_rpa_segment(segments_dir: Path, segment: WorkflowSegment) -> None:
         is_local=settings.storage_backend == "local",
         test_mode=False,
     )
-    module_source = _convert_rpa_script_to_segment_module(script)
-    (segments_dir / f"{segment.id}_rpa.py").write_text(module_source, encoding="utf-8")
-
-
-def _write_script_segment(segments_dir: Path, segment: WorkflowSegment) -> None:
-    entry = segment.config.get("entry") or f"segments/{segment.id}_script.py"
-    source = segment.config.get("source") or "def run(context):\n    return {}\n"
-    script_name = Path(str(entry)).name
-    (segments_dir / script_name).write_text(str(source), encoding="utf-8")
-
-
-def _write_metadata_segment(segments_dir: Path, segment: WorkflowSegment) -> None:
-    payload = segment.model_dump(mode="json")
-    (segments_dir / f"{segment.id}_{segment.kind}.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    return _convert_rpa_script_to_segment_module(script)
 
 
 def _convert_rpa_script_to_segment_module(script: str) -> str:

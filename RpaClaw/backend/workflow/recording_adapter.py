@@ -95,9 +95,17 @@ def _run_intent(run: RecordingRun) -> str:
 
 
 def _segment_kind(segment: RecordingSegment) -> WorkflowSegmentKind:
-    if segment.kind in {"rpa", "script", "mcp", "mixed"}:
+    if segment.kind in {"rpa", "script", "mcp", "llm"}:
         return segment.kind
-    return "mixed"
+    if segment.kind == "mixed":
+        exports = segment.exports or {}
+        if segment.steps or exports.get("rpa_session_id") or exports.get("browser") or exports.get("auth_config"):
+            return "rpa"
+        if exports.get("script") or exports.get("entry") or exports.get("language"):
+            return "script"
+        if exports.get("tool") or exports.get("tool_name") or exports.get("tool_schema"):
+            return "mcp"
+    return "rpa" if segment.steps else "script"
 
 
 def _params_to_inputs(params: dict[str, Any], explicit_inputs: Any) -> list[SegmentInput]:

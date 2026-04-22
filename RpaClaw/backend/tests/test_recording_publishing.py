@@ -2,9 +2,22 @@ import asyncio
 import json
 import tempfile
 from pathlib import Path
+import pytest
 
 from backend.recording.models import RecordingRun, RecordingSegment
-from backend.recording.publishing import build_publish_artifacts
+from backend.recording.publishing import build_mcp_tool_artifacts, build_publish_artifacts
+from backend.workflow.models import PublishInput
+from backend.workflow.publishing import build_publish_draft
+from backend.workflow.recording_adapter import recording_run_to_workflow
+
+
+class _FakeMcpRegistry:
+    def __init__(self):
+        self.saved = []
+
+    async def save(self, tool):
+        self.saved.append(tool)
+        return tool
 
 
 def test_publish_skill_builds_complete_multi_segment_skill():
@@ -207,15 +220,181 @@ def test_publish_skill_uses_structured_navigation_url_and_named_output():
         assert '_results["extract_text_1"]' not in segment_script
 
 
-def test_publish_tool_builds_tool_staging_output():
+def test_recording_run_to_workflow_normalizes_mixed_segment_with_steps_to_rpa():
+    run = RecordingRun(id="run-mixed", session_id="session-1", user_id="u1", type="mixed")
+    run.publish_target = "tool"
+    run.segments = [
+        RecordingSegment(
+            id="segment-mixed",
+            run_id="run-mixed",
+            kind="mixed",
+            intent="获取趋势项目",
+            status="completed",
+            steps=[
+                {
+                    "id": "step-1",
+                    "action": "goto",
+                    "url": "https://github.com/trending",
+                    "description": "导航到 GitHub Trending",
+                }
+            ],
+            exports={
+                "title": "获取趋势项目",
+                "description": "打开页面并继续后续提取",
+                "testing_status": "passed",
+            },
+        )
+    ]
+
+    workflow = recording_run_to_workflow(run)
+
+    assert workflow.segments[0].kind == "rpa"
+    assert workflow.segments[0].config["source_recording_kind"] == "mixed"
+    assert workflow.segments[0].config["steps"][0]["url"] == "https://github.com/trending"
+
+
+def test_publish_tool_requires_recorded_steps():
     with tempfile.TemporaryDirectory() as tmp_dir:
         run = RecordingRun(id="run-1", session_id="session-1", user_id="u1", type="mcp")
         run.publish_target = "tool"
 
-        result = asyncio.run(build_publish_artifacts(run, workspace_dir=tmp_dir))
+        with pytest.raises(ValueError, match="without recorded RPA/MCP steps"):
+            asyncio.run(build_publish_artifacts(run, workspace_dir=tmp_dir))
 
-        assert result.prompt_kind == "tool"
-        assert result.staging_paths
-        staged_file = Path(result.staging_paths[0])
-        assert staged_file.parent.name == "tools_staging"
-        assert staged_file.suffix == ".py"
+
+def test_confirmed_tool_draft_saves_rpa_mcp_tool():
+    run = RecordingRun(id="run-1", session_id="session-1", user_id="u1", type="rpa")
+    run.publish_target = "tool"
+    run.segments = [
+        RecordingSegment(
+            id="segment-1",
+            run_id=run.id,
+            kind="rpa",
+            intent="搜索项目",
+            status="completed",
+            steps=[
+                {"action": "navigate", "url": "https://github.com/trending", "description": "打开 GitHub Trending"},
+                {
+                    "action": "extract_text",
+                    "description": "提取第一个项目名称",
+                    "target": "h2 a",
+                    "locator": {"method": "css", "value": "h2 a"},
+                    "result_key": "project_name",
+                },
+            ],
+            exports={
+                "rpa_session_id": "rpa-session-1",
+                "title": "搜索项目",
+                "description": "搜索并提取项目名称",
+                "testing_status": "passed",
+            },
+        )
+    ]
+    draft = build_publish_draft(recording_run_to_workflow(run), publish_target="tool")
+    draft.skill_name = "github_project_search"
+    draft.display_title = "GitHub project search"
+    registry = _FakeMcpRegistry()
+
+    result = asyncio.run(build_mcp_tool_artifacts(run, draft, registry=registry))
+
+    assert result.prompt_kind == "tool"
+    assert result.summary["target"] == "mcp_tool"
+    assert result.summary["saved"] is True
+    assert result.summary["name"] == "github_project_search"
+    assert result.staging_paths == [f"rpa-mcp:{result.summary['tool_id']}"]
+    assert len(registry.saved) == 1
+    assert registry.saved[0].source.session_id == "rpa-session-1"
+    assert registry.saved[0].tool_name == "github_project_search"
+
+
+def test_publish_tool_keeps_segment_output_bindings_in_workflow_package():
+    run = RecordingRun(id="run-bound-tool", session_id="session-1", user_id="u1", type="mixed")
+    run.publish_target = "tool"
+    run.segments = [
+        RecordingSegment(
+            id="segment-a",
+            run_id=run.id,
+            kind="rpa",
+            intent="Get project name",
+            status="completed",
+            steps=[
+                {"id": "step-a1", "action": "navigate", "url": "https://github.com/trending"},
+                {
+                    "id": "step-a2",
+                    "action": "extract_text",
+                    "target": '{"method":"css","value":"h2 a"}',
+                    "result_key": "project_name",
+                },
+            ],
+            exports={
+                "rpa_session_id": "rpa-session-1",
+                "title": "Get project name",
+                "description": "Extract the first project name.",
+                "outputs": [
+                    {"name": "project_name", "type": "string", "description": "Project name"},
+                ],
+                "testing_status": "passed",
+            },
+        ),
+        RecordingSegment(
+            id="segment-b",
+            run_id=run.id,
+            kind="rpa",
+            intent="Search project",
+            status="completed",
+            steps=[
+                {"id": "step-b1", "action": "navigate", "url": "https://www.runoob.com"},
+                {
+                    "id": "step-b2",
+                    "action": "fill",
+                    "target": '{"method":"role","role":"textbox","name":"search"}',
+                    "value": "test",
+                },
+            ],
+            exports={
+                "rpa_session_id": "rpa-session-2",
+                "title": "Search project",
+                "description": "Search with the previous segment output.",
+                "params": {
+                    "keyword": {
+                        "original_value": "test",
+                        "type": "string",
+                        "description": "Search keyword",
+                        "required": True,
+                        "sensitive": False,
+                    }
+                },
+                "inputs": [
+                    {
+                        "name": "keyword",
+                        "type": "string",
+                        "required": True,
+                        "source": "segment_output",
+                        "source_ref": "segment-a.outputs.project_name",
+                        "description": "Search keyword",
+                    },
+                ],
+                "testing_status": "passed",
+            },
+        ),
+    ]
+    draft = build_publish_draft(recording_run_to_workflow(run), publish_target="tool")
+    draft.skill_name = "bound_project_search"
+    draft.inputs.append(
+        PublishInput(
+            name="keyword",
+            type="string",
+            required=True,
+            description="Stale public input from before binding",
+            default="test",
+        )
+    )
+    registry = _FakeMcpRegistry()
+
+    asyncio.run(build_mcp_tool_artifacts(run, draft, registry=registry))
+
+    saved = registry.saved[0]
+    second_segment = saved.workflow_package["workflow"]["segments"][1]
+    assert second_segment["inputs"][0]["source_ref"] == "segment-a.outputs.project_name"
+    assert "keyword" not in saved.input_schema["properties"]
+    assert "keyword" not in saved.params

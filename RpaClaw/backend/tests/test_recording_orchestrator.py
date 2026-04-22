@@ -1,10 +1,12 @@
 from backend.recording.intent import detect_recording_intent
 from backend.recording.models import RecordingArtifact
 from backend.recording.orchestrator import RecordingOrchestrator
+from backend.recording.publishing import PublishPreparation
 from backend.recording.service import recording_orchestrator
 from backend.deepagent.tools import create_recording_lifecycle_tools
 from pathlib import Path
 import json
+from unittest.mock import AsyncMock, patch
 
 
 def test_recording_creator_skill_mentions_full_lifecycle_triggers():
@@ -424,3 +426,225 @@ def test_mark_ready_to_publish_is_idempotent_for_already_ready_run():
     assert run.status == "ready_to_publish"
     assert run.publish_target == "skill"
     assert run.testing["status"] == "passed"
+
+
+def test_ready_to_publish_run_can_continue_with_new_segment_and_invalidates_test_result():
+    orchestrator = RecordingOrchestrator()
+    run = orchestrator.create_run(session_id="session-1", user_id="u1", kind="rpa")
+    segment = orchestrator.start_segment(run, kind="rpa", intent="获取项目名称", requires_workbench=True)
+    orchestrator.complete_segment(run, segment)
+    orchestrator.mark_ready_to_publish(run, "tool")
+
+    next_segment = orchestrator.start_segment(
+        run,
+        kind="rpa",
+        intent="搜索项目名称",
+        requires_workbench=True,
+    )
+
+    assert run.status == "recording"
+    assert run.active_segment_id == next_segment.id
+    assert run.testing == {"status": "idle"}
+    assert run.publish_target == "tool"
+
+
+def test_begin_recording_test_tool_marks_workflow_ready_to_publish_on_success():
+    tools = {
+        tool.name: tool
+        for tool in create_recording_lifecycle_tools(
+            session_id="session-tool-test-workflow-success",
+            user_id="u1",
+            workspace_dir="/tmp/workspace",
+        )
+    }
+
+    started = json.loads(
+        tools["start_recording_run"].invoke({
+            "message": "我要录制个工具",
+            "kind": "rpa",
+            "publish_target": "tool",
+        })
+    )
+    run_id = started["run"]["id"]
+    run = recording_orchestrator.get_run(run_id)
+    first = run.segments[-1]
+    first.steps = [{"id": "step-1", "action": "goto", "url": "https://github.com/trending"}]
+    first.exports["testing_status"] = "passed"
+    recording_orchestrator.complete_segment(run, first)
+    second = recording_orchestrator.start_segment(run, kind="script", intent="处理结果", requires_workbench=False)
+    second.exports["testing_status"] = "passed"
+    second.exports["script"] = "def run(context):\n    return {'ok': True}\n"
+    second.exports["entry"] = "segments/seg2.py"
+    recording_orchestrator.complete_segment(run, second)
+
+    with patch(
+        "backend.deepagent.tools.execute_recording_workflow_test",
+        new=AsyncMock(return_value={
+            "skill_dir": "/tmp/skill",
+            "workflow_path": "/tmp/skill/workflow.json",
+            "segments": [],
+            "result": {"success": True, "logs": ["workflow ok"], "result": {}},
+        }),
+        create=True,
+    ), patch(
+        "backend.recording.testing.execute_recording_workflow_test",
+        new=AsyncMock(return_value={
+            "skill_dir": "/tmp/skill",
+            "workflow_path": "/tmp/skill/workflow.json",
+            "segments": [],
+            "result": {"success": True, "logs": ["workflow ok"], "result": {}},
+        }),
+    ):
+        payload = json.loads(tools["begin_recording_test"].invoke({"run_id": run_id}))
+
+    assert payload["run"]["status"] == "ready_to_publish"
+    assert payload["run"]["testing"]["status"] == "passed"
+
+
+def test_begin_recording_test_tool_executes_single_segment_run():
+    tools = {
+        tool.name: tool
+        for tool in create_recording_lifecycle_tools(
+            session_id="session-tool-test-segment-success",
+            user_id="u1",
+            workspace_dir="/tmp/workspace",
+        )
+    }
+
+    started = json.loads(
+        tools["start_recording_run"].invoke({
+            "message": "我要录制个工具",
+            "kind": "rpa",
+            "publish_target": "tool",
+        })
+    )
+    run_id = started["run"]["id"]
+    run = recording_orchestrator.get_run(run_id)
+    first = run.segments[-1]
+    first.steps = [{"id": "step-1", "action": "goto", "url": "https://github.com/trending"}]
+    first.exports["rpa_session_id"] = "rpa-1"
+    first.exports["title"] = "获取项目名称"
+    recording_orchestrator.complete_segment(run, first)
+
+    with patch(
+        "backend.deepagent.tools.execute_recording_workflow_test",
+        new=AsyncMock(return_value={
+            "skill_dir": "/tmp/skill",
+            "workflow_path": "/tmp/skill/workflow.json",
+            "segments": [],
+            "result": {"success": True, "logs": ["segment ok"], "result": {}},
+        }),
+        create=True,
+    ), patch(
+        "backend.recording.testing.execute_recording_workflow_test",
+        new=AsyncMock(return_value={
+            "skill_dir": "/tmp/skill",
+            "workflow_path": "/tmp/skill/workflow.json",
+            "segments": [],
+            "result": {"success": True, "logs": ["segment ok"], "result": {}},
+        }),
+    ):
+        payload = json.loads(tools["begin_recording_test"].invoke({"run_id": run_id}))
+
+    assert payload["test_payload"]["mode"] == "segment"
+    assert payload["test_payload"]["execution"]["result"]["logs"] == ["segment ok"]
+    assert payload["run"]["status"] == "ready_to_publish"
+    assert payload["run"]["testing"]["status"] == "passed"
+
+
+def test_begin_recording_test_tool_marks_workflow_needs_repair_on_failure():
+    tools = {
+        tool.name: tool
+        for tool in create_recording_lifecycle_tools(
+            session_id="session-tool-test-workflow-failure",
+            user_id="u1",
+            workspace_dir="/tmp/workspace",
+        )
+    }
+
+    started = json.loads(
+        tools["start_recording_run"].invoke({
+            "message": "我要录制个工具",
+            "kind": "rpa",
+            "publish_target": "tool",
+        })
+    )
+    run_id = started["run"]["id"]
+    run = recording_orchestrator.get_run(run_id)
+    first = run.segments[-1]
+    first.steps = [{"id": "step-1", "action": "goto", "url": "https://github.com/trending"}]
+    first.exports["testing_status"] = "passed"
+    recording_orchestrator.complete_segment(run, first)
+    second = recording_orchestrator.start_segment(run, kind="script", intent="处理结果", requires_workbench=False)
+    second.exports["testing_status"] = "passed"
+    second.exports["script"] = "def run(context):\n    return {'ok': True}\n"
+    second.exports["entry"] = "segments/seg2.py"
+    recording_orchestrator.complete_segment(run, second)
+
+    with patch(
+        "backend.deepagent.tools.execute_recording_workflow_test",
+        new=AsyncMock(return_value={
+            "skill_dir": "/tmp/skill",
+            "workflow_path": "/tmp/skill/workflow.json",
+            "segments": [],
+            "result": {"success": False, "logs": ["workflow failed"], "stderr": "boom", "result": {}},
+        }),
+        create=True,
+    ), patch(
+        "backend.recording.testing.execute_recording_workflow_test",
+        new=AsyncMock(return_value={
+            "skill_dir": "/tmp/skill",
+            "workflow_path": "/tmp/skill/workflow.json",
+            "segments": [],
+            "result": {"success": False, "logs": ["workflow failed"], "stderr": "boom", "result": {}},
+        }),
+    ):
+        payload = json.loads(tools["begin_recording_test"].invoke({"run_id": run_id}))
+
+    assert payload["run"]["status"] == "needs_repair"
+    assert payload["run"]["testing"]["status"] == "failed"
+
+
+def test_prepare_recording_publish_tool_preserves_existing_tool_target_when_argument_omitted():
+    tools = {
+        tool.name: tool
+        for tool in create_recording_lifecycle_tools(
+            session_id="session-tool-test-publish-target",
+            user_id="u1",
+            workspace_dir="/tmp/workspace",
+        )
+    }
+    started = json.loads(
+        tools["start_recording_run"].invoke({
+            "message": "我要录制个工具",
+            "kind": "rpa",
+            "publish_target": "tool",
+        })
+    )
+    run_id = started["run"]["id"]
+    run = recording_orchestrator.get_run(run_id)
+    segment = run.segments[-1]
+    segment.steps = [{"id": "step-1", "action": "goto", "url": "https://github.com/trending"}]
+    recording_orchestrator.complete_segment(run, segment)
+
+    async def _fake_build_publish_artifacts(candidate_run, workspace_dir):
+        assert candidate_run.publish_target == "tool"
+        return PublishPreparation(
+            prompt_kind="tool",
+            staging_paths=["rpa-mcp:tool-1"],
+            summary={
+                "name": "tool_1",
+                "saved": True,
+                "draft": {"skill_name": "tool_1", "publish_target": "tool"},
+            },
+        )
+
+    with patch(
+        "backend.recording.publishing.build_publish_artifacts",
+        new=AsyncMock(side_effect=_fake_build_publish_artifacts),
+    ):
+        payload = json.loads(tools["prepare_recording_publish"].invoke({"run_id": run_id}))
+
+    assert payload["prompt_kind"] == "tool"
+    assert payload["run"]["publish_target"] == "tool"
+    assert run.publish_target == "tool"

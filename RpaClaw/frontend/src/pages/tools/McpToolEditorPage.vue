@@ -15,6 +15,7 @@ import {
   type RpaMcpExecutionResult,
   type RpaMcpPreview,
 } from '@/api/rpaMcp';
+import { completeRecordingSegment } from '@/api/recording';
 import { apiClient } from '@/api/client';
 import {
   buildRpaRecorderLocation,
@@ -23,7 +24,14 @@ import {
   getPreviewTestStatus,
   hasMatchingPreviewTest,
 } from '@/utils/rpaMcpConvert';
-import { buildRecordedStepSummary, buildSchemaSummary, shouldShowCookieSection } from '@/utils/rpaMcpEditorView';
+import {
+  buildRecordedStepSummary,
+  buildRecordingStepsFromMcpEditorSteps,
+  buildSchemaSummary,
+  buildWorkflowInputsFromSchema,
+  buildWorkflowOutputsFromSchema,
+  shouldShowCookieSection,
+} from '@/utils/rpaMcpEditorView';
 import { convertCookieInputToPlaywrightCookies, type CookieInputMode } from '@/utils/rpaMcpTest';
 import { showErrorToast, showSuccessToast } from '@/utils/toast';
 
@@ -121,6 +129,12 @@ type ArgumentValue = string;
 const argumentValues = reactive<Record<string, ArgumentValue>>({});
 const editableParams = ref<EditableParam[]>([]);
 const source = computed(() => typeof route.query.source === 'string' ? route.query.source : '');
+const isEmbedded = computed(() => route.query.embedded === '1');
+const isSegmentConfigureMode = computed(() => route.path.endsWith('/segment-configure'));
+const chatSessionId = computed(() => typeof route.query.chatSessionId === 'string' ? route.query.chatSessionId : '');
+const recordingRunId = computed(() => typeof route.query.runId === 'string' ? route.query.runId : '');
+const recordingSegmentId = computed(() => typeof route.query.segmentId === 'string' ? route.query.segmentId : '');
+const returnTo = computed(() => typeof route.query.returnTo === 'string' ? route.query.returnTo : '/chat');
 const savedToolId = computed(() => typeof route.params.toolId === 'string' ? route.params.toolId : '');
 const editorMode = computed(() => typeof route.query.mode === 'string' ? route.query.mode : 'edit');
 const isExistingTool = computed(() => Boolean(savedToolId.value));
@@ -575,11 +589,13 @@ const cookieInputPlaceholder = computed(() => {
   return '[{"name":"sid","value":"abc","domain":".example.com","path":"/"}]';
 });
 const pageTitle = computed(() => {
+  if (isSegmentConfigureMode.value) return t('MCP Editor Configure recorded segment');
   if (isViewMode.value) return t('MCP Editor View MCP Tool');
   if (isExistingTool.value) return t('MCP Editor Edit MCP Tool');
   return source.value === 'rpa-session' ? t('MCP Editor Create MCP Tool') : t('MCP Editor MCP Tool Editor');
 });
 const pageDescription = computed(() => {
+  if (isSegmentConfigureMode.value) return t('MCP Editor Review this recorded segment, tune steps, define inputs and outputs, run a preview test, then return to chat.');
   if (isViewMode.value) return t('MCP Editor View saved MCP tool metadata, schemas, test state, and recorded steps.');
   if (isExistingTool.value) return t('MCP Editor Edit saved MCP tool metadata, schemas, test state, and recorded steps.');
   return source.value === 'rpa-session'
@@ -693,8 +709,9 @@ const loadExistingTool = async () => {
   try {
     const tool = await getRpaMcpTool(savedToolId.value);
     applyToolToEditor(tool);
+    const hasPersistedRecordedSteps = Array.isArray(tool.steps) && tool.steps.length > 0;
     const sourceSessionId = typeof tool.source?.session_id === 'string' ? tool.source.session_id : '';
-    if (sourceSessionId) {
+    if (sourceSessionId && !hasPersistedRecordedSteps) {
       await loadRecordedSession(sourceSessionId, { silent: true });
     } else {
       stepsLoading.value = false;
@@ -792,11 +809,70 @@ const runPreviewTest = async () => {
   }
 };
 
+const finishEmbeddedRecordingSegment = async (options?: {
+  authConfig?: Record<string, unknown>;
+}) => {
+  if (!isEmbedded.value || !chatSessionId.value || !recordingRunId.value || !recordingSegmentId.value || !sessionId.value) return false;
+  const outputSchema = parseJsonObjectText(outputSchemaText.value, t('Output schema JSON invalid'));
+  const payload = await completeRecordingSegment(
+    chatSessionId.value,
+    recordingRunId.value,
+    recordingSegmentId.value,
+    {
+      rpa_session_id: sessionId.value,
+      steps: buildRecordingStepsFromMcpEditorSteps(recordedSteps.value as unknown as Array<Record<string, any>>),
+      artifacts: [],
+      params: buildConfirmedParams(),
+      inputs: buildWorkflowInputsFromSchema(confirmedInputSchema.value),
+      outputs: buildWorkflowOutputsFromSchema(outputSchema),
+      title: toolName.value,
+      description: description.value,
+      testing_status: hasMatchingSuccessfulTest.value ? 'passed' : 'configured',
+      auth_config: options?.authConfig,
+    },
+  );
+  window.parent?.postMessage(
+    {
+      type: 'rpa-recording-completed',
+      payload: {
+        ...payload,
+        runId: recordingRunId.value,
+        segmentId: recordingSegmentId.value,
+      },
+    },
+    window.location.origin,
+  );
+  return true;
+};
+
+const goBack = () => {
+  if (isEmbedded.value) {
+    window.parent?.postMessage(
+      {
+        type: 'rpa-recording-close',
+        payload: {
+          runId: recordingRunId.value,
+          segmentId: recordingSegmentId.value,
+        },
+      },
+      window.location.origin,
+    );
+    return;
+  }
+  if (returnTo.value && returnTo.value !== '/chat') {
+    router.push(returnTo.value);
+    return;
+  }
+  router.back();
+};
+
 const saveTool = async () => {
   if (isViewMode.value) return;
   if (!isExistingTool.value && !sessionId.value) return;
   if (!isExistingTool.value && !hasMatchingSuccessfulTest.value) {
-    showErrorToast(t('MCP Editor Run a successful preview test before saving this tool'));
+    showErrorToast(t(isSegmentConfigureMode.value
+      ? 'MCP Editor Run a successful preview test before saving this segment'
+      : 'MCP Editor Run a successful preview test before saving this tool'));
     focusPreviewTestSection(previewTestSection.value);
     return;
   }
@@ -813,6 +889,14 @@ const saveTool = async () => {
       output_schema: parseJsonObjectText(outputSchemaText.value, t('Output schema JSON invalid')),
       output_schema_confirmed: true,
     };
+    if (isSegmentConfigureMode.value) {
+      if (await finishEmbeddedRecordingSegment()) {
+        showSuccessToast(t('MCP Editor Segment saved'));
+        return;
+      }
+      showErrorToast(t('MCP Editor Failed to save segment'));
+      return;
+    }
     if (isExistingTool.value) {
       const updated = await updateRpaMcpTool(savedToolId.value, {
         ...payload,
@@ -821,8 +905,16 @@ const saveTool = async () => {
       applyToolToEditor(updated);
       showSuccessToast(t('MCP Editor Tool updated'));
     } else {
-      await createRpaMcpTool(sessionId.value, payload);
+      const savedTool = await createRpaMcpTool(sessionId.value, payload);
       showSuccessToast(t('MCP Editor Converted tool saved'));
+      if (await finishEmbeddedRecordingSegment({
+        authConfig: {
+          mcp_tool_id: savedTool.id || '',
+          mcp_tool_name: savedTool.tool_name || savedTool.name || toolName.value,
+        },
+      })) {
+        return;
+      }
     }
     router.push('/chat/tools');
   } catch (error: any) {
@@ -864,7 +956,7 @@ onMounted(async () => {
     <div class="flex-1 overflow-y-auto">
       <div class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
       <div class="mb-6 flex items-center justify-between gap-4">
-        <button class="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold dark:border-white/10 dark:bg-white/5" @click="router.back()">
+        <button class="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold dark:border-white/10 dark:bg-white/5" @click="goBack">
           <ArrowLeft :size="16" />
           {{ t('Back') }}
         </button>
@@ -883,7 +975,7 @@ onMounted(async () => {
           @click="saveTool"
         >
           <Save :size="16" />
-          {{ saving ? t('Saving...') : (isExistingTool ? t('Save changes') : t('MCP Editor Save as MCP Tool')) }}
+          {{ saving ? t('Saving...') : (isSegmentConfigureMode ? t('MCP Editor Save segment') : (isExistingTool ? t('Save changes') : t('MCP Editor Save as MCP Tool'))) }}
         </button>
       </div>
 

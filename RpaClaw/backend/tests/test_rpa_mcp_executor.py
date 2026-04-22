@@ -152,3 +152,87 @@ async def execute_skill(page, month, _downloads_dir=None):
         "data": {"month": "2026-03", "downloads_dir": "D:/tmp/downloads"},
     }
     assert page.calls == [("wait_for_timeout", 123), ("wait_for_timeout", 3000)]
+
+
+@pytest.mark.anyio
+async def test_execute_workflow_package_resolves_segment_output_bindings():
+    page = _FakePage()
+    context = _FakeContext(page)
+    browser = _FakeBrowser(context)
+    executor = RpaMcpExecutor(browser_factory=lambda *_args, **_kwargs: browser)
+    tool = RpaMcpToolDefinition(
+        id="tool-1",
+        user_id="user-1",
+        name="bound workflow",
+        tool_name="bound_workflow",
+        description="Run a bound workflow.",
+        allowed_domains=[],
+        post_auth_start_url="",
+        steps=[],
+        params={},
+        input_schema={"type": "object", "properties": {}, "required": []},
+        output_schema={
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "message": {"type": "string"},
+                "data": {
+                    "type": "object",
+                    "properties": {
+                        "project_name": {"type": "string"},
+                        "search_keyword": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+                "downloads": {"type": "array", "items": {"type": "object"}},
+                "artifacts": {"type": "array", "items": {"type": "object"}},
+                "error": {"type": ["object", "null"]},
+            },
+            "required": ["success", "data", "downloads", "artifacts"],
+        },
+        source={"type": "rpa_skill", "session_id": "session-1", "skill_name": "bound_workflow"},
+        workflow_package={
+            "workflow": {
+                "segments": [
+                    {
+                        "id": "segment-a",
+                        "kind": "rpa",
+                        "entry": "segments/segment-a_rpa.py",
+                        "inputs": [],
+                    },
+                    {
+                        "id": "segment-b",
+                        "kind": "rpa",
+                        "entry": "segments/segment-b_rpa.py",
+                        "inputs": [
+                            {
+                                "name": "keyword",
+                                "type": "string",
+                                "source": "segment_output",
+                                "source_ref": "segment-a.outputs.project_name",
+                            }
+                        ],
+                    },
+                ]
+            },
+            "params": {},
+            "files": {
+                "segments/segment-a_rpa.py": (
+                    "async def execute_segment(page, workflow_context=None, **kwargs):\n"
+                    "    return {'project_name': 'FinceptTerminal'}\n"
+                ),
+                "segments/segment-b_rpa.py": (
+                    "async def execute_segment(page, workflow_context=None, **kwargs):\n"
+                    "    return {'search_keyword': kwargs.get('keyword')}\n"
+                ),
+            },
+        },
+    )
+
+    result = await executor.execute(tool, {})
+
+    assert result["success"] is True
+    assert result["data"] == {
+        "project_name": "FinceptTerminal",
+        "search_keyword": "FinceptTerminal",
+    }

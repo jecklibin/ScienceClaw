@@ -322,12 +322,39 @@ def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_di
             return f"Error: {exc}"
         recording_orchestrator.begin_testing(run)
         payload = _run_async(build_test_payload(run))
-        if payload.get("mode") == "workflow":
-            payload["execution"] = _run_async(execute_recording_workflow_test(run, workspace_dir=workspace_dir))
+        payload["execution"] = _run_async(execute_recording_workflow_test(run, workspace_dir=workspace_dir))
+        execution_result = payload.get("execution", {}).get("result", {})
+        if execution_result.get("success"):
+            target = run.publish_target or run.save_intent or "skill"
+            recording_orchestrator.mark_ready_to_publish(run, target)
+        else:
+            error_parts: list[str] = []
+            logs = execution_result.get("logs")
+            if isinstance(logs, list):
+                error_parts.extend(str(item) for item in logs if str(item or "").strip())
+            stderr = str(execution_result.get("stderr") or "").strip()
+            if stderr:
+                error_parts.append(stderr)
+            error_text = "\n".join(error_parts).strip()
+            recording_orchestrator.mark_needs_repair(run, error=error_text or "workflow test failed")
+        compact_logs = execution_result.get("logs")
+        if isinstance(compact_logs, list):
+            compact_logs = [str(item) for item in compact_logs[:5] if str(item or "").strip()]
+        else:
+            compact_logs = []
         return json.dumps(
             {
                 "recording_event": "recording_test_started",
                 "run": _compact_run_payload(run),
+                "summary": {
+                    "mode": payload.get("mode"),
+                    "executed": True,
+                    "success": bool(execution_result.get("success")),
+                    "run_status": run.status,
+                    "testing_status": (run.testing or {}).get("status"),
+                    "logs": compact_logs,
+                    "stderr": str(execution_result.get("stderr") or "").strip(),
+                },
                 "test_payload": payload,
             },
             ensure_ascii=False,
@@ -335,7 +362,12 @@ def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_di
 
     @tool
     def prepare_recording_publish(run_id: str = "", publish_target: str = "skill") -> str:
-        """Prepare staged files for a tested recording run before calling propose_skill_save/propose_tool_save."""
+        """Prepare a tested recording run for publishing.
+
+        Skill targets return save-ready skill artifacts. Tool/MCP targets save an
+        RPA MCP tool definition directly and must not be routed through
+        propose_tool_save.
+        """
         from backend.recording.publishing import build_publish_artifacts
         from backend.recording.service import recording_orchestrator
 
@@ -343,7 +375,13 @@ def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_di
             run = _resolve_run(run_id)
         except ValueError as exc:
             return f"Error: {exc}"
-        recording_orchestrator.mark_ready_to_publish(run, publish_target)
+        requested_target = publish_target if publish_target in {"skill", "tool", "mcp"} else None
+        if requested_target == "mcp":
+            requested_target = "tool"
+        if requested_target == "skill" and run.publish_target == "tool":
+            requested_target = "tool"
+        target = requested_target or run.publish_target or run.save_intent or "skill"
+        recording_orchestrator.mark_ready_to_publish(run, target)
         prepared = _run_async(build_publish_artifacts(run, workspace_dir=workspace_dir))
         summary = prepared.summary
         return json.dumps(

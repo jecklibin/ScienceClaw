@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  buildRecordingStepsFromMcpEditorSteps,
   buildRecordedStepSummary,
   buildSchemaSummary,
+  buildWorkflowInputsFromSchema,
+  buildWorkflowOutputsFromSchema,
   countSchemaProperties,
   shouldShowCookieSection,
 } from './rpaMcpEditorView';
@@ -62,5 +65,85 @@ describe('shouldShowCookieSection', () => {
     expect(shouldShowCookieSection({ requires_cookies: true }, false)).toBe(true);
     expect(shouldShowCookieSection({ requires_cookies: false }, true)).toBe(true);
     expect(shouldShowCookieSection({ requires_cookies: false }, false)).toBe(false);
+  });
+});
+
+describe('buildWorkflowInputsFromSchema', () => {
+  it('converts MCP input schema to recording workflow inputs and skips cookies', () => {
+    expect(buildWorkflowInputsFromSchema({
+      type: 'object',
+      required: ['query'],
+      properties: {
+        query: { type: 'string', description: 'Search query', default: 'rpa' },
+        page: { type: 'integer', description: 'Page number' },
+        cookies: { type: 'array' },
+      },
+    })).toEqual([
+      {
+        name: 'query',
+        type: 'string',
+        required: true,
+        source: 'user',
+        description: 'Search query',
+        default: 'rpa',
+      },
+      {
+        name: 'page',
+        type: 'number',
+        required: false,
+        source: 'user',
+        description: 'Page number',
+        default: undefined,
+      },
+    ]);
+  });
+});
+
+describe('buildWorkflowOutputsFromSchema', () => {
+  it('prefers nested data properties from MCP output schema', () => {
+    expect(buildWorkflowOutputsFromSchema({
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        data: {
+          type: 'object',
+          required: ['project_name'],
+          properties: {
+            project_name: { type: 'string', description: 'First project name' },
+          },
+        },
+      },
+    })).toEqual([
+      {
+        name: 'project_name',
+        type: 'string',
+        required: true,
+        description: 'First project name',
+        source: 'segment_output',
+      },
+    ]);
+  });
+});
+
+describe('buildRecordingStepsFromMcpEditorSteps', () => {
+  it('normalizes editor steps for conversational segment completion', () => {
+    expect(buildRecordingStepsFromMcpEditorSteps([
+      {
+        id: 'step-1',
+        action: 'click',
+        description: 'Click button',
+        target: { method: 'role', role: 'button', name: 'Save' },
+        validation: { status: 'ok' },
+      },
+    ])).toMatchObject([
+      {
+        id: 'step-1',
+        step_index: 0,
+        action: 'click',
+        description: 'Click button',
+        target: '{"method":"role","role":"button","name":"Save"}',
+        validation: { status: 'ok' },
+      },
+    ]);
   });
 });

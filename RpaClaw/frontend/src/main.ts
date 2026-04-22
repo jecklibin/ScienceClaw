@@ -23,6 +23,7 @@ import MainLayout from './pages/MainLayout.vue'
 import CredentialsPage from './pages/CredentialsPage.vue'
 import RecorderPage from './pages/rpa/RecorderPage.vue'
 import ConfigurePage from './pages/rpa/ConfigurePage.vue'
+import SegmentConfigurePage from './pages/rpa/SegmentConfigurePage.vue'
 import TestPage from './pages/rpa/TestPage.vue'
 import WorkflowTestPage from './pages/rpa/WorkflowTestPage.vue'
 import McpConvertPage from './pages/rpa/McpConvertPage.vue'
@@ -109,6 +110,10 @@ export const router = createRouter({
           component: ConfigurePage,
         },
         {
+          path: 'segment-configure',
+          component: SegmentConfigurePage,
+        },
+        {
           path: 'test',
           component: TestPage,
         },
@@ -119,6 +124,10 @@ export const router = createRouter({
         {
           path: 'convert-mcp',
           component: McpConvertPage,
+        },
+        {
+          path: 'mcp-configure',
+          component: McpToolEditorPage,
         }
       ]
     },

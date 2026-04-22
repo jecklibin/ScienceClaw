@@ -118,16 +118,16 @@
             <Play :size="18" class="text-amber-600 flex-shrink-0" />
             <div class="flex-1 min-w-0">
               <div class="text-sm font-medium text-[var(--text-primary)] truncate">
-                录制段已完成，是否准备发布？
+                {{ recordingPromptTitle }}
               </div>
               <div class="text-xs text-[var(--text-tertiary)] truncate">
-                {{ recordingStore.actionPrompt.value.intent || '已完成录制、配置和测试；可以准备发布，也可以继续对话补充后续处理。' }}
+                {{ recordingPromptDescription }}
               </div>
             </div>
             <button @click="handlePrepareRecordingPublish" :disabled="!!recordingActionBusy"
               class="px-3 py-1.5 text-sm font-medium rounded-lg bg-white text-amber-700 border border-amber-200 hover:bg-amber-100 transition-colors disabled:opacity-50 flex-shrink-0 dark:bg-amber-950/40 dark:text-amber-200 dark:border-amber-800">
               <Loader2 v-if="recordingActionBusy === 'publish'" :size="14" class="inline mr-1 animate-spin" />
-              准备发布
+              {{ recordingPromptActionLabel }}
             </button>
             <button @click="recordingStore.dismissActionPrompt()" :disabled="!!recordingActionBusy"
               class="p-1 rounded-md hover:bg-[var(--fill-tsp-gray-main)] transition-colors flex-shrink-0">
@@ -366,6 +366,23 @@ const isRestoringHistory = ref(false);
 
 const { groupedMessages } = useMessageGrouper(messages);
 const recordingStore = createRecordingRunStore(() => sessionId.value);
+const recordingPromptTitle = computed(() => (
+  recordingStore.actionPrompt.value?.publishTarget === 'tool'
+    ? t('Recording prompt title tool')
+    : t('Recording prompt title skill')
+));
+const recordingPromptDescription = computed(() => {
+  const prompt = recordingStore.actionPrompt.value;
+  if (prompt?.intent) return prompt.intent;
+  return prompt?.publishTarget === 'tool'
+    ? t('Recording prompt description tool')
+    : t('Recording prompt description skill');
+});
+const recordingPromptActionLabel = computed(() => (
+  recordingStore.actionPrompt.value?.publishTarget === 'tool'
+    ? t('Recording prompt action tool')
+    : t('Recording prompt action skill')
+));
 
 // 最后一个 process 组的索引（推理失败时会先 push 一条 assistant 消息，此时最后一组不是 process，需用此判断当前轮次的 process 组）
 const lastProcessGroupIndex = computed(() => {
@@ -562,7 +579,11 @@ const handleToolEvent = (toolData: ToolEventData) => {
     } else if (recordingPayload.recording_event === 'recording_segment_updated') {
       handleRecordingSegmentUpdated(recordingPayload as RecordingSegmentUpdatedPayload);
     } else if (recordingPayload.recording_event === 'recording_test_started') {
-      handleRecordingTestStarted(recordingPayload as RecordingTestStartedPayload, interactive);
+      handleRecordingTestStarted(
+        recordingPayload as RecordingTestStartedPayload,
+        interactive,
+        toolContent.function !== 'begin_recording_test',
+      );
     } else if (recordingPayload.recording_event === 'recording_publish_prepared') {
       handleRecordingPublishPrepared(recordingPayload as RecordingPublishPreparedPayload, interactive);
     }
@@ -897,8 +918,12 @@ const handleRecordingSegmentUpdated = (payload: RecordingSegmentUpdatedPayload) 
   }
 }
 
-const handleRecordingTestStarted = (payload: RecordingTestStartedPayload, interactive = !isRestoringHistory.value) => {
-  recordingStore.onTestStarted(payload, { interactive });
+const handleRecordingTestStarted = (
+  payload: RecordingTestStartedPayload,
+  interactive = !isRestoringHistory.value,
+  openModal = interactive,
+) => {
+  recordingStore.onTestStarted(payload, { interactive, openModal });
 }
 
 const handleRecordingPublishPrepared = (payload: RecordingPublishPreparedPayload, interactive = !isRestoringHistory.value) => {
@@ -931,6 +956,40 @@ const handlePrepareRecordingPublish = async () => {
   }
 }
 
+const resetChatViewState = () => {
+  if (cancelCurrentChat.value) {
+    cancelCurrentChat.value();
+    cancelCurrentChat.value = null;
+  }
+  Object.assign(state, createInitialState());
+  pendingSkillSave.value = null;
+  savingSkill.value = false;
+  pendingToolSave.value = null;
+  pendingToolReplaces.value = null;
+  savingTool.value = false;
+  recordingActionBusy.value = null;
+  sessionMcpServers.value = [];
+  sessionMcpLoading.value = false;
+  recordingStore.reset();
+  _streamingMsgIndex.value = null;
+  _processedEventIds.clear();
+  simpleBarRef.value?.scrollToTop?.();
+};
+
+const loadRouteSession = async (targetSessionId: string) => {
+  sessionId.value = targetSessionId;
+  loadSessionMcpState();
+
+  const pending = consumePendingChat();
+  if (pending?.message) {
+    if (pending.mode) mode.value = pending.mode;
+    if (pending.selectedModelId) selectedModelId.value = pending.selectedModelId;
+    await chat(pending.message, pending.files || []);
+    return;
+  }
+  await restoreSession();
+};
+
 const handleSaveRecordingPublishDraft = async (draft: SkillPublishDraft) => {
   if (!sessionId.value) return;
 
@@ -939,6 +998,13 @@ const handleSaveRecordingPublishDraft = async (draft: SkillPublishDraft) => {
     const payload = await publishRecordingRun(sessionId.value, draft.run_id, draft.publish_target, draft);
     recordingStore.onPublishPrepared(payload, { interactive: false });
     recordingStore.setPublishDraft(null);
+    if (payload.prompt_kind === 'tool' && payload.summary?.saved) {
+      pendingSkillSave.value = null;
+      pendingToolSave.value = null;
+      const toolName = String(payload.summary.name || draft.skill_name || '');
+      showSuccessToast(t('MCP tool "{name}" saved successfully', { name: toolName }));
+      return;
+    }
     const saveTarget = derivePublishSaveTarget(payload, { includeDraft: true });
     pendingSkillSave.value = saveTarget?.kind === 'skill' ? saveTarget.name : null;
     pendingToolSave.value = saveTarget?.kind === 'tool' ? saveTarget.name : null;
@@ -954,7 +1020,7 @@ const handleSaveRecordingPublishDraft = async (draft: SkillPublishDraft) => {
 // Main event handler function
 const handleEvent = (event: AgentSSEEvent) => {
   const eid = event.data?.event_id;
-  if (eid && _processedEventIds.has(eid)) return;
+  if (eid && !isRestoringHistory.value && _processedEventIds.has(eid)) return;
   if (eid) _processedEventIds.add(eid);
 
   if (event.event === 'message_chunk') {
@@ -1103,12 +1169,12 @@ const chat = async (message: string = '', files: FileInfo[] = [], reconnect: boo
   try {
     const cancelFn = await agentApi.chatWithSession(
       chatSessionId,
-      {
-        message: message,
-        event_id: lastEventId.value,
-        attachments: files.map((file: FileInfo) => file.file_id),
-        language: locale.value,
-        model_config_id: selectedModelId.value || undefined,
+        {
+          message: message,
+          event_id: reconnect ? lastEventId.value : undefined,
+          attachments: files.map((file: FileInfo) => file.file_id),
+          language: locale.value,
+          model_config_id: selectedModelId.value || undefined,
       },
       {
         onOpen: () => {
@@ -1283,19 +1349,7 @@ const updateSessionMcpMode = async (
     const routeParams = router.currentRoute.value.params;
     console.log('[ChatPage] onMounted, sessionId:', routeParams.sessionId);
     if (routeParams.sessionId) {
-      sessionId.value = String(routeParams.sessionId) as string;
-      loadSessionMcpState();
-
-      const pending = consumePendingChat();
-      if (pending?.message) {
-        console.log('[ChatPage] has pending chat, files:', pending.files?.length || 0);
-        if (pending.mode) mode.value = pending.mode;
-        if (pending.selectedModelId) selectedModelId.value = pending.selectedModelId;
-        chat(pending.message, pending.files || []);
-      } else {
-        console.log('[ChatPage] no pending chat, restoring session');
-        restoreSession();
-      }
+      await loadRouteSession(String(routeParams.sessionId));
     }
 
   onSessionUpdated(({ session_id, session_event }) => {
@@ -1330,6 +1384,17 @@ const updateSessionMcpMode = async (
     else if (models.value.length > 0) selectedModelId.value = models.value[0].id;
   }
 });
+
+watch(
+  () => String(router.currentRoute.value.params.sessionId || ''),
+  async (nextSessionId, previousSessionId) => {
+    if (!nextSessionId || nextSessionId === previousSessionId || nextSessionId === sessionId.value) {
+      return;
+    }
+    resetChatViewState();
+    await loadRouteSession(nextSessionId);
+  },
+);
 
 // Refresh model list when settings dialog closes
 watch(isSettingsDialogOpen, async (newVal, oldVal) => {

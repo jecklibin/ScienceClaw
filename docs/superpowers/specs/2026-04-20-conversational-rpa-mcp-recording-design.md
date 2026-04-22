@@ -18,7 +18,7 @@
 - 录制结果以 `segment -> artifact -> next segment` 的方式显式编排。
 - 非交互段可以直接在聊天里生成脚本片段，不强制重新打开浏览器。
 - 录制能力具备完整生命周期：生成、测试、修复、发布。
-- 发布收口继续复用 `propose_skill_save` / `propose_tool_save`。
+- 发布收口按目标分流：skill 继续复用 `propose_skill_save`；tool / MCP 工具由 recording 发布链路保存到 RPA MCP 工具注册表，不再走普通 `propose_tool_save`。
 
 ## 已落地架构
 
@@ -121,7 +121,7 @@
 
 - 前端展示发布草稿弹窗
 - 用户确认名称、描述、输入输出、纳入的 segments
-- 确认后继续走 `propose_skill_save` / `propose_tool_save`
+- 确认后按目标分流：skill 走 `propose_skill_save`，tool / MCP 工具走 recording 发布链路并保存到 RPA MCP 工具注册表
 
 不会要求用户通过固定话术再次输入“开始测试”“准备发布”才能继续。
 
