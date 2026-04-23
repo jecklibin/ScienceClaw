@@ -41,13 +41,16 @@
         <div class="flex flex-col w-full gap-[12px] pb-[80px] pt-[12px] flex-1 overflow-y-auto">
           <template v-for="(group, index) in groupedMessages" :key="group.id">
             <!-- Process groups: compact reasoning indicator -->
-            <div v-if="group.type === 'process'" class="flex items-start py-1 my-1">
+            <div v-if="group.type === 'process'" class="flex flex-col items-start py-1 my-1">
               <div
                 @click="showActivityForTurn(getProcessTurnIndex(index))"
+                :title="t('View this round reasoning, task progress, and tool calls')"
                 class="process-indicator flex items-center gap-2.5 px-3.5 py-2 rounded-xl cursor-pointer transition-all duration-200 select-none group/proc border"
                 :class="isLoading && index === lastProcessGroupIndex
-                  ? 'bg-gradient-to-r from-blue-50/80 to-indigo-50/60 dark:from-blue-950/30 dark:to-indigo-950/20 border-blue-200/50 dark:border-blue-800/30 shadow-sm shadow-blue-500/5 hover:shadow-md hover:shadow-blue-500/10'
-                  : 'bg-white dark:bg-gray-800/50 border-gray-100 dark:border-gray-700/50 hover:border-gray-200 dark:hover:border-gray-600 hover:shadow-sm'"
+                  ? 'bg-gradient-to-r from-blue-50/90 to-indigo-50/70 dark:from-blue-950/30 dark:to-indigo-950/20 border-blue-300/70 dark:border-blue-700/50 shadow-sm shadow-blue-500/10 hover:shadow-md hover:shadow-blue-500/15'
+                  : selectedActivityTurn === getProcessTurnIndex(index) && isActivityPanelOpen
+                    ? 'bg-blue-50 dark:bg-blue-950/30 border-blue-300 dark:border-blue-700 shadow-sm shadow-blue-500/10'
+                    : 'bg-white dark:bg-gray-800/50 border-gray-200 dark:border-gray-700/60 hover:border-blue-300 dark:hover:border-blue-700 hover:bg-blue-50/60 dark:hover:bg-blue-950/20 hover:shadow-sm'"
               >
                 <!-- Spinning ring when running -->
                 <div v-if="isLoading && index === lastProcessGroupIndex" class="relative size-4 flex-shrink-0">
@@ -74,24 +77,37 @@
                   {{ isLoading && index === lastProcessGroupIndex ? t('Reasoning') + '...' : (lastTurnHadError && index === lastProcessGroupIndex ? t('Reasoning failed') : t('Reasoning completed')) }}
                 </span>
 
-                <!-- Tool count badge -->
-                <span v-if="(group.messages || []).filter(m => m.type === 'tool').length > 0"
-                  class="text-[10px] font-bold px-2 py-0.5 rounded-full tabular-nums"
+                <span
+                  class="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-1 rounded-lg border transition-colors"
                   :class="isLoading && index === lastProcessGroupIndex
-                    ? 'bg-blue-100 dark:bg-blue-900/40 text-blue-600 dark:text-blue-300'
-                    : 'bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400'"
+                    ? 'border-blue-200 bg-white/70 text-blue-600 dark:border-blue-800 dark:bg-blue-950/50 dark:text-blue-300'
+                    : selectedActivityTurn === getProcessTurnIndex(index) && isActivityPanelOpen
+                      ? 'border-blue-200 bg-white text-blue-600 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-300'
+                      : 'border-gray-200 bg-gray-50 text-gray-500 group-hover/proc:border-blue-200 group-hover/proc:bg-white group-hover/proc:text-blue-600 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400 dark:group-hover/proc:border-blue-800 dark:group-hover/proc:bg-blue-950/40 dark:group-hover/proc:text-blue-300'"
                 >
-                  {{ (group.messages || []).filter(m => m.type === 'tool').length }} {{ (group.messages || []).filter(m => m.type === 'tool').length === 1 ? t('tool') : t('tools') }}
+                  {{ t('View process') }}
+                  <svg class="size-3 transition-transform group-hover/proc:translate-x-0.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 4l4 4-4 4"/></svg>
                 </span>
-
-                <!-- Arrow hint -->
-                <svg class="size-3.5 text-gray-300 dark:text-gray-600 group-hover/proc:text-gray-400 dark:group-hover/proc:text-gray-500 transition-colors flex-shrink-0 ml-0.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 4l4 4-4 4"/></svg>
               </div>
             </div>
             <ChatMessage v-else-if="group.type === 'single' && group.message" :message="group.message"
               @toolClick="handleToolClick" @suggestionClick="handleSuggestionClick" @convertToPdf="handleConvertToPdf" :mode="mode"
               :isLast="index === lastProcessGroupIndex" :isLoading="isLoading" />
           </template>
+
+          <div
+            v-if="inlineSandboxMode === 'browser'"
+            class="w-full py-1"
+          >
+            <SandboxPreview
+              :mode="inlineSandboxMode"
+              :isLive="isLoading"
+              :sessionId="sessionId"
+              variant="inline"
+              @close="handleInlineSandboxPreviewClose"
+              @browserEnded="handleInlineSandboxBrowserEnded"
+            />
+          </div>
 
           <!-- Loading indicator -->
           <LoadingIndicator v-if="isLoading" :text="$t('Thinking')" />
@@ -235,6 +251,12 @@ import ActivityPanel from '../components/ActivityPanel.vue';
 import type { ActivityItem } from '../components/ActivityPanel.vue';
 import McpSessionSelector from '../components/McpSessionSelector.vue';
 import { shouldProcessAgentEvent } from '../utils/eventDedupe';
+import SandboxPreview from '../components/SandboxPreview.vue';
+import {
+  getInlineSandboxPreviewMode,
+  hasActiveInlineSandboxPreviewTool,
+  type InlineSandboxPreviewMode,
+} from '../utils/inlineSandboxPreview';
 
 const router = useRouter()
 const { t, locale } = useI18n()
@@ -242,6 +264,7 @@ const { hideFilePanel, showFileListPanel, isShow: isFilePanelOpen } = useFilePan
 const { currentUser } = useAuth()
 const { updateSessionTitle } = useSessionListUpdate()
 const { onSessionUpdated } = useSessionNotifications()
+const INLINE_SANDBOX_HIDE_DELAY_MS = 2500;
 
 // Models related state
 const models = ref<ModelConfig[]>([]);
@@ -302,6 +325,9 @@ const {
 } = toRefs(state);
 
 const { groupedMessages } = useMessageGrouper(messages);
+const inlineSandboxMode = ref<InlineSandboxPreviewMode>('none');
+const inlineSandboxDismissed = ref(false);
+let inlineSandboxHideTimer: ReturnType<typeof setTimeout> | null = null;
 
 // 最后一个 process 组的索引（推理失败时会先 push 一条 assistant 消息，此时最后一组不是 process，需用此判断当前轮次的 process 组）
 const lastProcessGroupIndex = computed(() => {
@@ -356,6 +382,67 @@ watch(messages, async () => {
   }
 }, { deep: true });
 
+const clearInlineSandboxHideTimer = () => {
+  if (inlineSandboxHideTimer) {
+    clearTimeout(inlineSandboxHideTimer);
+    inlineSandboxHideTimer = null;
+  }
+};
+
+const hideInlineSandboxPreview = () => {
+  clearInlineSandboxHideTimer();
+  inlineSandboxMode.value = 'none';
+};
+
+const scheduleInlineSandboxHide = () => {
+  if (inlineSandboxMode.value === 'none') return;
+  clearInlineSandboxHideTimer();
+  inlineSandboxHideTimer = setTimeout(() => {
+    inlineSandboxMode.value = 'none';
+    inlineSandboxHideTimer = null;
+  }, INLINE_SANDBOX_HIDE_DELAY_MS);
+};
+
+const handleInlineSandboxPreviewClose = () => {
+  inlineSandboxDismissed.value = true;
+  hideInlineSandboxPreview();
+};
+
+const handleInlineSandboxBrowserEnded = () => {
+  if (inlineSandboxDismissed.value) return;
+  scheduleInlineSandboxHide();
+};
+
+const syncInlineSandboxPreviewFromActivity = () => {
+  if (!isLoading.value || inlineSandboxDismissed.value) return;
+  const mode = getInlineSandboxPreviewMode(activityItems.value);
+  if (mode === 'browser') {
+    clearInlineSandboxHideTimer();
+    inlineSandboxMode.value = 'browser';
+  }
+};
+
+watch(
+  () => [
+    isLoading.value,
+    activityItems.value.map(item => `${item.id}:${item.tool?.function || item.tool?.name || ''}:${item.tool?.status || ''}`).join('|'),
+  ] as const,
+  ([loading]) => {
+    const hasActivePreviewTool = hasActiveInlineSandboxPreviewTool(activityItems.value);
+
+    if (hasActivePreviewTool) {
+      syncInlineSandboxPreviewFromActivity();
+      return;
+    }
+
+    if (loading && inlineSandboxMode.value === 'none') {
+      return;
+    }
+
+    scheduleInlineSandboxHide();
+  },
+);
+
 
 
 const getLastStep = (): StepContent | undefined => {
@@ -403,6 +490,10 @@ const handleMessageChunkEvent = (data: any) => {
   const token = data.content || '';
   if (!token) return;
 
+  if (inlineSandboxMode.value === 'browser') {
+    hideInlineSandboxPreview();
+  }
+
   if (_streamingMsgIndex.value === null) {
     // First chunk: create a new assistant message
     messages.value.push({
@@ -435,6 +526,10 @@ const handleMessageEvent = (messageData: MessageEventData) => {
   // If streaming was active, finalize it first
   if (_streamingMsgIndex.value !== null) {
     _streamingMsgIndex.value = null;
+  }
+
+  if (inlineSandboxMode.value === 'browser' && messageData.role === 'assistant') {
+    hideInlineSandboxPreview();
   }
 
   messages.value.push({
@@ -577,6 +672,7 @@ const handleToolEvent = (toolData: ToolEventData) => {
         timestamp: toolContent.timestamp || Date.now(),
       });
     }
+    syncInlineSandboxPreviewFromActivity();
     activityPanelRef.value?.show();
   }
 }
@@ -854,6 +950,8 @@ const chat = async (message: string = '', files: FileInfo[] = [], reconnect: boo
     selectedActivityTurn.value = -1;
     activityItems.value = [];
     pendingToolCallIds.value = [];
+    inlineSandboxDismissed.value = false;
+    hideInlineSandboxPreview();
 
     if (message.trim()) {
       lastTurnHadError.value = false;
@@ -1106,6 +1204,8 @@ const updateSessionMcpMode = async (
         selectedActivityTurn.value = -1;
         activityItems.value = [];
         pendingToolCallIds.value = [];
+        inlineSandboxDismissed.value = false;
+        hideInlineSandboxPreview();
         activityPanelRef.value?.show();
       }
       handleEvent(session_event as any);
@@ -1149,6 +1249,7 @@ watch(isSettingsDialogOpen, async (newVal, oldVal) => {
 onUnmounted(() => {
   console.log('[ChatPage] onUnmounted, sessionId:', sessionId.value);
   _unmounted = true;
+  clearInlineSandboxHideTimer();
   if (cancelCurrentChat.value) {
     cancelCurrentChat.value();
     cancelCurrentChat.value = null;

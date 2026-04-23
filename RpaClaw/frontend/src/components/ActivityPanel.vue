@@ -221,7 +221,7 @@
           </div>
         </template>
 
-        <!-- ═══ Sandbox Preview Section ═══ -->
+        <!-- ═══ Sandbox Terminal Section ═══ -->
         <SandboxPreview
           ref="sandboxPreviewRef"
           :mode="activeSandboxMode"
@@ -245,7 +245,7 @@ const { t } = useI18n();
 import LoadingSpinnerIcon from './icons/LoadingSpinnerIcon.vue';
 import SandboxPreview from './SandboxPreview.vue';
 import type { ToolContent } from '../types/message';
-import type { PlanEventData, StepEventData } from '../types/event';
+import type { PlanEventData } from '../types/event';
 import type { SandboxPreviewMode } from '../utils/sandbox';
 import { getPreviewMode } from '../utils/sandbox';
 import { useResizeObserver } from '../composables/useResizeObserver';
@@ -282,7 +282,6 @@ const toolsContentRef = ref<HTMLElement>();
 const sandboxPreviewRef = ref<InstanceType<typeof SandboxPreview>>();
 const isShow = ref(false);
 const visible = ref(true);
-
 const activeSandboxMode = ref<SandboxPreviewMode>('none');
 const isSandboxLive = computed(() => {
   if (!props.isLoading) return false;
@@ -414,10 +413,6 @@ const formatDuration = (ms: number): string => {
   return `${(ms / 1000).toFixed(1)}s`;
 };
 
-const handleToolClick = (tool: ToolContent) => {
-  emit('toolClick', tool);
-};
-
 const handleClose = () => {
   isShow.value = false;
   emit('visibilityChange', false);
@@ -473,7 +468,6 @@ function extractOutput(tool: ToolContent): string {
   return String(c);
 }
 
-// Track which tool calls we've already written to terminal
 const writtenToolCalls = new Set<string>();
 
 export interface SandboxExecEntry {
@@ -489,32 +483,30 @@ function scanSandboxTools() {
   for (const item of props.items) {
     if (item.type !== 'tool' || !item.tool) continue;
     const fn = item.tool.function || item.tool.name || '';
-    const isSandboxProxy = !!item.tool.tool_meta?.sandbox;
-    const mode = getPreviewMode(fn, isSandboxProxy);
-    if (mode === 'none') continue;
+    const mode = getPreviewMode(fn, !!item.tool.tool_meta?.sandbox);
+    if (mode !== 'terminal') continue;
 
     const callId = item.tool.tool_call_id || item.id;
 
     if (item.tool.status === 'calling' && !writtenToolCalls.has(callId + ':calling')) {
-      activeSandboxMode.value = mode;
+      activeSandboxMode.value = 'terminal';
       writtenToolCalls.add(callId + ':calling');
-      sandboxHistory.value.push({ toolName: fn, command: extractCommand(item.tool!), status: 'calling' });
+      sandboxHistory.value.push({ toolName: fn, command: extractCommand(item.tool), status: 'calling' });
     }
 
     if (item.tool.status === 'called' && !writtenToolCalls.has(callId + ':called')) {
-      activeSandboxMode.value = mode;
+      activeSandboxMode.value = 'terminal';
       if (!writtenToolCalls.has(callId + ':calling')) {
         writtenToolCalls.add(callId + ':calling');
-        sandboxHistory.value.push({ toolName: fn, command: extractCommand(item.tool!), status: 'calling' });
+        sandboxHistory.value.push({ toolName: fn, command: extractCommand(item.tool), status: 'calling' });
       }
       writtenToolCalls.add(callId + ':called');
-      sandboxHistory.value.push({ toolName: fn, command: extractCommand(item.tool!), output: extractOutput(item.tool!), status: 'called' });
+      sandboxHistory.value.push({ toolName: fn, command: extractCommand(item.tool), output: extractOutput(item.tool), status: 'called' });
     }
   }
 }
 
-// Watch both new items AND status changes on existing items
-watch(() => props.items.map(i => `${i.id}:${i.tool?.status}`).join(','), scanSandboxTools);
+watch(() => props.items.map(i => `${i.id}:${i.tool?.function || i.tool?.name || ''}:${i.tool?.status}`).join(','), scanSandboxTools);
 
 const show = () => {
   eventBus.emit(EVENT_SHOW_ACTIVITY_PANEL);
