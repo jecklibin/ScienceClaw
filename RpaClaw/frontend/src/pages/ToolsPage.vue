@@ -635,6 +635,7 @@ import {
 } from 'lucide-vue-next';
 import { useRoute, useRouter } from 'vue-router';
 import { getTools, blockTool, deleteTool as apiDeleteTool } from '../api/agent';
+import { useDialog } from '../composables/useDialog';
 import type { ExternalToolItem } from '../types/response';
 import { listCredentials, type Credential } from '../api/credential';
 import {
@@ -674,6 +675,7 @@ import { resolveInitialToolsTab } from '../utils/toolsPage';
 const route = useRoute();
 const router = useRouter();
 const { t } = useI18n();
+const { showConfirmDialog } = useDialog();
 
 const activeTab = ref<'external' | 'mcp'>(resolveInitialToolsTab(route.query.tab));
 const searchQuery = ref('');
@@ -903,16 +905,32 @@ const handleToggleBlock = async (tool: ExternalToolItem) => {
   }
 };
 
-const deleteExternalTool = async (tool: ExternalToolItem) => {
-  if (!window.confirm(t('Are you sure you want to delete the tool "{name}"?', { name: tool.name }))) return;
-  try {
-    await apiDeleteTool(tool.name);
-    externalTools.value = externalTools.value.filter((item) => item.name !== tool.name);
-    showSuccessToast(t('External tool deleted'));
-  } catch (error) {
-    console.error(error);
-    showErrorToast(t('Failed to delete external tool'));
-  }
+const showDeleteConfirmation = (options: { title: string; content: string; onConfirm: () => Promise<void> }) => {
+  showConfirmDialog({
+    title: options.title,
+    content: options.content,
+    confirmText: t('Delete'),
+    cancelText: t('Cancel'),
+    confirmType: 'danger',
+    onConfirm: options.onConfirm,
+  });
+};
+
+const deleteExternalTool = (tool: ExternalToolItem) => {
+  showDeleteConfirmation({
+    title: t('Delete Tool'),
+    content: t('Are you sure you want to delete the tool "{name}"?', { name: tool.name }),
+    onConfirm: async () => {
+      try {
+        await apiDeleteTool(tool.name);
+        externalTools.value = externalTools.value.filter((item) => item.name !== tool.name);
+        showSuccessToast(t('External tool deleted'));
+      } catch (error) {
+        console.error(error);
+        showErrorToast(t('Failed to delete external tool'));
+      }
+    },
+  });
 };
 
 const openCreateDialog = () => {
@@ -1082,16 +1100,21 @@ const toggleRpaMcpTool = async (tool: RpaMcpToolItem) => {
   }
 };
 
-const deleteGatewayTool = async (tool: RpaMcpToolItem) => {
-  if (!window.confirm(t('Delete MCP server confirm', { name: tool.name }))) return;
-  try {
-    await deleteRpaMcpTool(tool.id);
-    rpaMcpTools.value = rpaMcpTools.value.filter((item) => item.id !== tool.id);
-    showSuccessToast(t('Deleted successfully'));
-  } catch (error: any) {
-    console.error(error);
-    showErrorToast(error?.message || 'Failed to delete RPA MCP tool');
-  }
+const deleteGatewayTool = (tool: RpaMcpToolItem) => {
+  showDeleteConfirmation({
+    title: t('Delete MCP tool'),
+    content: t('Delete MCP tool confirm content', { name: tool.name }),
+    onConfirm: async () => {
+      try {
+        await deleteRpaMcpTool(tool.id);
+        rpaMcpTools.value = rpaMcpTools.value.filter((item) => item.id !== tool.id);
+        showSuccessToast(t('Deleted successfully'));
+      } catch (error: any) {
+        console.error(error);
+        showErrorToast(error?.message || 'Failed to delete RPA MCP tool');
+      }
+    },
+  });
 };
 
 const openGatewayToolTestDialog = (tool: RpaMcpToolItem) => {
@@ -1186,16 +1209,21 @@ const submitGatewayToolTest = async () => {
     gatewayTestSubmitting.value = false;
   }
 };
-const deletePrivateServer = async (server: McpServerItem) => {
-  if (!window.confirm(t('Delete MCP server confirm', { name: server.name }))) return;
-  try {
-    await deleteMcpServer(server.id);
-    mcpServers.value = await listMcpServers();
-    showSuccessToast(t('MCP server deleted'));
-  } catch (error: any) {
-    console.error(error);
-    showErrorToast(error?.message || t('Failed to delete MCP server'));
-  }
+const deletePrivateServer = (server: McpServerItem) => {
+  showDeleteConfirmation({
+    title: t('Delete MCP server'),
+    content: t('Delete MCP server confirm content', { name: server.name }),
+    onConfirm: async () => {
+      try {
+        await deleteMcpServer(server.id);
+        mcpServers.value = await listMcpServers();
+        showSuccessToast(t('MCP server deleted'));
+      } catch (error: any) {
+        console.error(error);
+        showErrorToast(error?.message || t('Failed to delete MCP server'));
+      }
+    },
+  });
 };
 </script>
 

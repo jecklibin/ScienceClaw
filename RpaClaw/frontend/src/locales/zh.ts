@@ -659,6 +659,10 @@ export default {
   'Failed to test MCP server': '测试 {name} 失败',
   'Failed to discover MCP tools': '发现 {name} 的工具失败',
   'Delete MCP server confirm': '删除“{name}”？',
+  'Delete MCP tool': '删除 MCP 工具',
+  'Delete MCP server': '删除 MCP 服务',
+  'Delete MCP tool confirm content': '这会从你的 MCP 工具中移除“{name}”，聊天会话将无法再使用它。此操作不可撤销。',
+  'Delete MCP server confirm content': '这会移除“{name}”并断开它的工具与聊天会话的连接。此操作不可撤销。',
   'MCP server deleted': 'MCP 服务已删除',
   'Failed to delete MCP server': '删除 MCP 服务失败'
 ,
