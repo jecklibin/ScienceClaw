@@ -121,6 +121,32 @@ describe('recording step mapping', () => {
     expect(pool.artifacts[0].sourceRef).toBe('artifact:artifact-1')
   })
 
+  it('uses artifact filename instead of raw object text in mapping source preview', () => {
+    const summaries = [
+      {
+        segment_id: 'seg-1',
+        title: '下载报表',
+        outputs: [],
+        artifacts: [
+          {
+            id: 'artifact-1',
+            name: 'report.xlsx',
+            type: 'file',
+            value: { filename: 'report.xlsx', recorded_path: '/tmp/report.xlsx', runtime: 'downloads_dir' },
+          },
+        ],
+      },
+    ] as RecordingSegmentSummary[]
+
+    const pool = buildMappingSourcePool({
+      currentSegmentId: 'seg-2',
+      summaries,
+      workflowParams: [],
+    })
+
+    expect(pool.artifacts[0].preview).toBe('report.xlsx')
+  })
+
   it('returns bound and unbound counts with readable summary lines', () => {
     const summary = summarizeInputBindings([
       { name: 'search', type: 'string', source: 'segment_output', source_ref: 'seg-1.outputs.project_name' },

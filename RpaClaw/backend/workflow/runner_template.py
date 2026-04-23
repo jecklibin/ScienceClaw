@@ -23,25 +23,77 @@ class WorkflowContext:
     def __init__(self, params: dict[str, Any]):
         self.params = params
         self.outputs: dict[str, dict[str, Any]] = {}
+        self.artifacts: dict[str, Any] = {}
         self.runtime: dict[str, Any] = {}
+        self.output_artifact_refs: dict[str, str] = {}
+
+    def register_workflow(self, workflow: dict[str, Any]) -> None:
+        for segment in workflow.get("segments", []):
+            segment_id = str(segment.get("id") or "")
+            if not segment_id:
+                continue
+            for output_spec in segment.get("outputs", []):
+                if not isinstance(output_spec, dict):
+                    continue
+                output_name = str(output_spec.get("name") or "")
+                artifact_ref = str(output_spec.get("artifact_ref") or "")
+                if output_name and artifact_ref:
+                    self.output_artifact_refs[f"{segment_id}.outputs.{output_name}"] = artifact_ref
 
     def resolve(self, source_ref: str | None) -> Any:
         if not source_ref:
             return None
         if source_ref.startswith("params."):
             return self.params.get(source_ref.removeprefix("params."))
+        if source_ref.startswith("artifact:"):
+            value = self.artifacts.get(source_ref.removeprefix("artifact:"))
+            if isinstance(value, dict) and value.get("path"):
+                return value.get("path")
+            return value
         if ".outputs." in source_ref:
             segment_id, output_name = source_ref.split(".outputs.", 1)
-            return self.outputs.get(segment_id, {}).get(output_name)
+            value = self.outputs.get(segment_id, {}).get(output_name)
+            if isinstance(value, dict) and value.get("path"):
+                return value.get("path")
+            if value is not None:
+                return value
+            artifact_ref = self.output_artifact_refs.get(source_ref)
+            if artifact_ref:
+                return self.resolve(f"artifact:{artifact_ref}")
         return None
 
-    def store_segment_outputs(self, segment_id: str, values: dict[str, Any]) -> None:
-        self.outputs[segment_id] = values
+    def store_segment_outputs(self, segment: dict[str, Any], values: dict[str, Any]) -> None:
+        segment_id = str(segment.get("id") or "")
+        if segment_id:
+            self.outputs[segment_id] = values
+        self._store_artifact_outputs(segment, values)
+
+    def _store_artifact_outputs(self, segment: dict[str, Any], values: dict[str, Any]) -> None:
+        for output_spec in segment.get("outputs", []):
+            artifact_ref = output_spec.get("artifact_ref") if isinstance(output_spec, dict) else None
+            if not artifact_ref:
+                continue
+            value = values.get(str(output_spec.get("name") or ""))
+            if value is None:
+                value = self._first_file_like_output(values)
+            if value is not None:
+                self.artifacts[str(artifact_ref)] = value
+
+    @staticmethod
+    def _first_file_like_output(values: dict[str, Any]) -> Any:
+        for value in values.values():
+            if isinstance(value, dict) and value.get("path"):
+                return value
+        for name, value in values.items():
+            if str(name).startswith("download_"):
+                return value
+        return None
 
     def final_outputs(self) -> dict[str, Any]:
         return {
             "status": "success",
             "outputs": self.outputs,
+            "artifacts": self.artifacts,
         }
 
 
@@ -60,6 +112,23 @@ def load_params(kwargs: dict[str, Any]) -> dict[str, Any]:
             params[name] = original
     params.update(kwargs)
     return params
+
+
+def build_runtime_context(page, kwargs: dict[str, Any]) -> dict[str, Any]:
+    downloads_dir = Path(str(kwargs.get("_downloads_dir") or (BASE_DIR / "downloads"))).resolve()
+    workspace_dir = Path(str(kwargs.get("_workspace_dir") or BASE_DIR)).resolve()
+    skill_dir = Path(str(kwargs.get("_skill_dir") or BASE_DIR)).resolve()
+    return {
+        "current_page": page,
+        "skill_dir": str(skill_dir),
+        "_skill_dir": str(skill_dir),
+        "workspace_dir": str(workspace_dir),
+        "_workspace_dir": str(workspace_dir),
+        "downloads_dir": str(downloads_dir),
+        "_downloads_dir": str(downloads_dir),
+        "workflow_path": str((BASE_DIR / "workflow.json").resolve()),
+        "segments_dir": str((BASE_DIR / "segments").resolve()),
+    }
 
 
 def load_module(relative_path: str, module_name: str):
@@ -93,6 +162,34 @@ def normalize_segment_result(result: Any) -> dict[str, Any]:
     return {"result": result}
 
 
+def invoke_segment_callable(func, *, context: WorkflowContext, kwargs: dict[str, Any]) -> Any:
+    signature = inspect.signature(func)
+    parameters = signature.parameters
+
+    call_args: list[Any] = []
+    call_kwargs: dict[str, Any] = {}
+
+    if "context" in parameters:
+        context_param = parameters["context"]
+        if context_param.kind in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}:
+            call_args.append(context)
+        else:
+            call_kwargs["context"] = context
+
+    accepts_var_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    if accepts_var_kwargs:
+        call_kwargs.update(kwargs)
+    else:
+        for name, value in kwargs.items():
+            if name in parameters:
+                call_kwargs[name] = value
+
+    return func(*call_args, **call_kwargs)
+
+
 async def run_rpa_segment(segment: dict[str, Any], context: WorkflowContext, current_page) -> dict[str, Any]:
     module = load_module(segment["entry"], f"workflow_segment_{segment['id']}")
     execute_segment = getattr(module, "execute_segment", None)
@@ -107,10 +204,16 @@ async def run_rpa_segment(segment: dict[str, Any], context: WorkflowContext, cur
 async def run_script_segment(segment: dict[str, Any], context: WorkflowContext) -> dict[str, Any]:
     module = load_module(segment["entry"], f"workflow_segment_{segment['id']}")
     run = getattr(module, "run", None)
-    if not callable(run):
-        raise RuntimeError(f"Script segment {segment['id']} must define run(context)")
+    main = getattr(module, "main", None)
+    kwargs = build_segment_kwargs(segment, context)
 
-    result = run(context)
+    if callable(run):
+        result = invoke_segment_callable(run, context=context, kwargs=kwargs)
+    elif callable(main):
+        result = invoke_segment_callable(main, context=context, kwargs=kwargs)
+    else:
+        raise RuntimeError(f"Script segment {segment['id']} must define run(context) or main(**inputs)")
+
     if inspect.isawaitable(result):
         result = await result
     return normalize_segment_result(result)
@@ -134,7 +237,8 @@ async def _run_workflow(page, **kwargs):
     workflow = load_json("workflow.json")
     params = load_params(kwargs)
     context = WorkflowContext(params=params)
-    context.runtime["current_page"] = page
+    context.register_workflow(workflow)
+    context.runtime.update(build_runtime_context(page, kwargs))
 
     for segment in workflow.get("segments", []):
         kind = segment.get("kind")
@@ -149,7 +253,7 @@ async def _run_workflow(page, **kwargs):
             result = await run_llm_segment(segment, context)
         else:
             raise ValueError(f"Unsupported segment kind: {kind}")
-        context.store_segment_outputs(segment["id"], result)
+        context.store_segment_outputs(segment, result)
 
     return context.final_outputs()
 
@@ -220,25 +324,77 @@ class WorkflowContext:
     def __init__(self, params: dict[str, Any]):
         self.params = params
         self.outputs: dict[str, dict[str, Any]] = {}
+        self.artifacts: dict[str, Any] = {}
         self.runtime: dict[str, Any] = {}
+        self.output_artifact_refs: dict[str, str] = {}
+
+    def register_workflow(self, workflow: dict[str, Any]) -> None:
+        for segment in workflow.get("segments", []):
+            segment_id = str(segment.get("id") or "")
+            if not segment_id:
+                continue
+            for output_spec in segment.get("outputs", []):
+                if not isinstance(output_spec, dict):
+                    continue
+                output_name = str(output_spec.get("name") or "")
+                artifact_ref = str(output_spec.get("artifact_ref") or "")
+                if output_name and artifact_ref:
+                    self.output_artifact_refs[f"{segment_id}.outputs.{output_name}"] = artifact_ref
 
     def resolve(self, source_ref: str | None) -> Any:
         if not source_ref:
             return None
         if source_ref.startswith("params."):
             return self.params.get(source_ref.removeprefix("params."))
+        if source_ref.startswith("artifact:"):
+            value = self.artifacts.get(source_ref.removeprefix("artifact:"))
+            if isinstance(value, dict) and value.get("path"):
+                return value.get("path")
+            return value
         if ".outputs." in source_ref:
             segment_id, output_name = source_ref.split(".outputs.", 1)
-            return self.outputs.get(segment_id, {}).get(output_name)
+            value = self.outputs.get(segment_id, {}).get(output_name)
+            if isinstance(value, dict) and value.get("path"):
+                return value.get("path")
+            if value is not None:
+                return value
+            artifact_ref = self.output_artifact_refs.get(source_ref)
+            if artifact_ref:
+                return self.resolve(f"artifact:{artifact_ref}")
         return None
 
-    def store_segment_outputs(self, segment_id: str, values: dict[str, Any]) -> None:
-        self.outputs[segment_id] = values
+    def store_segment_outputs(self, segment: dict[str, Any], values: dict[str, Any]) -> None:
+        segment_id = str(segment.get("id") or "")
+        if segment_id:
+            self.outputs[segment_id] = values
+        self._store_artifact_outputs(segment, values)
+
+    def _store_artifact_outputs(self, segment: dict[str, Any], values: dict[str, Any]) -> None:
+        for output_spec in segment.get("outputs", []):
+            artifact_ref = output_spec.get("artifact_ref") if isinstance(output_spec, dict) else None
+            if not artifact_ref:
+                continue
+            value = values.get(str(output_spec.get("name") or ""))
+            if value is None:
+                value = self._first_file_like_output(values)
+            if value is not None:
+                self.artifacts[str(artifact_ref)] = value
+
+    @staticmethod
+    def _first_file_like_output(values: dict[str, Any]) -> Any:
+        for value in values.values():
+            if isinstance(value, dict) and value.get("path"):
+                return value
+        for name, value in values.items():
+            if str(name).startswith("download_"):
+                return value
+        return None
 
     def final_outputs(self) -> dict[str, Any]:
         return {
             "status": "success",
             "outputs": self.outputs,
+            "artifacts": self.artifacts,
         }
 
 
@@ -257,6 +413,23 @@ def load_params(kwargs: dict[str, Any]) -> dict[str, Any]:
             params[name] = original
     params.update(kwargs)
     return params
+
+
+def build_runtime_context(page, kwargs: dict[str, Any]) -> dict[str, Any]:
+    downloads_dir = Path(str(kwargs.get("_downloads_dir") or (BASE_DIR / "downloads"))).resolve()
+    workspace_dir = Path(str(kwargs.get("_workspace_dir") or BASE_DIR)).resolve()
+    skill_dir = Path(str(kwargs.get("_skill_dir") or BASE_DIR)).resolve()
+    return {
+        "current_page": page,
+        "skill_dir": str(skill_dir),
+        "_skill_dir": str(skill_dir),
+        "workspace_dir": str(workspace_dir),
+        "_workspace_dir": str(workspace_dir),
+        "downloads_dir": str(downloads_dir),
+        "_downloads_dir": str(downloads_dir),
+        "workflow_path": str((BASE_DIR / "workflow.json").resolve()),
+        "segments_dir": str((BASE_DIR / "segments").resolve()),
+    }
 
 
 def load_module(relative_path: str, module_name: str):
@@ -290,6 +463,34 @@ def normalize_segment_result(result: Any) -> dict[str, Any]:
     return {"result": result}
 
 
+def invoke_segment_callable(func, *, context: WorkflowContext, kwargs: dict[str, Any]) -> Any:
+    signature = inspect.signature(func)
+    parameters = signature.parameters
+
+    call_args: list[Any] = []
+    call_kwargs: dict[str, Any] = {}
+
+    if "context" in parameters:
+        context_param = parameters["context"]
+        if context_param.kind in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}:
+            call_args.append(context)
+        else:
+            call_kwargs["context"] = context
+
+    accepts_var_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    if accepts_var_kwargs:
+        call_kwargs.update(kwargs)
+    else:
+        for name, value in kwargs.items():
+            if name in parameters:
+                call_kwargs[name] = value
+
+    return func(*call_args, **call_kwargs)
+
+
 async def run_rpa_segment(segment: dict[str, Any], context: WorkflowContext, current_page) -> dict[str, Any]:
     module = load_module(segment["entry"], f"workflow_segment_{segment['id']}")
     execute_segment = getattr(module, "execute_segment", None)
@@ -304,10 +505,16 @@ async def run_rpa_segment(segment: dict[str, Any], context: WorkflowContext, cur
 async def run_script_segment(segment: dict[str, Any], context: WorkflowContext) -> dict[str, Any]:
     module = load_module(segment["entry"], f"workflow_segment_{segment['id']}")
     run = getattr(module, "run", None)
-    if not callable(run):
-        raise RuntimeError(f"Script segment {segment['id']} must define run(context)")
+    main = getattr(module, "main", None)
+    kwargs = build_segment_kwargs(segment, context)
 
-    result = run(context)
+    if callable(run):
+        result = invoke_segment_callable(run, context=context, kwargs=kwargs)
+    elif callable(main):
+        result = invoke_segment_callable(main, context=context, kwargs=kwargs)
+    else:
+        raise RuntimeError(f"Script segment {segment['id']} must define run(context) or main(**inputs)")
+
     if inspect.isawaitable(result):
         result = await result
     return normalize_segment_result(result)
@@ -331,7 +538,8 @@ async def _run_workflow(page, **kwargs):
     workflow = load_json("workflow.json")
     params = load_params(kwargs)
     context = WorkflowContext(params=params)
-    context.runtime["current_page"] = page
+    context.register_workflow(workflow)
+    context.runtime.update(build_runtime_context(page, kwargs))
 
     for segment in workflow.get("segments", []):
         kind = segment.get("kind")
@@ -346,7 +554,7 @@ async def _run_workflow(page, **kwargs):
             result = await run_llm_segment(segment, context)
         else:
             raise ValueError(f"Unsupported segment kind: {kind}")
-        context.store_segment_outputs(segment["id"], result)
+        context.store_segment_outputs(segment, result)
 
     return context.final_outputs()
 

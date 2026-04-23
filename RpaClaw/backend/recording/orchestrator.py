@@ -78,9 +78,17 @@ class RecordingOrchestrator:
             run.updated_at = datetime.now()
         run.testing = {"status": "running"}
 
-    def mark_needs_repair(self, run: RecordingRun, error: str = "") -> None:
+    def mark_needs_repair(
+        self,
+        run: RecordingRun,
+        error: str = "",
+        *,
+        repair_context: dict[str, Any] | None = None,
+    ) -> None:
         move_run_status(run, "needs_repair")
         run.testing = {"status": "failed", "error": error}
+        if repair_context:
+            run.testing["repair_context"] = dict(repair_context)
 
     def mark_ready_to_publish(self, run: RecordingRun, publish_target: str) -> None:
         if publish_target not in {"skill", "tool"}:
@@ -94,6 +102,23 @@ class RecordingOrchestrator:
             move_run_status(run, "ready_to_publish")
         else:
             run.updated_at = datetime.now()
+
+    def apply_workflow_test_feedback(
+        self,
+        run: RecordingRun,
+        *,
+        success: bool,
+        failed_segment_ids: set[str] | None = None,
+    ) -> None:
+        failed_segment_ids = failed_segment_ids or set()
+        for segment in run.segments:
+            if segment.status != "completed":
+                continue
+            if success:
+                segment.exports["testing_status"] = "passed"
+            elif segment.id in failed_segment_ids:
+                segment.exports["testing_status"] = "failed"
+        run.updated_at = datetime.now()
 
     def build_segment_summary(self, segment: RecordingSegment) -> dict[str, object]:
         summary = {
@@ -223,6 +248,68 @@ class RecordingOrchestrator:
 
         run.updated_at = datetime.now()
 
+    def normalize_script_segment_contract(
+        self,
+        run: RecordingRun,
+        segment: RecordingSegment,
+        *,
+        params: dict[str, Any] | None,
+        inputs: list[dict[str, Any]] | None,
+        outputs: list[dict[str, Any]] | None,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+        return (
+            {
+            str(name): dict(config) if isinstance(config, dict) else config
+            for name, config in (params or {}).items()
+            if isinstance(name, str) and name
+            },
+            [
+                dict(item)
+                for item in (inputs or [])
+                if isinstance(item, dict) and str(item.get("name") or "")
+            ],
+            [
+                dict(item)
+                for item in (outputs or [])
+                if isinstance(item, dict) and str(item.get("name") or "")
+            ],
+        )
+
+    def build_next_segment_context(self, run: RecordingRun) -> dict[str, Any]:
+        latest_segment = run.segments[-1] if run.segments else None
+        source_pool = (
+            self.build_segment_mapping_sources(
+                run,
+                RecordingSegment(id="__next_segment__", run_id=run.id, kind="script", intent=""),
+            )
+            if run.segments
+            else {"recommended": [], "segment_outputs": [], "artifacts": [], "workflow_params": []}
+        )
+
+        return {
+            "run_goal": run.publish_target or run.save_intent or run.type,
+            "latest_segment": None if latest_segment is None else {
+                "segment_id": latest_segment.id,
+                "title": _segment_title(latest_segment, self.build_segment_summary(latest_segment)),
+                "kind": latest_segment.kind,
+                "intent": latest_segment.intent,
+            },
+            "available_sources": {
+                "recommended": source_pool.get("recommended", []),
+                "segment_outputs": source_pool.get("segment_outputs", []),
+                "artifacts": source_pool.get("artifacts", []),
+            },
+            "runtime_path_policy": {
+                "kind": "artifact-ref-runtime-resolution",
+                "message": "Do not use recorded local temp paths. Bind file inputs to artifact:<id>; the workflow runner resolves them to execution-time paths under _downloads_dir.",
+            },
+            "planning_hints": [
+                "Plan the script segment from the user's latest intent plus the available outputs/artifacts from earlier segments.",
+                "Only expose inputs or params the caller must control. Values coming from prior segment outputs or artifacts should be bound, not turned into manual user inputs.",
+                "If the next script processes a previously downloaded or generated file, declare an explicit file input and bind it to the chosen artifact reference.",
+            ],
+        }
+
     def should_open_workbench(self, kind: str, requires_user_interaction: bool) -> bool:
         return kind in {"rpa", "mcp"} and requires_user_interaction
 
@@ -238,14 +325,23 @@ def _infer_segment_inputs(segment: RecordingSegment) -> list[dict[str, Any]]:
             continue
         config_dict = config if isinstance(config, dict) else {}
         sensitive = bool(config_dict.get("sensitive"))
+        original_value = config_dict.get("original_value")
+        source = "credential" if sensitive else "user"
+        source_ref = None
+        if sensitive and config_dict.get("credential_id"):
+            source_ref = f"params.{name}"
+        elif not sensitive and original_value not in (None, ""):
+            source = "workflow_param"
+            source_ref = f"params.{name}"
         inputs.append(
             {
                 "name": name,
                 "type": "secret" if sensitive else "string",
                 "required": False,
-                "source": "credential" if sensitive else "user",
+                "source": source,
+                "source_ref": source_ref,
                 "description": str(config_dict.get("description") or f"参数 {name}"),
-                "default": None if sensitive else config_dict.get("original_value"),
+                "default": None if sensitive else original_value,
             }
         )
     return inputs
@@ -316,7 +412,17 @@ def _artifact_preview(artifact: dict[str, Any]) -> str:
     value = artifact.get("value")
     if value in (None, ""):
         return ""
+    if isinstance(value, dict):
+        filename = value.get("filename")
+        output_path = value.get("path")
+        if isinstance(filename, str) and filename:
+            return filename
+        if isinstance(output_path, str) and output_path:
+            return output_path
+        return ""
     return str(value)
+
+
 
 
 def _parse_segment_output_ref(source_ref: str) -> tuple[str, str] | None:

@@ -63,11 +63,16 @@ export function deriveArtifactsFromRpaSteps(steps: RpaStep[]): RecordingArtifact
   for (const step of steps) {
     const downloadSignal = step.signals?.download
     if (downloadSignal?.path) {
+      const filename = downloadSignal.filename || step.value || `download_${step.id}`
       artifacts.push({
-        name: downloadSignal.filename || step.value || `download_${step.id}`,
+        name: filename,
         type: 'file',
-        path: downloadSignal.path,
-        labels: ['recording', 'download'],
+        value: {
+          filename,
+          recorded_path: downloadSignal.path,
+          runtime: 'downloads_dir',
+        },
+        labels: ['recording', 'download', 'runtime-download'],
       })
     }
     if (step.result_key && step.value) {
@@ -138,6 +143,26 @@ export function deriveSummaryOutputs(summary: RecordingSegmentSummary): Workflow
   return outputs
 }
 
+function artifactPreview(artifact: RecordingArtifact): string {
+  if (artifact.path) {
+    return artifact.path
+  }
+  const value = artifact.value
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    const filename = record.filename
+    const outputPath = record.path
+    if (typeof filename === 'string' && filename) {
+      return filename
+    }
+    if (typeof outputPath === 'string' && outputPath) {
+      return outputPath
+    }
+    return ''
+  }
+  return value === undefined || value === null ? '' : String(value)
+}
+
 export function buildMappingSourcePool(args: {
   currentSegmentId: string
   summaries: RecordingSegmentSummary[]
@@ -167,7 +192,7 @@ export function buildMappingSourcePool(args: {
       segmentTitle: summary.title || summary.intent || summary.segment_id,
       name: artifact.name,
       valueType: artifact.type === 'file' ? 'file' : artifact.type === 'text' ? 'string' : 'json',
-      preview: artifact.path || (artifact.value === undefined || artifact.value === null ? '' : String(artifact.value)),
+      preview: artifactPreview(artifact),
     })),
   )
 

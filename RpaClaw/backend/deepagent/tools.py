@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+from pathlib import Path
 
 from langchain_core.tools import tool
 
@@ -60,6 +61,7 @@ def propose_tool_save(tool_name: str, replaces: str = "") -> str:
 
 def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_dir: str):
     """Create session-bound tools used by recording-creator."""
+    from backend.workflow.segment_paths import normalize_script_segment_entry
 
     def _resolve_run(run_id: str = ""):
         from backend.recording.service import recording_orchestrator
@@ -120,6 +122,64 @@ def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_di
             if segment.id == segment_id:
                 return segment
         raise ValueError(f"segment not found: {segment_id}")
+
+    def _collect_execution_error(execution_result: dict[str, object]) -> str:
+        error_parts: list[str] = []
+        logs = execution_result.get("logs")
+        if isinstance(logs, list):
+            error_parts.extend(str(item) for item in logs if str(item or "").strip())
+        stderr = str(execution_result.get("stderr") or "").strip()
+        if stderr:
+            error_parts.append(stderr)
+
+        contract = execution_result.get("contract")
+        if isinstance(contract, dict):
+            for item in contract.get("segment_results", []):
+                if not isinstance(item, dict):
+                    continue
+                segment_title = str(item.get("title") or item.get("segment_id") or "segment")
+                missing_outputs = [str(name) for name in item.get("missing_outputs", []) if str(name or "")]
+                missing_artifacts = [str(name) for name in item.get("missing_artifacts", []) if str(name or "")]
+                if missing_outputs:
+                    error_parts.append(f"{segment_title} missing outputs: {', '.join(missing_outputs)}")
+                if missing_artifacts:
+                    error_parts.append(f"{segment_title} missing artifacts: {', '.join(missing_artifacts)}")
+
+        return "\n".join(part for part in error_parts if part).strip()
+
+    def _sync_repaired_script_segments(run, *, skill_dir: Path, workflow_path: Path):
+        from backend.recording.service import recording_orchestrator
+
+        workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+        updated_summaries: list[dict[str, object]] = []
+        for segment_payload in workflow.get("segments", []):
+            if not isinstance(segment_payload, dict) or str(segment_payload.get("kind") or "") != "script":
+                continue
+            segment_id = str(segment_payload.get("id") or "")
+            if not segment_id:
+                continue
+            segment = _segment_by_id(run, segment_id)
+            entry = normalize_script_segment_entry(segment.id, str(segment_payload.get("entry") or ""))
+            script_path = skill_dir / entry
+            script_source = script_path.read_text(encoding="utf-8")
+            segment.exports["title"] = str(segment_payload.get("title") or segment.exports.get("title") or segment.intent)
+            segment.exports["description"] = str(segment_payload.get("purpose") or segment.exports.get("description") or segment.intent)
+            segment.exports["entry"] = entry
+            segment.exports["script"] = script_source
+            segment.exports["inputs"] = [
+                dict(item)
+                for item in segment_payload.get("inputs", [])
+                if isinstance(item, dict)
+            ]
+            segment.exports["outputs"] = [
+                dict(item)
+                for item in segment_payload.get("outputs", [])
+                if isinstance(item, dict)
+            ]
+            segment.exports["testing_status"] = "idle"
+            updated_summaries.append(recording_orchestrator.build_segment_summary(segment))
+        run.testing = {"status": "idle"}
+        return updated_summaries
 
     @tool
     def start_recording_run(message: str, kind: str = "rpa", publish_target: str = "") -> str:
@@ -183,6 +243,7 @@ def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_di
                         "segment_count": len(run.segments),
                         "segments": [recording_orchestrator.build_segment_summary(segment) for segment in run.segments],
                         "artifacts": [artifact.model_dump(mode="json") for artifact in run.artifact_index],
+                        "next_segment_context": recording_orchestrator.build_next_segment_context(run),
                     }
                     for run in runs
                 ],
@@ -195,25 +256,31 @@ def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_di
         run_id: str = "",
         message: str = "",
         kind: str = "rpa",
-        requires_workbench: bool = True,
+        requires_workbench: bool | None = None,
     ) -> str:
-        """Continue the latest recording run or a specified run by appending a new segment instead of starting a brand new run."""
+        """Continue a recording run by appending a new segment.
+
+        Browser/RPA segments open the workbench by default. Script/data-processing
+        segments stay in chat; prefer add_script_recording_segment when the script
+        content is already known and should be saved immediately.
+        """
         from backend.recording.service import recording_orchestrator
 
         run = _resolve_run(run_id)
-        segment_kind = kind if kind in {"rpa", "mcp", "mixed"} else run.type
+        segment_kind = kind if kind in {"rpa", "mcp", "mixed", "script"} else run.type
+        should_open_workbench = segment_kind != "script" if requires_workbench is None else bool(requires_workbench)
         segment = recording_orchestrator.start_segment(
             run,
             kind=segment_kind,
             intent=message or "继续录制下一段",
-            requires_workbench=requires_workbench,
+            requires_workbench=should_open_workbench,
         )
         return json.dumps(
             {
                 "recording_event": "recording_run_started",
                 "run": _compact_run_payload(run),
                 "segment": _compact_segment_payload(segment),
-                "open_workbench": requires_workbench,
+                "open_workbench": should_open_workbench,
             },
             ensure_ascii=False,
         )
@@ -229,28 +296,56 @@ def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_di
         inputs_json: str = "[]",
         outputs_json: str = "[]",
     ) -> str:
-        """Append a completed script-processing segment to the current recording run for file conversion, parsing, extraction, or other non-browser processing."""
+        """Append a completed script-processing segment to the current recording run for non-browser processing.
+
+        Keep `entry` empty unless you intentionally want a custom relative Python path such as
+        `segments/custom_transform.py`. Free-form descriptions or natural-language intents must
+        go into `purpose`, not `entry`. Saving a script segment does not count as a full workflow
+        verification; use `begin_recording_test` when the user asks to validate the entire recorded flow.
+        """
         from backend.recording.service import recording_orchestrator
 
         run = _resolve_run(run_id)
         params = _parse_json_payload(params_json, {})
         inputs = _parse_json_payload(inputs_json, [])
         outputs = _parse_json_payload(outputs_json, [])
-        segment = recording_orchestrator.start_segment(
+        segment = None
+        if run.status == "waiting_user" and run.active_segment_id:
+            segment = next(
+                (
+                    existing_segment
+                    for existing_segment in run.segments
+                    if existing_segment.id == run.active_segment_id
+                    and existing_segment.kind == "script"
+                    and existing_segment.status == "recording"
+                ),
+                None,
+            )
+        if segment is None:
+            segment = recording_orchestrator.start_segment(
+                run,
+                kind="script",
+                intent=purpose or title or "脚本处理片段",
+                requires_workbench=False,
+            )
+        else:
+            segment.intent = purpose or title or segment.intent
+        params, inputs, outputs = recording_orchestrator.normalize_script_segment_contract(
             run,
-            kind="script",
-            intent=purpose or title or "脚本处理片段",
-            requires_workbench=False,
+            segment,
+            params=params if isinstance(params, dict) else {},
+            inputs=inputs if isinstance(inputs, list) else [],
+            outputs=outputs if isinstance(outputs, list) else [],
         )
         segment.exports = {
             "title": title or "脚本片段",
             "description": purpose or title or "脚本处理片段",
             "script": script or "def run(context):\n    return {}\n",
-            "entry": entry or f"segments/{segment.id}_script.py",
-            "params": params if isinstance(params, dict) else {},
-            "inputs": inputs if isinstance(inputs, list) else [],
-            "outputs": outputs if isinstance(outputs, list) else [],
-            "testing_status": "passed",
+            "entry": normalize_script_segment_entry(segment.id, entry),
+            "params": params,
+            "inputs": inputs,
+            "outputs": outputs,
+            "testing_status": "idle",
         }
         recording_orchestrator.complete_segment(run, segment)
         summary = recording_orchestrator.build_segment_summary(segment)
@@ -312,7 +407,12 @@ def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_di
 
     @tool
     def begin_recording_test(run_id: str = "") -> str:
-        """Move an existing recording run into testing state and execute workflow tests for multi-segment runs."""
+        """Move an existing recording run into testing state and execute the entire workflow.
+
+        This replays all required upstream segments in order, including prior download/browser steps
+        and existing output/artifact bindings, before running downstream script segments. Use this for
+        full workflow validation instead of standalone script execution or sample-file simulation.
+        """
         from backend.recording.service import recording_orchestrator
         from backend.recording.testing import build_test_payload, execute_recording_workflow_test
 
@@ -324,19 +424,25 @@ def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_di
         payload = _run_async(build_test_payload(run))
         payload["execution"] = _run_async(execute_recording_workflow_test(run, workspace_dir=workspace_dir))
         execution_result = payload.get("execution", {}).get("result", {})
+        contract = execution_result.get("contract")
+        failed_segment_ids = {
+            str(item.get("segment_id") or "")
+            for item in (contract.get("segment_results", []) if isinstance(contract, dict) else [])
+            if isinstance(item, dict) and str(item.get("segment_id") or "")
+        }
         if execution_result.get("success"):
+            recording_orchestrator.apply_workflow_test_feedback(run, success=True)
             target = run.publish_target or run.save_intent or "skill"
             recording_orchestrator.mark_ready_to_publish(run, target)
         else:
-            error_parts: list[str] = []
-            logs = execution_result.get("logs")
-            if isinstance(logs, list):
-                error_parts.extend(str(item) for item in logs if str(item or "").strip())
-            stderr = str(execution_result.get("stderr") or "").strip()
-            if stderr:
-                error_parts.append(stderr)
-            error_text = "\n".join(error_parts).strip()
-            recording_orchestrator.mark_needs_repair(run, error=error_text or "workflow test failed")
+            recording_orchestrator.apply_workflow_test_feedback(run, success=False, failed_segment_ids=failed_segment_ids)
+            repair_context = payload.get("execution", {}).get("repair_context") or {}
+            error_text = _collect_execution_error(execution_result)
+            recording_orchestrator.mark_needs_repair(
+                run,
+                error=error_text or "workflow test failed",
+                repair_context=repair_context if isinstance(repair_context, dict) else None,
+            )
         compact_logs = execution_result.get("logs")
         if isinstance(compact_logs, list):
             compact_logs = [str(item) for item in compact_logs[:5] if str(item or "").strip()]
@@ -352,10 +458,39 @@ def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_di
                     "success": bool(execution_result.get("success")),
                     "run_status": run.status,
                     "testing_status": (run.testing or {}).get("status"),
+                    "error": (run.testing or {}).get("error", ""),
                     "logs": compact_logs,
                     "stderr": str(execution_result.get("stderr") or "").strip(),
+                    "repair_context": (run.testing or {}).get("repair_context"),
                 },
                 "test_payload": payload,
+            },
+            ensure_ascii=False,
+        )
+
+    @tool
+    def apply_recording_test_repairs(run_id: str = "") -> str:
+        """Sync repaired workflow test files back into the recording run after the agent edits the repair workspace."""
+        from backend.recording.service import recording_orchestrator
+
+        run = _resolve_run(run_id)
+        repair_context = run.testing.get("repair_context") if isinstance(run.testing, dict) else None
+        if not isinstance(repair_context, dict):
+            raise ValueError("no repair context found for this recording run")
+
+        skill_dir = Path(str(repair_context.get("skill_dir") or ""))
+        workflow_path = Path(str(repair_context.get("workflow_path") or ""))
+        if not skill_dir.is_dir():
+            raise ValueError(f"repair skill directory not found: {skill_dir}")
+        if not workflow_path.is_file():
+            raise ValueError(f"repair workflow file not found: {workflow_path}")
+
+        summaries = _sync_repaired_script_segments(run, skill_dir=skill_dir, workflow_path=workflow_path)
+        return json.dumps(
+            {
+                "recording_event": "recording_segment_updated",
+                "run": _compact_run_payload(run),
+                "summaries": summaries,
             },
             ensure_ascii=False,
         )
@@ -403,6 +538,7 @@ def create_recording_lifecycle_tools(session_id: str, user_id: str, workspace_di
         add_script_recording_segment,
         bind_recording_segment_io,
         begin_recording_test,
+        apply_recording_test_repairs,
         prepare_recording_publish,
     ]
 

@@ -13,12 +13,15 @@ import {
 import { apiClient } from '@/api/client';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { buildRpaToolEditorLocation } from '@/utils/rpaMcpConvert';
+import { buildRpaConfigureCopy } from '@/utils/rpaConfigureView';
 
 const router = useRouter();
 const route = useRoute();
 
 const sessionId = computed(() => typeof route.query.sessionId === 'string' ? route.query.sessionId : '');
 const isEmbedded = computed(() => route.query.embedded === '1');
+const isSegmentContext = computed(() => Boolean(route.query.runId && route.query.segmentId));
+const configureCopy = computed(() => buildRpaConfigureCopy(isSegmentContext.value));
 const loading = ref(true);
 const loadFailed = ref(false);
 const error = ref<string | null>(null);
@@ -74,6 +77,8 @@ interface ParamItem {
   step_id: string;
   sensitive: boolean;
   credential_id: string;
+  description: string;
+  source_step_index: number;
 }
 
 interface CredentialItem {
@@ -375,6 +380,8 @@ const loadSession = async () => {
           step_id: step.id,
           sensitive: !!step.sensitive,
           credential_id: '',
+          description: step.description || label,
+          source_step_index: index,
         };
       });
 
@@ -404,9 +411,14 @@ const buildParamMap = () => {
     .filter((param) => param.enabled)
     .forEach((param) => {
       paramMap[param.name] = {
-        original_value: param.original_value,
+        original_value: param.sensitive ? '{{credential}}' : param.original_value,
+        type: param.sensitive ? 'string' : 'string',
+        description: param.description || param.label || param.name,
+        required: false,
         sensitive: param.sensitive || false,
         credential_id: param.credential_id || '',
+        source_step_index: param.source_step_index,
+        source_step_id: param.step_id,
       };
     });
   return paramMap;
@@ -471,7 +483,7 @@ onMounted(() => {
             <Settings :size="20" />
           </div>
           <div class="min-w-0">
-            <h1 class="truncate text-lg font-extrabold tracking-tight sm:text-xl">配置技能</h1>
+            <h1 class="truncate text-lg font-extrabold tracking-tight sm:text-xl">{{ configureCopy.pageTitle }}</h1>
           </div>
         </div>
 
@@ -688,20 +700,20 @@ onMounted(() => {
                 <Settings :size="18" />
               </div>
               <div>
-                <h2 class="text-base font-extrabold">片段信息</h2>
+                <h2 class="text-base font-extrabold">{{ configureCopy.detailsTitle }}</h2>
               </div>
             </div>
 
             <div class="mt-4 space-y-4">
               <div class="space-y-1.5">
-                <label class="text-xs font-semibold text-gray-500 dark:text-gray-400">片段名称</label>
+                <label class="text-xs font-semibold text-gray-500 dark:text-gray-400">{{ configureCopy.nameLabel }}</label>
                 <input
                   v-model="segmentTitle"
                   class="w-full rounded-2xl border border-gray-200 dark:border-gray-700 bg-[#fafafa] dark:bg-[#383739] px-3 py-2.5 text-sm outline-none transition-colors focus:border-[#831bd7] focus:bg-white"
                 />
               </div>
               <div class="space-y-1.5">
-                <label class="text-xs font-semibold text-gray-500 dark:text-gray-400">片段用途</label>
+                <label class="text-xs font-semibold text-gray-500 dark:text-gray-400">{{ configureCopy.purposeLabel }}</label>
                 <textarea
                   v-model="segmentPurpose"
                   rows="3"

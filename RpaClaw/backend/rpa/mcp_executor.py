@@ -127,7 +127,7 @@ class RpaMcpExecutor:
                 result = {"status": "metadata_only", "config": segment.get("config") or {}}
             else:
                 raise ValueError(f"Unsupported segment kind: {kind}")
-            context.store_segment_outputs(str(segment.get("id") or ""), self._normalize_segment_result(result))
+            context.store_segment_outputs(segment, self._normalize_segment_result(result))
         return context.final_outputs()
 
     def _load_workflow_params(self, params_config: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -265,6 +265,7 @@ class _WorkflowExecutionContext:
     def __init__(self, params: dict[str, Any]):
         self.params = params
         self.outputs: dict[str, dict[str, Any]] = {}
+        self.artifacts: dict[str, Any] = {}
         self.runtime: dict[str, Any] = {}
 
     def resolve(self, source_ref: str | None) -> Any:
@@ -272,19 +273,48 @@ class _WorkflowExecutionContext:
             return None
         if source_ref.startswith("params."):
             return self.params.get(source_ref.removeprefix("params."))
+        if source_ref.startswith("artifact:"):
+            value = self.artifacts.get(source_ref.removeprefix("artifact:"))
+            if isinstance(value, dict) and value.get("path"):
+                return value.get("path")
+            return value
         if ".outputs." in source_ref:
             segment_id, output_name = source_ref.split(".outputs.", 1)
             return self.outputs.get(segment_id, {}).get(output_name)
         return None
 
-    def store_segment_outputs(self, segment_id: str, values: dict[str, Any]) -> None:
+    def store_segment_outputs(self, segment: dict[str, Any], values: dict[str, Any]) -> None:
+        segment_id = str(segment.get("id") or "")
         if segment_id:
             self.outputs[segment_id] = values
+        self._store_artifact_outputs(segment, values)
+
+    def _store_artifact_outputs(self, segment: dict[str, Any], values: dict[str, Any]) -> None:
+        for output_spec in segment.get("outputs") or []:
+            artifact_ref = output_spec.get("artifact_ref") if isinstance(output_spec, dict) else None
+            if not artifact_ref:
+                continue
+            value = values.get(str(output_spec.get("name") or ""))
+            if value is None:
+                value = self._first_file_like_output(values)
+            if value is not None:
+                self.artifacts[str(artifact_ref)] = value
+
+    @staticmethod
+    def _first_file_like_output(values: dict[str, Any]) -> Any:
+        for value in values.values():
+            if isinstance(value, dict) and value.get("path"):
+                return value
+        for name, value in values.items():
+            if str(name).startswith("download_"):
+                return value
+        return None
 
     def final_outputs(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "status": "success",
             "outputs": self.outputs,
+            "artifacts": self.artifacts,
         }
         for segment_id, values in self.outputs.items():
             for name, value in values.items():

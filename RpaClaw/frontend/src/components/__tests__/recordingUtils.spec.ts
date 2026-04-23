@@ -40,7 +40,7 @@ describe('recording utils', () => {
     ])
   })
 
-  it('derives file artifacts from download signals', () => {
+  it('derives file artifacts from download signals without persisting transient paths', () => {
     const artifacts = deriveArtifactsFromRpaSteps([
       {
         id: 'step-2',
@@ -59,8 +59,12 @@ describe('recording utils', () => {
       {
         name: 'paper.pdf',
         type: 'file',
-        path: '/tmp/paper.pdf',
-        labels: ['recording', 'download'],
+        value: {
+          filename: 'paper.pdf',
+          recorded_path: '/tmp/paper.pdf',
+          runtime: 'downloads_dir',
+        },
+        labels: ['recording', 'download', 'runtime-download'],
       },
     ])
   })

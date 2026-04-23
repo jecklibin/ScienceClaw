@@ -59,6 +59,7 @@ from backend.recording.step_repair_service import StepRepairService
 from backend.recording import publishing as recording_publishing
 from backend.recording import testing as recording_testing
 from backend.rpa.manager import RPAStep
+from backend.workflow.segment_paths import normalize_script_segment_entry
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -2247,10 +2248,18 @@ async def test_recording_run(
     test_payload = await recording_testing.build_test_payload(run)
     test_payload["execution"] = await recording_testing.execute_recording_workflow_test(run, _Path(_WORKSPACE_DIR))
     execution_result = test_payload.get("execution", {}).get("result", {})
+    contract = execution_result.get("contract")
+    failed_segment_ids = {
+        str(item.get("segment_id") or "")
+        for item in (contract.get("segment_results", []) if isinstance(contract, dict) else [])
+        if isinstance(item, dict) and str(item.get("segment_id") or "")
+    }
     if execution_result.get("success"):
+        recording_orchestrator.apply_workflow_test_feedback(run, success=True)
         target = run.publish_target or run.save_intent or "skill"
         recording_orchestrator.mark_ready_to_publish(run, target)
     else:
+        recording_orchestrator.apply_workflow_test_feedback(run, success=False, failed_segment_ids=failed_segment_ids)
         error_parts: list[str] = []
         logs = execution_result.get("logs")
         if isinstance(logs, list):
@@ -2258,8 +2267,24 @@ async def test_recording_run(
         stderr = str(execution_result.get("stderr") or "").strip()
         if stderr:
             error_parts.append(stderr)
+        if isinstance(contract, dict):
+            for item in contract.get("segment_results", []):
+                if not isinstance(item, dict):
+                    continue
+                segment_title = str(item.get("title") or item.get("segment_id") or "segment")
+                missing_outputs = [str(name) for name in item.get("missing_outputs", []) if str(name or "")]
+                missing_artifacts = [str(name) for name in item.get("missing_artifacts", []) if str(name or "")]
+                if missing_outputs:
+                    error_parts.append(f"{segment_title} missing outputs: {', '.join(missing_outputs)}")
+                if missing_artifacts:
+                    error_parts.append(f"{segment_title} missing artifacts: {', '.join(missing_artifacts)}")
         error_text = "\n".join(error_parts).strip()
-        recording_orchestrator.mark_needs_repair(run, error=error_text or "workflow test failed")
+        repair_context = test_payload.get("execution", {}).get("repair_context") or {}
+        recording_orchestrator.mark_needs_repair(
+            run,
+            error=error_text or "workflow test failed",
+            repair_context=repair_context if isinstance(repair_context, dict) else None,
+        )
     compact_logs = execution_result.get("logs")
     if isinstance(compact_logs, list):
         compact_logs = [str(item) for item in compact_logs[:5] if str(item or "").strip()]
@@ -2275,8 +2300,10 @@ async def test_recording_run(
             "success": bool(execution_result.get("success")),
             "run_status": run.status,
             "testing_status": (run.testing or {}).get("status"),
+            "error": (run.testing or {}).get("error", ""),
             "logs": compact_logs,
             "stderr": str(execution_result.get("stderr") or "").strip(),
+            "repair_context": (run.testing or {}).get("repair_context"),
         },
         "test_payload": test_payload,
     }
@@ -2349,14 +2376,21 @@ async def create_recording_script_segment(
         intent=body.purpose,
         requires_workbench=False,
     )
+    params, inputs, outputs = recording_orchestrator.normalize_script_segment_contract(
+        run,
+        segment,
+        params=body.params,
+        inputs=body.inputs,
+        outputs=body.outputs,
+    )
     segment.exports = {
         "title": body.title,
         "description": body.purpose,
         "script": body.script,
-        "entry": body.entry or f"segments/{segment.id}_script.py",
-        "params": body.params,
-        "inputs": body.inputs,
-        "outputs": body.outputs,
+        "entry": normalize_script_segment_entry(segment.id, body.entry),
+        "params": params,
+        "inputs": inputs,
+        "outputs": outputs,
         "testing_status": "passed",
     }
     recording_orchestrator.complete_segment(run, segment)
@@ -2368,11 +2402,11 @@ async def create_recording_script_segment(
         "description": body.purpose,
         "kind": "script",
         "status": segment.status,
-        "params": body.params,
+        "params": params,
         "artifacts": [],
         "steps": [],
-        "inputs": body.inputs,
-        "outputs": body.outputs,
+        "inputs": inputs,
+        "outputs": outputs,
         "testing_status": "passed",
     }
     _append_session_event(session, _wrap_event("recording_segment_completed", {

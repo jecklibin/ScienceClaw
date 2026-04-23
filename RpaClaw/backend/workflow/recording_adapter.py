@@ -4,6 +4,8 @@ from typing import Any
 
 from backend.recording.models import RecordingArtifact, RecordingRun, RecordingSegment
 
+from .artifacts import sanitize_workflow_artifact_payload
+from .segment_paths import normalize_script_segment_entry
 from .models import (
     ArtifactRef,
     SegmentInput,
@@ -49,7 +51,7 @@ def recording_segment_to_workflow(segment: RecordingSegment, order: int) -> Work
         config["browser"] = exports.get("browser", {})
     elif kind == "script":
         config["language"] = exports.get("language", "python")
-        config["entry"] = exports.get("entry") or f"segments/{segment.id}_script.py"
+        config["entry"] = normalize_script_segment_entry(segment.id, exports.get("entry"))
         config["source"] = exports.get("script") or "def run(context):\n    return {}\n"
         config["params"] = exports.get("params", {})
     else:
@@ -74,15 +76,19 @@ def recording_segment_to_workflow(segment: RecordingSegment, order: int) -> Work
 
 
 def recording_artifact_to_ref(artifact: RecordingArtifact) -> ArtifactRef:
-    return ArtifactRef(
-        id=artifact.id,
-        name=artifact.name,
-        type=artifact.type,
-        path=artifact.path,
-        value=artifact.value,
-        mime_type=artifact.mime_type,
-        labels=artifact.labels,
-        producer_segment_id=artifact.segment_id,
+    return ArtifactRef.model_validate(
+        sanitize_workflow_artifact_payload(
+            {
+                "id": artifact.id,
+                "name": artifact.name,
+                "type": artifact.type,
+                "path": artifact.path,
+                "value": artifact.value,
+                "mime_type": artifact.mime_type,
+                "labels": artifact.labels,
+                "producer_segment_id": artifact.segment_id,
+            }
+        )
     )
 
 
@@ -121,14 +127,23 @@ def _params_to_inputs(params: dict[str, Any], explicit_inputs: Any) -> list[Segm
         if any(item.name == name for item in inputs):
             continue
         sensitive = bool(config.get("sensitive"))
+        original_value = config.get("original_value")
+        source = "credential" if sensitive else "user"
+        source_ref = None
+        if sensitive and config.get("credential_id"):
+            source_ref = f"params.{name}"
+        elif not sensitive and original_value not in (None, ""):
+            source = "workflow_param"
+            source_ref = f"params.{name}"
         inputs.append(
             SegmentInput(
                 name=name,
                 type="secret" if sensitive else "string",
                 required=False,
-                source="credential" if sensitive else "user",
+                source=source,
+                source_ref=source_ref,
                 description=str(config.get("description") or f"参数 {name}"),
-                default=None if sensitive else config.get("original_value"),
+                default=None if sensitive else original_value,
             )
         )
     return inputs
@@ -136,11 +151,26 @@ def _params_to_inputs(params: dict[str, Any], explicit_inputs: Any) -> list[Segm
 
 def _infer_outputs(segment: RecordingSegment, kind: WorkflowSegmentKind, explicit_outputs: Any) -> list[SegmentOutput]:
     if isinstance(explicit_outputs, list) and explicit_outputs:
-        return [
-            SegmentOutput.model_validate(item)
-            for item in explicit_outputs
-            if isinstance(item, dict) and item.get("name") and item.get("type")
-        ]
+        artifacts_by_name = {
+            artifact.name: artifact
+            for artifact in segment.artifacts
+            if artifact.name
+        }
+        normalized_outputs: list[SegmentOutput] = []
+        for item in explicit_outputs:
+            if not isinstance(item, dict) or not item.get("name") or not item.get("type"):
+                continue
+            output = SegmentOutput.model_validate(item)
+            artifact = artifacts_by_name.get(output.name)
+            if artifact is not None and not output.artifact_ref:
+                output = output.model_copy(
+                    update={
+                        "artifact_ref": artifact.id,
+                        "type": _artifact_output_type(artifact),
+                    }
+                )
+            normalized_outputs.append(output)
+        return normalized_outputs
     if kind == "rpa" and segment.artifacts:
         return [
             SegmentOutput(
@@ -160,6 +190,14 @@ def _infer_outputs(segment: RecordingSegment, kind: WorkflowSegmentKind, explici
             )
         ]
     return []
+
+
+def _artifact_output_type(artifact: RecordingArtifact) -> str:
+    if artifact.type == "file":
+        return "file"
+    if artifact.type == "text":
+        return "string"
+    return "json"
 
 
 def _align_rpa_steps(steps: list[dict[str, Any]], outputs: list[SegmentOutput]) -> list[dict[str, Any]]:

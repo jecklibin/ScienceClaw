@@ -12,7 +12,7 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "processing_artifacts": {"ready_for_next_segment", "testing", "failed"},
     "ready_for_next_segment": {"recording", "waiting_user", "testing", "ready_to_publish", "failed"},
     "testing": {"needs_repair", "ready_to_publish", "failed"},
-    "needs_repair": {"testing", "failed"},
+    "needs_repair": {"testing", "ready_to_publish", "failed"},
     "ready_to_publish": {"recording", "waiting_user", "testing", "saved", "failed"},
     "failed": {"recording", "testing"},
 }

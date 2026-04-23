@@ -1,6 +1,6 @@
 ﻿import pytest
 
-from backend.rpa.mcp_executor import RpaMcpExecutor, InvalidCookieError
+from backend.rpa.mcp_executor import RpaMcpExecutor, InvalidCookieError, _WorkflowExecutionContext
 from backend.rpa.mcp_models import RpaMcpToolDefinition
 
 
@@ -236,3 +236,29 @@ async def test_execute_workflow_package_resolves_segment_output_bindings():
         "project_name": "FinceptTerminal",
         "search_keyword": "FinceptTerminal",
     }
+
+
+def test_workflow_context_resolves_artifact_refs_to_runtime_download_path():
+    context = _WorkflowExecutionContext(params={})
+    segment = {
+        "id": "segment-download",
+        "outputs": [
+            {
+                "name": "contracts.xlsx",
+                "type": "file",
+                "artifact_ref": "artifact-download",
+            }
+        ],
+    }
+
+    context.store_segment_outputs(
+        segment,
+        {
+            "download_contracts_xlsx": {
+                "filename": "contracts.xlsx",
+                "path": "D:/runtime/downloads/contracts.xlsx",
+            }
+        },
+    )
+
+    assert context.resolve("artifact:artifact-download") == "D:/runtime/downloads/contracts.xlsx"

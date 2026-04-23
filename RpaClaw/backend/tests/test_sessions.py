@@ -1231,6 +1231,55 @@ class TestRecordingRoutes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data.data["prompt_kind"], "skill")
         self.assertTrue(data.data["staging_paths"])
 
+    async def test_publish_recording_run_allows_publish_after_failed_test(self):
+        async def _save():
+            return None
+
+        session = SimpleNamespace(user_id="u1", events=[], save=_save)
+        current_user = SimpleNamespace(id="u1")
+        orchestrator = RecordingOrchestrator()
+        run = orchestrator.create_run(session_id="session-1", user_id="u1", kind="rpa")
+        segment = orchestrator.start_segment(run, kind="rpa", intent="下载 PDF", requires_workbench=True)
+        segment.exports["rpa_session_id"] = "rpa-1"
+        segment.exports["title"] = "下载 PDF"
+        segment.exports["description"] = "下载并检查 PDF 文件"
+        orchestrator.complete_segment(run, segment)
+        orchestrator.begin_testing(run)
+        orchestrator.mark_needs_repair(run, "workflow failed")
+
+        from backend.workflow.publishing import build_publish_draft
+        from backend.workflow.recording_adapter import recording_run_to_workflow
+
+        draft = build_publish_draft(recording_run_to_workflow(run), publish_target="skill")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with (
+                unittest.mock.patch.object(
+                    SESSIONS_MODULE,
+                    "async_get_science_session",
+                    AsyncMock(return_value=session),
+                ),
+                unittest.mock.patch.object(
+                    SESSIONS_MODULE,
+                    "recording_orchestrator",
+                    orchestrator,
+                ),
+                unittest.mock.patch.object(SESSIONS_MODULE, "_WORKSPACE_DIR", tmp_dir),
+            ):
+                data = await SESSIONS_MODULE.publish_recording_run(
+                    "session-1",
+                    run.id,
+                    SESSIONS_MODULE.PublishRecordingRunRequest(
+                        publish_target="skill",
+                        draft=draft.model_dump(mode="json"),
+                    ),
+                    current_user=current_user,
+                )
+
+        self.assertEqual(data.data["prompt_kind"], "skill")
+        self.assertEqual(data.data["run"]["status"], "ready_to_publish")
+        self.assertTrue(data.data["staging_paths"])
+
     async def test_publish_recording_run_with_tool_draft_returns_mcp_tool_prompt(self):
         async def _save():
             return None

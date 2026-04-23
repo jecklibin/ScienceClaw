@@ -101,13 +101,29 @@ type WorkflowSegment = {
 - `inputs`: 这段需要哪些值，来源是用户、workflow 参数、上一段输出还是 artifact
 - `outputs`: 这段会导出哪些值，供后续段或最终技能输出使用
 
-如果前端未显式传入，当前实现会尽量从：
+前端与 Agent 应在保存 segment 前显式给出 `inputs` / `outputs` / `artifacts` 契约。
+当前实现的原则是：
 
-- `params`
-- `extract_text.result_key`
-- `artifacts`
+- 后端只做结构校验与最小归一化，不根据文件类型、参数名、示例模板或特定业务场景改写 segment 契约。
+- 上下游依赖应通过结构化 `source_type` / `source_ref` 明确绑定，而不是依赖自然语言描述或后端猜测。
+- 规划下一段时，Agent 应先读取当前 run 的上下文，再决定这段需要哪些输入、输出与参数。
 
-中做合理推断，但推断只是兜底，不是最终目标。
+### NextSegmentContext
+
+`inspect_recording_runs` 会返回 `next_segment_context`，供 `recording-creator` 规划下一段 workflow 片段。该结构至少包含：
+
+- `run_goal`: 当前 run 的发布目标或运行目标
+- `latest_segment`: 最近一个已存在片段的摘要
+- `available_sources`: 当前可复用的 `segment_outputs`、`artifacts` 与推荐来源集合
+- `runtime_path_policy`: 运行期路径策略说明
+- `planning_hints`: Agent 在生成下一段前必须遵循的规划提示
+
+其中与文件处理相关的关键约束是：
+
+- 如果前一段产生了下载文件或其他文件产物，后续脚本段必须通过 `artifact:<id>` 绑定该产物，而不是复用录制时看到的临时本地路径。
+- 完整测试与最终执行阶段会在运行期 `_downloads_dir` 下解析这些 artifact 对应的真实文件路径。
+- runner 会把 `downloads_dir`、`workspace_dir`、`skill_dir` 等运行期路径显式注入 `context.runtime`，供脚本段在测试与正式执行时统一推导输入输出路径。
+- 因此，文件型输入的设计重点是“声明输入并绑定 artifact”，而不是让用户复制路径或让后端猜路径；输出路径则优先基于 `input_path` 或 `context.runtime["workspace_dir"]` 推导。
 
 ## RPA Segment
 
@@ -139,6 +155,21 @@ RPA 段保留：
 - `config.entry`
 - `config.source`
 
+脚本段的推荐执行协议固定为：
+
+```python
+def run(context, **kwargs) -> dict:
+    ...
+    return {...}
+```
+
+其中：
+
+- `kwargs` 只包含这段脚本真实需要的输入。
+- `context.runtime` 用来读取运行期路径与执行上下文。
+- runner 会在 `context.runtime` 中提供 `downloads_dir`、`workspace_dir`、`skill_dir`、`workflow_path`、`segments_dir`。
+- 不再把 `main(...)` 或全局 `params/inputs/outputs` 作为首选生成模式。
+
 ## MCP / LLM Segment
 
 这两类 segment 目前模型空间已经预留，但当前实现主要先打通：
@@ -164,9 +195,10 @@ RPA 段保留：
 
 - 用户在录完一段后说“接下来把下载下来的文件转换一下”
 - `recording-creator` 应判断这是 `script segment`
-- 生成脚本内容和输入输出定义
+- 先通过 `inspect_recording_runs` 读取 `next_segment_context`
+- 根据用户当前意图 + 已有 outputs/artifacts 规划脚本目标、输入、输出与参数
 - 调用 `add_script_recording_segment`
-- 如果依赖上一段输出，再调用 `bind_recording_segment_io`
+- 如果依赖上一段输出或 artifact，再调用 `bind_recording_segment_io`
 
 ### 3. 测试
 
@@ -207,3 +239,23 @@ RPA 段保留：
 1. 把 `mcp` / `llm` segment 也补齐真实执行器，而不只是元数据占位
 2. 在发布弹窗中支持更明确地编辑 workflow 级输入输出
 3. 让 segment 卡片和配置页共享同一套输入输出编辑模型
+
+## 录制测试修复闭环
+
+当前实现已经补齐“生成-测试-修复-重测”的录制期闭环，行为规则如下：
+
+1. `add_script_recording_segment` 只负责把脚本片段写入 recording run，并将 `testing_status` 初始化为 `idle`。
+2. `begin_recording_test` 不再只看脚本退出码或 `SKILL_SUCCESS`，还会校验 `workflow.json` 中声明的 segment outputs / artifacts 是否在实际执行结果中兑现。
+3. 只要声明输出缺失，即使进程退出成功，也必须判定为测试失败，并把 run 状态置为 `needs_repair`，不能直接进入 `ready_to_publish`。
+4. 每次完整测试都会生成 repair workspace，上下文通过 `repair_context` 返回，至少包含：
+   - `skill_dir`
+   - `workflow_path`
+   - `context_path`
+   - `missing_outputs`
+   - `missing_artifacts`
+5. `context_path` 对应的 JSON 文件会把本次测试的执行结果、契约缺失信息、当前 run/segments 摘要一并落盘，供 `recording-creator` 后续定位与修复。
+6. Agent 修复时必须优先编辑 repair workspace 内的 workflow/script 文件，而不是等保存成 skill 后再修。
+7. 修复完成后调用 `apply_recording_test_repairs`，把 repair workspace 里的脚本片段、输入输出契约和入口配置回写到 recording run。
+8. 回写后 segment 会重置为 `testing_status=idle`，然后再次执行 `begin_recording_test`。只有整条 workflow 再次通过，才允许进入发布阶段。
+
+这套机制的目的不是在后端写死某个 Excel、Markdown 或特定文件类型的修复逻辑，而是让录制阶段拥有与普通技能执行阶段一致的可调试、可修复、可重跑能力。

@@ -2,8 +2,10 @@ import json
 import tempfile
 from pathlib import Path
 
+from backend.recording.models import RecordingArtifact, RecordingSegment
 from backend.workflow.models import SegmentInput, SkillPublishDraft, WorkflowRun, WorkflowSegment
 from backend.workflow.publishing import build_publish_draft, write_skill_artifacts
+from backend.workflow.recording_adapter import recording_segment_to_workflow
 
 
 def _sample_run() -> WorkflowRun:
@@ -145,6 +147,11 @@ def test_write_skill_artifacts_generates_complete_skill_directory():
         assert "async def execute_skill(page, **kwargs):" in runner
         assert "await run_rpa_segment(" in runner
         assert "await _run_workflow(" in runner
+        assert "source_ref.startswith(\"artifact:\")" in runner
+        assert "def build_runtime_context(page, kwargs: dict[str, Any]) -> dict[str, Any]:" in runner
+        assert "\"downloads_dir\": str(downloads_dir)" in runner
+        assert "\"workspace_dir\": str(workspace_dir)" in runner
+        assert "\"skill_dir\": str(skill_dir)" in runner
         assert "def main()" in runner
         assert "run_script_segment" in runner
         assert "subprocess.run" not in runner
@@ -153,6 +160,162 @@ def test_write_skill_artifacts_generates_complete_skill_directory():
         assert "async def execute_segment(page, workflow_context=None, **kwargs):" in rpa_segment
         assert "workflow_context['current_page'] = current_page" in rpa_segment
         assert "async def main()" not in rpa_segment
+
+
+def test_write_skill_artifacts_sanitizes_runtime_download_artifact_paths():
+    run = WorkflowRun(
+        id="run_download_artifact",
+        session_id="session_1",
+        user_id="user_1",
+        intent="download and process",
+        segments=[
+            WorkflowSegment(
+                id="segment_download",
+                run_id="run_download_artifact",
+                kind="rpa",
+                order=1,
+                title="download file",
+                purpose="download a file",
+                status="tested",
+                outputs=[
+                    {
+                        "name": "contracts.xlsx",
+                        "type": "file",
+                        "description": "downloaded file",
+                        "artifact_ref": "artifact-download-1",
+                    }
+                ],
+                artifacts=[
+                    {
+                        "id": "artifact-download-1",
+                        "name": "contracts.xlsx",
+                        "type": "file",
+                        "path": "C:\\Users\\HUAWEI\\AppData\\Local\\Temp\\playwright-artifacts-KfLnXX\\raw-download",
+                        "value": {
+                            "filename": "contracts.xlsx",
+                            "recorded_path": "C:\\Users\\HUAWEI\\AppData\\Local\\Temp\\playwright-artifacts-KfLnXX\\raw-download",
+                            "runtime": "downloads_dir",
+                        },
+                        "labels": ["recording", "download", "runtime-download"],
+                    }
+                ],
+                config={"steps": []},
+            )
+        ],
+    )
+    draft = build_publish_draft(run)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        result = write_skill_artifacts(run, draft, Path(tmp_dir))
+        workflow = json.loads((Path(result["skill_dir"]) / "workflow.json").read_text(encoding="utf-8"))
+
+    artifact = workflow["segments"][0]["artifacts"][0]
+    assert artifact["path"] is None
+    assert artifact["value"] == {
+        "filename": "contracts.xlsx",
+        "runtime": "downloads_dir",
+    }
+    workflow_text = json.dumps(workflow, ensure_ascii=False)
+    assert "playwright-artifacts" not in workflow_text
+    assert "recorded_path" not in workflow_text
+
+
+def test_recording_segment_to_workflow_normalizes_invalid_script_entry():
+    segment = RecordingSegment(
+        id="segment_bad_entry",
+        run_id="run_1",
+        kind="script",
+        intent="处理下载文件",
+        exports={
+            "title": "Excel转Markdown脚本",
+            "description": "处理下载的Excel文件，将其内容读取并转换为Markdown后返回",
+            "entry": "处理下载的Excel文件，将其内容读取并转换为Markdown后返回",
+            "script": "def run(context):\n    return {'markdown': '# ok'}\n",
+            "testing_status": "passed",
+        },
+    )
+
+    workflow_segment = recording_segment_to_workflow(segment, order=2)
+
+    assert workflow_segment.kind == "script"
+    assert workflow_segment.config["entry"] == "segments/segment_bad_entry_script.py"
+
+
+def test_recording_segment_to_workflow_aligns_explicit_output_with_artifact_ref():
+    segment = RecordingSegment(
+        id="segment_download",
+        run_id="run_1",
+        kind="rpa",
+        intent="下载文件",
+        artifacts=[
+            {
+                "id": "artifact-download-1",
+                "run_id": "run_1",
+                "segment_id": "segment_download",
+                "name": "contracts.xlsx",
+                "type": "file",
+            }
+        ],
+        exports={
+            "title": "下载文件",
+            "description": "下载 Excel 文件",
+            "outputs": [
+                {
+                    "name": "contracts.xlsx",
+                    "type": "string",
+                    "description": "下载得到的文件",
+                }
+            ],
+            "testing_status": "passed",
+        },
+    )
+
+    workflow_segment = recording_segment_to_workflow(segment, order=1)
+
+    assert workflow_segment.outputs[0].artifact_ref == "artifact-download-1"
+    assert workflow_segment.outputs[0].type == "file"
+
+
+def test_recording_adapter_sanitizes_runtime_download_artifact_paths():
+    segment = RecordingSegment(
+        id="segment_download",
+        run_id="run_1",
+        kind="rpa",
+        intent="下载文件",
+        artifacts=[
+            RecordingArtifact(
+                id="artifact-download-1",
+                run_id="run_1",
+                segment_id="segment_download",
+                name="contracts.xlsx",
+                type="file",
+                path="C:\\Users\\HUAWEI\\AppData\\Local\\Temp\\playwright-artifacts-KfLnXX\\raw-download",
+                value={
+                    "filename": "contracts.xlsx",
+                    "recorded_path": "C:\\Users\\HUAWEI\\AppData\\Local\\Temp\\playwright-artifacts-KfLnXX\\raw-download",
+                    "runtime": "downloads_dir",
+                },
+                labels=["recording", "download", "runtime-download"],
+            )
+        ],
+        exports={
+            "title": "下载文件",
+            "description": "下载 Excel 文件",
+            "testing_status": "passed",
+        },
+    )
+
+    workflow_segment = recording_segment_to_workflow(segment, order=1)
+    artifact = workflow_segment.artifacts[0]
+
+    assert artifact.path is None
+    assert artifact.value == {
+        "filename": "contracts.xlsx",
+        "runtime": "downloads_dir",
+    }
+    serialized = json.dumps(workflow_segment.model_dump(mode="json"), ensure_ascii=False)
+    assert "playwright-artifacts" not in serialized
+    assert "recorded_path" not in serialized
 
 
 def test_write_skill_artifacts_generates_params_json_for_defaults_and_credentials():
@@ -282,3 +445,290 @@ def test_script_workflow_runner_loads_defaults_from_params_json_without_schema()
 
         assert default_result["outputs"]["segment_transform"]["used_date"] == "2026-04-21"
         assert override_result["outputs"]["segment_transform"]["used_date"] == "2026-04-22"
+
+
+def test_script_workflow_runner_supports_main_function_with_resolved_inputs():
+    run = WorkflowRun(
+        id="run_script_main",
+        session_id="session_1",
+        user_id="user_1",
+        intent="处理下载文件",
+        segments=[
+            WorkflowSegment(
+                id="segment_transform",
+                run_id="run_script_main",
+                kind="script",
+                order=1,
+                title="处理下载文件",
+                purpose="读取输入文件并返回使用到的路径",
+                status="tested",
+                inputs=[
+                    {
+                        "name": "excel_path",
+                        "type": "string",
+                        "required": True,
+                        "source": "user",
+                        "description": "待处理文件路径",
+                    }
+                ],
+                outputs=[
+                    {
+                        "name": "used_path",
+                        "type": "string",
+                        "description": "实际使用的文件路径",
+                    }
+                ],
+                config={
+                    "language": "python",
+                    "entry": "segments/segment_transform.py",
+                    "source": "def main(excel_path):\n    return {'used_path': excel_path}\n",
+                },
+            )
+        ],
+    )
+    draft = build_publish_draft(run)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        result = write_skill_artifacts(run, draft, Path(tmp_dir))
+        skill_dir = Path(result["skill_dir"])
+        namespace: dict[str, object] = {"__file__": str(skill_dir / "skill.py")}
+        exec((skill_dir / "skill.py").read_text(encoding="utf-8"), namespace)
+
+        run_skill = namespace["run"]
+        output = run_skill(excel_path="downloads/contracts.xlsx")
+
+        assert output["outputs"]["segment_transform"]["used_path"] == "downloads/contracts.xlsx"
+
+
+def test_script_workflow_runner_supports_legacy_params_inputs_outputs_style():
+    run = WorkflowRun(
+        id="run_script_legacy",
+        session_id="session_1",
+        user_id="user_1",
+        intent="处理下载文件",
+        segments=[
+            WorkflowSegment(
+                id="segment_transform",
+                run_id="run_script_legacy",
+                kind="script",
+                order=1,
+                title="处理下载文件",
+                purpose="兼容旧式脚本源码",
+                status="tested",
+                inputs=[
+                    {
+                        "name": "input_path",
+                        "type": "string",
+                        "required": True,
+                        "source": "user",
+                        "description": "待处理文件路径",
+                    }
+                ],
+                outputs=[
+                    {
+                        "name": "used_path",
+                        "type": "string",
+                        "description": "实际使用的文件路径",
+                    }
+                ],
+                config={
+                    "language": "python",
+                    "entry": "segments/segment_transform.py",
+                    "source": "selected = params['input_path']\noutputs['used_path'] = inputs['input_path']\n",
+                },
+            )
+        ],
+    )
+    draft = build_publish_draft(run)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        result = write_skill_artifacts(run, draft, Path(tmp_dir))
+        skill_dir = Path(result["skill_dir"])
+        namespace: dict[str, object] = {"__file__": str(skill_dir / "skill.py")}
+        exec((skill_dir / "skill.py").read_text(encoding="utf-8"), namespace)
+
+        run_skill = namespace["run"]
+        output = run_skill(input_path="downloads/contracts.xlsx")
+
+        assert output["outputs"]["segment_transform"]["used_path"] == "downloads/contracts.xlsx"
+
+
+def test_script_workflow_runner_resolves_artifact_backed_segment_output_to_file_path():
+    run = WorkflowRun(
+        id="run_script_artifact",
+        session_id="session_1",
+        user_id="user_1",
+        intent="处理下载文件",
+        segments=[
+            WorkflowSegment(
+                id="segment_download",
+                run_id="run_script_artifact",
+                kind="script",
+                order=1,
+                title="生成文件产物",
+                purpose="输出一个文件产物",
+                status="tested",
+                outputs=[
+                    {
+                        "name": "downloaded_file",
+                        "type": "file",
+                        "description": "生成的文件",
+                        "artifact_ref": "artifact-download-1",
+                    }
+                ],
+                config={
+                    "language": "python",
+                    "entry": "segments/segment_download.py",
+                    "source": "def run(context):\n    return {'download_result': {'path': 'downloads/contracts.xlsx', 'filename': 'contracts.xlsx'}}\n",
+                },
+            ),
+            WorkflowSegment(
+                id="segment_transform",
+                run_id="run_script_artifact",
+                kind="script",
+                order=2,
+                title="处理下载文件",
+                purpose="消费上游文件路径",
+                status="tested",
+                inputs=[
+                    {
+                        "name": "input_path",
+                        "type": "string",
+                        "required": True,
+                        "source": "segment_output",
+                        "source_ref": "segment_download.outputs.downloaded_file",
+                        "description": "上游文件路径",
+                    }
+                ],
+                outputs=[
+                    {
+                        "name": "used_path",
+                        "type": "string",
+                        "description": "实际使用的文件路径",
+                    }
+                ],
+                config={
+                    "language": "python",
+                    "entry": "segments/segment_transform.py",
+                    "source": "def main(input_path):\n    return {'used_path': input_path}\n",
+                },
+            ),
+        ],
+    )
+    draft = build_publish_draft(run)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        result = write_skill_artifacts(run, draft, Path(tmp_dir))
+        skill_dir = Path(result["skill_dir"])
+        namespace: dict[str, object] = {"__file__": str(skill_dir / "skill.py")}
+        exec((skill_dir / "skill.py").read_text(encoding="utf-8"), namespace)
+
+        run_skill = namespace["run"]
+        output = run_skill()
+
+        assert output["outputs"]["segment_transform"]["used_path"] == "downloads/contracts.xlsx"
+
+
+def test_script_workflow_runner_exposes_runtime_workspace_and_download_paths():
+    run = WorkflowRun(
+        id="run_script_runtime",
+        session_id="session_1",
+        user_id="user_1",
+        intent="处理下载文件",
+        segments=[
+            WorkflowSegment(
+                id="segment_transform",
+                run_id="run_script_runtime",
+                kind="script",
+                order=1,
+                title="处理下载文件",
+                purpose="读取运行时路径上下文",
+                status="tested",
+                outputs=[
+                    {
+                        "name": "runtime_info",
+                        "type": "json",
+                        "description": "运行时路径信息",
+                    }
+                ],
+                config={
+                    "language": "python",
+                    "entry": "segments/segment_transform.py",
+                    "source": (
+                        "def run(context, **kwargs):\n"
+                        "    return {\n"
+                        "        'runtime_info': {\n"
+                        "            'downloads_dir': context.runtime['downloads_dir'],\n"
+                        "            'workspace_dir': context.runtime['workspace_dir'],\n"
+                        "            'skill_dir': context.runtime['skill_dir'],\n"
+                        "        }\n"
+                        "    }\n"
+                    ),
+                },
+            )
+        ],
+    )
+    draft = build_publish_draft(run)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        result = write_skill_artifacts(run, draft, Path(tmp_dir))
+        skill_dir = Path(result["skill_dir"])
+        namespace: dict[str, object] = {"__file__": str(skill_dir / "skill.py")}
+        exec((skill_dir / "skill.py").read_text(encoding="utf-8"), namespace)
+
+        run_skill = namespace["run"]
+        output = run_skill(
+            _downloads_dir="D:/tmp/downloads",
+            _workspace_dir="D:/tmp/workspace",
+            _skill_dir="D:/tmp/skill",
+        )
+
+        runtime_info = output["outputs"]["segment_transform"]["runtime_info"]
+        assert runtime_info["downloads_dir"] == "D:\\tmp\\downloads"
+        assert runtime_info["workspace_dir"] == "D:\\tmp\\workspace"
+        assert runtime_info["skill_dir"] == "D:\\tmp\\skill"
+
+
+def test_recording_adapter_binds_configured_params_to_runtime_params():
+    segment = RecordingSegment(
+        id="segment_login",
+        run_id="run_params",
+        kind="rpa",
+        intent="login and download",
+        status="completed",
+        steps=[
+            {"id": "step_1", "action": "fill", "value": "demo-user"},
+            {"id": "step_2", "action": "fill", "value": "{{credential}}", "sensitive": True},
+        ],
+        exports={
+            "params": {
+                "username": {
+                    "type": "string",
+                    "description": "Login username",
+                    "original_value": "demo-user",
+                    "sensitive": False,
+                    "required": False,
+                },
+                "password": {
+                    "type": "string",
+                    "description": "Login password",
+                    "original_value": "{{credential}}",
+                    "sensitive": True,
+                    "credential_id": "cred-login",
+                    "required": True,
+                },
+            },
+            "auth_config": {"credential_ids": ["cred-login"]},
+        },
+    )
+
+    workflow_segment = recording_segment_to_workflow(segment, order=1)
+    inputs = {item.name: item for item in workflow_segment.inputs}
+
+    assert inputs["username"].source == "workflow_param"
+    assert inputs["username"].source_ref == "params.username"
+    assert inputs["username"].default == "demo-user"
+    assert inputs["password"].source == "credential"
+    assert inputs["password"].source_ref == "params.password"
+    assert inputs["password"].default is None
+    assert workflow_segment.config["params"]["password"]["credential_id"] == "cred-login"

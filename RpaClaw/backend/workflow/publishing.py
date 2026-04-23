@@ -13,7 +13,9 @@ from backend.rpa.generator import (
 )
 from backend.rpa.playwright_security import get_chromium_launch_kwargs, get_context_kwargs
 
+from .artifacts import sanitize_workflow_artifact_payload
 from .models import (
+    ArtifactRef,
     CredentialRequirement,
     PublishInput,
     PublishOutput,
@@ -24,6 +26,7 @@ from .models import (
     WorkflowSegment,
 )
 from .runner_template import render_workflow_runner
+from .segment_paths import normalize_script_segment_entry
 
 
 def safe_skill_name(value: str, fallback: str) -> str:
@@ -92,9 +95,9 @@ def build_workflow_artifact_payload(run: WorkflowRun, draft: SkillPublishDraft) 
         if segment.kind == "rpa":
             files[f"segments/{segment.id}_rpa.py"] = _build_rpa_segment_source(segment)
         elif segment.kind == "script":
-            entry = segment.config.get("entry") or f"segments/{segment.id}_script.py"
-            files[f"segments/{Path(str(entry)).name}"] = str(
-                segment.config.get("source") or "def run(context):\n    return {}\n"
+            entry = normalize_script_segment_entry(segment.id, str(segment.config.get("entry") or ""))
+            files[entry] = _render_script_segment_source(
+                str(segment.config.get("source") or "def run(context):\n    return {}\n")
             )
         else:
             files[f"segments/{segment.id}_{segment.kind}.json"] = json.dumps(
@@ -296,6 +299,44 @@ def _build_workflow_json(run: WorkflowRun, draft: SkillPublishDraft) -> dict[str
     }
 
 
+def _render_script_segment_source(source: str) -> str:
+    if re.search(r"(^|\n)\s*(async\s+def|def)\s+(run|main)\s*\(", source):
+        return source
+
+    legacy_source = json.dumps(source, ensure_ascii=False)
+    return "\n".join(
+        [
+            "from __future__ import annotations",
+            "",
+            f"_LEGACY_SOURCE = {legacy_source}",
+            "",
+            "def run(context, **kwargs):",
+            "    params = dict(context.params)",
+            "    inputs = dict(kwargs)",
+            "    outputs = {}",
+            "    artifacts = dict(context.artifacts)",
+            "    runtime = context.runtime",
+            "    namespace = {",
+            "        '__name__': '__segment__',",
+            "        'context': context,",
+            "        'params': params,",
+            "        'inputs': inputs,",
+            "        'outputs': outputs,",
+            "        'artifacts': artifacts,",
+            "        'runtime': runtime,",
+            "    }",
+            "    exec(_LEGACY_SOURCE, namespace)",
+            "    if outputs:",
+            "        return outputs",
+            "    result = namespace.get('result')",
+            "    if isinstance(result, dict):",
+            "        return result",
+            "    return {}",
+            "",
+        ]
+    )
+
+
 def _segment_to_workflow_json(segment: WorkflowSegment) -> dict[str, Any]:
     base: dict[str, Any] = {
         "id": segment.id,
@@ -304,14 +345,19 @@ def _segment_to_workflow_json(segment: WorkflowSegment) -> dict[str, Any]:
         "purpose": segment.purpose,
         "inputs": [item.model_dump(mode="json") for item in segment.inputs],
         "outputs": [item.model_dump(mode="json") for item in segment.outputs],
+        "artifacts": [_artifact_to_workflow_json(item) for item in segment.artifacts],
     }
     if segment.kind == "rpa":
         base["entry"] = f"segments/{segment.id}_rpa.py"
     elif segment.kind == "script":
-        base["entry"] = segment.config.get("entry") or f"segments/{segment.id}_script.py"
+        base["entry"] = normalize_script_segment_entry(segment.id, str(segment.config.get("entry") or ""))
     else:
         base["config_path"] = f"segments/{segment.id}_{segment.kind}.json"
     return base
+
+
+def _artifact_to_workflow_json(artifact: ArtifactRef) -> dict[str, Any]:
+    return sanitize_workflow_artifact_payload(artifact.model_dump(mode="json"))
 
 
 def _build_params_config(run: WorkflowRun, draft: SkillPublishDraft) -> dict[str, Any]:
