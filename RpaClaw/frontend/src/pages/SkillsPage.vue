@@ -119,16 +119,27 @@
     <!-- Delete Dialog -->
     <Teleport to="body">
       <Transition name="modal">
-        <div v-if="deleteTarget" class="fixed inset-0 z-[9999] flex items-center justify-center">
+        <div v-if="deleteTarget" class="fixed inset-0 z-[9999] flex items-center justify-center px-4 py-6">
           <div class="absolute inset-0 bg-black/50 backdrop-blur-sm" @click="cancelDelete"></div>
-          <div class="relative bg-white dark:bg-[#2a2a2a] rounded-2xl shadow-2xl p-6 w-[380px] z-10">
+          <div
+            class="relative z-10 w-full max-w-[420px] rounded-2xl border border-gray-100 bg-white p-6 shadow-2xl dark:border-white/10 dark:bg-[#2a2a2a]"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="delete-skill-title"
+            aria-describedby="delete-skill-description"
+          >
             <div class="flex items-center gap-3 mb-4">
               <div class="size-10 rounded-xl bg-red-50 dark:bg-red-900/20 flex items-center justify-center">
                 <Trash2 :size="20" class="text-red-500" />
               </div>
-              <div><h3 class="text-sm font-semibold">{{ t('Delete Skill') }}</h3><p class="text-xs text-[var(--text-tertiary)]">{{ t('This action cannot be undone') }}</p></div>
+              <div>
+                <h3 id="delete-skill-title" class="text-sm font-semibold text-[var(--text-primary)]">{{ t('Delete Skill') }}</h3>
+                <p class="mt-1 text-xs text-[var(--text-tertiary)]">{{ t('This action cannot be undone') }}</p>
+              </div>
             </div>
-            <p class="text-sm text-[var(--text-secondary)] mb-5">{{ t('Are you sure you want to delete "{name}"?', { name: deleteTarget.name }) }}</p>
+            <p id="delete-skill-description" class="text-sm leading-6 text-[var(--text-secondary)] mb-5">
+              {{ t('Delete skill confirm content', { name: deleteTarget.name }) }}
+            </p>
             <div class="flex justify-end gap-2">
               <button @click="cancelDelete" class="px-4 py-2 text-sm rounded-lg border border-[var(--border-light)] hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors">{{ t('Cancel') }}</button>
               <button @click="executeDelete" :disabled="deleting" class="px-4 py-2 text-sm rounded-lg bg-red-500 text-white hover:bg-red-600 disabled:opacity-50 transition-all">

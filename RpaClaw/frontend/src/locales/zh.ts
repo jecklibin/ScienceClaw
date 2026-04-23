@@ -298,6 +298,8 @@ export default {
   'Unblock skill': '取消屏蔽',
   'Delete skill': '删除技能',
   'Delete Skill': '删除技能',
+  'This action cannot be undone': '此操作无法撤销',
+  'Delete skill confirm content': '确定要删除技能「{name}」吗？此操作无法撤销。',
   'Are you sure you want to delete the skill "{name}"?': '确定要删除技能「{name}」吗？',
   'Stop task': '停止任务',
   'Save skill "{name}" to library?': '将技能「{name}」保存到技能库？',

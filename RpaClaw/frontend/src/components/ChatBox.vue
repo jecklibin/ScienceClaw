@@ -243,7 +243,7 @@
                             </div>
                         </div>
                         <p class="text-sm text-[var(--text-secondary)] mb-6">
-                            {{ t('Are you sure you want to delete the skill "{name}"?', { name: deleteTarget.name }) }}
+                            {{ t('Delete skill confirm content', { name: deleteTarget.name }) }}
                         </p>
                         <div class="flex justify-end gap-2">
                             <button 
@@ -258,7 +258,7 @@
                                 class="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors disabled:opacity-50 flex items-center gap-1.5"
                             >
                                 <div v-if="deleting" class="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin"></div>
-                                {{ t('Confirm') }}
+                                {{ t('Delete') }}
                             </button>
                         </div>
                     </div>

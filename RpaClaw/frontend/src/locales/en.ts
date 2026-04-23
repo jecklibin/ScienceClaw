@@ -248,6 +248,8 @@ export default {
   'Unblock skill': 'Unblock skill',
   'Delete skill': 'Delete skill',
   'Delete Skill': 'Delete Skill',
+  'This action cannot be undone': 'This action cannot be undone',
+  'Delete skill confirm content': 'Are you sure you want to delete the skill "{name}"? This action cannot be undone.',
   'Are you sure you want to delete the skill "{name}"?': 'Are you sure you want to delete the skill "{name}"?',
   'Stop task': 'Stop task',
   'Save skill "{name}" to library?': 'Save skill "{name}" to your library?',
