@@ -89,3 +89,26 @@ def test_build_outcome_accepts_json_encoded_target():
         "role": "textbox",
         "name": "Search",
     }
+
+
+def test_build_outcome_accepts_hover_action_with_canonical_target():
+    outcome = build_manual_recording_outcome(
+        action="hover",
+        description='悬停到 button("Export")',
+        target="",
+        locator_candidates=[
+            {
+                "locator": {"method": "role", "role": "button", "name": "Export"},
+                "selected": True,
+            }
+        ],
+        validation={"status": "ok"},
+    )
+    assert outcome.accepted_action is not None
+    assert outcome.diagnostic is None
+    assert outcome.accepted_action.action_kind.value == "hover"
+    assert outcome.accepted_action.target == {
+        "method": "role",
+        "role": "button",
+        "name": "Export",
+    }

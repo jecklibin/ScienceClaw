@@ -16,6 +16,7 @@ from .trace_locator_utils import normalize_locator
 _ROLE_FIRST_RE = re.compile(r'^page\.get_by_role\("(?P<role>[^"]+)"\)\.first$')
 
 _INTERACTIVE_ACTIONS = {
+    ManualActionKind.HOVER.value,
     ManualActionKind.CLICK.value,
     ManualActionKind.FILL.value,
     ManualActionKind.PRESS.value,

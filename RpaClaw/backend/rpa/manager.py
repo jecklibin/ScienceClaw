@@ -22,6 +22,7 @@ from .trace_recorder import infer_dataflow_for_fill, manual_step_to_trace
 logger = logging.getLogger(__name__)
 
 RPA_PAGE_TIMEOUT_MS = 60000
+HOVER_PROMOTION_WINDOW_MS = 2500
 
 
 class RPAStep(BaseModel):
@@ -105,6 +106,7 @@ class RPASessionManager:
         self._tab_meta: Dict[str, Dict[str, RPATab]] = {}
         self._page_tab_ids: Dict[str, Dict[int, str]] = {}
         self._bridged_context_ids: Dict[str, set[int]] = {}
+        self._pending_hover_candidates: Dict[str, Dict[str, Any]] = {}
 
     def attach_context(self, session_id: str, context: BrowserContext):
         self._contexts[session_id] = context
@@ -117,6 +119,7 @@ class RPASessionManager:
         session = self.sessions.get(session_id)
         if session:
             session.active_tab_id = None
+        self._pending_hover_candidates.pop(session_id, None)
 
     def detach_context(self, session_id: str, context: Optional[BrowserContext] = None):
         current_context = self._contexts.get(session_id)
@@ -133,6 +136,7 @@ class RPASessionManager:
         session = self.sessions.get(session_id)
         if session:
             session.active_tab_id = None
+        self._pending_hover_candidates.pop(session_id, None)
 
     async def create_session(self, user_id: str, sandbox_session_id: str) -> RPASession:
         session_id = str(uuid.uuid4())
@@ -988,6 +992,102 @@ class RPASessionManager:
             return active_page
         return self._pages.get(session_id)
 
+    def _clear_pending_hover_candidate(self, session_id: str) -> None:
+        self._pending_hover_candidates.pop(session_id, None)
+
+    @staticmethod
+    def _event_locator_signature(evt: Dict[str, Any]) -> str:
+        locator = evt.get("locator")
+        if not isinstance(locator, dict) or not locator:
+            return ""
+        try:
+            return json.dumps(locator, sort_keys=True, ensure_ascii=False)
+        except TypeError:
+            return ""
+
+    @classmethod
+    def _is_menu_trigger_hover_candidate(cls, evt: Dict[str, Any]) -> bool:
+        if evt.get("action") != "hover":
+            return False
+        signals = evt.get("signals")
+        hover_signal = signals.get("hover") if isinstance(signals, dict) else None
+        if isinstance(hover_signal, dict) and hover_signal.get("is_menu_trigger_candidate") is True:
+            return True
+        locator = evt.get("locator")
+        if isinstance(locator, dict) and locator.get("method") == "role":
+            return str(locator.get("role") or "").lower() in {"button", "link"}
+        return False
+
+    @classmethod
+    def _is_menu_item_click(cls, evt: Dict[str, Any]) -> bool:
+        if evt.get("action") != "click":
+            return False
+        signals = evt.get("signals")
+        menu_context = signals.get("menu_context") if isinstance(signals, dict) else None
+        if isinstance(menu_context, dict) and menu_context.get("is_menu_item") is True:
+            return True
+        locator = evt.get("locator")
+        if isinstance(locator, dict) and locator.get("method") == "role":
+            role = str(locator.get("role") or "").lower()
+            if role in {"menuitem", "menuitemcheckbox", "menuitemradio", "option"}:
+                return True
+        return False
+
+    def _consume_promotable_hover_candidate(self, session_id: str, click_evt: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        candidate = self._pending_hover_candidates.get(session_id)
+        if not candidate:
+            return None
+        if not self._is_menu_item_click(click_evt):
+            self._clear_pending_hover_candidate(session_id)
+            return None
+
+        candidate_ts = int(candidate.get("timestamp") or 0)
+        click_ts = int(click_evt.get("timestamp") or 0)
+        if candidate_ts <= 0 or click_ts <= 0 or click_ts < candidate_ts:
+            self._clear_pending_hover_candidate(session_id)
+            return None
+        if click_ts - candidate_ts > HOVER_PROMOTION_WINDOW_MS:
+            self._clear_pending_hover_candidate(session_id)
+            return None
+
+        if (candidate.get("tab_id") or "") != (click_evt.get("tab_id") or ""):
+            self._clear_pending_hover_candidate(session_id)
+            return None
+        if list(candidate.get("frame_path") or []) != list(click_evt.get("frame_path") or []):
+            self._clear_pending_hover_candidate(session_id)
+            return None
+        if self._event_locator_signature(candidate) == self._event_locator_signature(click_evt):
+            self._clear_pending_hover_candidate(session_id)
+            return None
+
+        self._clear_pending_hover_candidate(session_id)
+        return candidate
+
+    @staticmethod
+    def _step_data_from_event(evt: Dict[str, Any]) -> Dict[str, Any]:
+        locator_info = evt.get("locator", {})
+        is_sensitive = evt.get("sensitive", False)
+        return {
+            "action": evt.get("action", "unknown"),
+            "target": json.dumps(locator_info) if locator_info else "",
+            "frame_path": evt.get("frame_path", []) or [],
+            "locator_candidates": evt.get("locator_candidates", []) or [],
+            "validation": evt.get("validation", {}) or {},
+            "signals": evt.get("signals", {}) or {},
+            "element_snapshot": evt.get("element_snapshot", {}) or {},
+            "value": "{{credential}}" if is_sensitive else evt.get("value", ""),
+            "label": "",
+            "tag": evt.get("tag", ""),
+            "url": evt.get("url", ""),
+            "description": RPASessionManager._make_description(evt),
+            "sensitive": is_sensitive,
+            "tab_id": evt.get("tab_id"),
+            "source_tab_id": evt.get("source_tab_id"),
+            "target_tab_id": evt.get("target_tab_id"),
+            "sequence": evt.get("sequence"),
+            "event_timestamp_ms": evt.get("timestamp"),
+        }
+
     def owns_sandbox_session(self, user_id: str, sandbox_session_id: str) -> bool:
         return any(
             session.user_id == user_id and session.sandbox_session_id == sandbox_session_id
@@ -1007,6 +1107,7 @@ class RPASessionManager:
                 await self.activate_tab(session_id, event_tab_id, source="event")
 
         if evt.get("action") == "navigate":
+            self._clear_pending_hover_candidate(session_id)
             nav_ts = evt.get("timestamp", 0)
             nav_sequence = evt.get("sequence")
             nav_tab_id = evt.get("tab_id")
@@ -1081,28 +1182,23 @@ class RPASessionManager:
 
         self._normalize_event_locator_payload(evt)
 
-        locator_info = evt.get("locator", {})
-        is_sensitive = evt.get("sensitive", False)
-        step_data = {
-            "action": evt.get("action", "unknown"),
-            "target": json.dumps(locator_info) if locator_info else "",
-            "frame_path": evt.get("frame_path", []) or [],
-            "locator_candidates": evt.get("locator_candidates", []) or [],
-            "validation": evt.get("validation", {}) or {},
-            "signals": evt.get("signals", {}) or {},
-            "element_snapshot": evt.get("element_snapshot", {}) or {},
-            "value": "{{credential}}" if is_sensitive else evt.get("value", ""),
-            "label": "",
-            "tag": evt.get("tag", ""),
-            "url": evt.get("url", ""),
-            "description": self._make_description(evt),
-            "sensitive": is_sensitive,
-            "tab_id": evt.get("tab_id"),
-            "source_tab_id": evt.get("source_tab_id"),
-            "target_tab_id": evt.get("target_tab_id"),
-            "sequence": evt.get("sequence"),
-            "event_timestamp_ms": evt.get("timestamp"),
-        }
+        if evt.get("action") == "hover":
+            if self._is_menu_trigger_hover_candidate(evt):
+                self._pending_hover_candidates[session_id] = dict(evt)
+            else:
+                self._clear_pending_hover_candidate(session_id)
+            return
+
+        if evt.get("action") == "click":
+            hover_evt = self._consume_promotable_hover_candidate(session_id, evt)
+            if hover_evt:
+                hover_step = self._step_data_from_event(hover_evt)
+                await self.add_step(session_id, hover_step)
+                logger.debug(f"[RPA] Step: {hover_step['description'][:60]}")
+        else:
+            self._clear_pending_hover_candidate(session_id)
+
+        step_data = self._step_data_from_event(evt)
         await self.add_step(session_id, step_data)
         logger.debug(f"[RPA] Step: {step_data['description'][:60]}")
 
@@ -1139,6 +1235,8 @@ class RPASessionManager:
         if action == "fill":
             display_value = '*****' if evt.get("sensitive") else f'"{value}"'
             return f'输入 {display_value} 到 {target}'
+        if action == "hover":
+            return f"悬停到 {target}"
         if action == "click":
             return f"点击 {target}"
         if action == "check":

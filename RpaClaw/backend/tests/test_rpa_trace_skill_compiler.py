@@ -256,6 +256,23 @@ def test_duplicate_sensitive_fill_values_consume_params_in_order():
     assert "get_by_role('textbox', name='ERP Password').fill(kwargs['password_2'])" in body
 
 
+def test_manual_hover_compiles_to_locator_hover():
+    trace = RPAAcceptedTrace(
+        trace_id="hover-export",
+        trace_type=RPATraceType.MANUAL_ACTION,
+        action="hover",
+        description='悬停到 button("Export")',
+        locator_candidates=[
+            {"locator": {"method": "role", "role": "button", "name": "Export"}, "selected": True},
+        ],
+    )
+
+    script = TraceSkillCompiler().generate_script([trace], is_local=True)
+    body = _execute_body(script)
+
+    assert "get_by_role('button', name='Export').hover()" in body
+
+
 def test_manual_navigate_click_preserves_click_navigation_semantics():
     trace = RPAAcceptedTrace(
         trace_id="login-submit",

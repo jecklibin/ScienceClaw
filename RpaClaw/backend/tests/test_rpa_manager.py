@@ -953,6 +953,11 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("if (asCheckbox(target)) {", change_block)
         self.assertIn("emitLogicalAction(toggleState(target) ? 'check' : 'uncheck', target, {});", change_block)
 
+    def test_action_runtime_emits_hover_candidates(self):
+        js = MANAGER_MODULE.PLAYWRIGHT_RECORDER_ACTIONS_PATH.read_text(encoding="utf-8")
+        self.assertIn("addListener('mouseover'", js)
+        self.assertIn("emitLogicalAction('hover'", js)
+
     def test_action_runtime_preserves_label_clicks_for_associated_checkbox_targets(self):
         js = MANAGER_MODULE.PLAYWRIGHT_RECORDER_ACTIONS_PATH.read_text(encoding="utf-8")
         click_block = js.split("addListener('click'", 1)[1].split("addListener('input'", 1)[0]
@@ -1239,6 +1244,107 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(checked, '勾选 checkbox("Subscribe")')
         self.assertEqual(unchecked, '取消勾选 checkbox("Subscribe")')
+
+    def test_make_description_formats_hover_action(self):
+        description = self.manager._make_description(
+            {
+                "action": "hover",
+                "locator": {"method": "role", "role": "button", "name": "Export"},
+            }
+        )
+
+        self.assertEqual(description, '悬停到 button("Export")')
+
+    async def test_hover_followed_by_menu_item_click_records_hover_before_click(self):
+        page = _FakePage("https://example.com", "Example")
+        tab_id = await self.manager.register_page(self.session.id, page, make_active=True)
+
+        await self.manager._handle_event(
+            self.session.id,
+            {
+                "action": "hover",
+                "tab_id": tab_id,
+                "tag": "BUTTON",
+                "timestamp": 1000,
+                "sequence": 10,
+                "locator": {"method": "role", "role": "button", "name": "Export"},
+                "signals": {"hover": {"is_menu_trigger_candidate": True}},
+            },
+        )
+
+        self.assertEqual(len(self.session.steps), 0)
+
+        await self.manager._handle_event(
+            self.session.id,
+            {
+                "action": "click",
+                "tab_id": tab_id,
+                "tag": "LI",
+                "timestamp": 1200,
+                "sequence": 11,
+                "locator": {"method": "text", "value": "Export Query"},
+                "signals": {"menu_context": {"is_menu_item": True}},
+            },
+        )
+
+        self.assertEqual([step.action for step in self.session.steps], ["hover", "click"])
+        self.assertEqual(self.session.steps[0].description, '悬停到 button("Export")')
+        self.assertEqual(self.session.steps[1].description, '点击 text("Export Query")')
+        self.assertEqual([action.action_kind.value for action in self.session.recorded_actions], ["hover", "click"])
+        self.assertEqual([trace.action for trace in self.session.traces], ["hover", "click"])
+
+    async def test_hover_without_followup_click_does_not_enter_timeline(self):
+        page = _FakePage("https://example.com", "Example")
+        tab_id = await self.manager.register_page(self.session.id, page, make_active=True)
+
+        await self.manager._handle_event(
+            self.session.id,
+            {
+                "action": "hover",
+                "tab_id": tab_id,
+                "tag": "BUTTON",
+                "timestamp": 1000,
+                "sequence": 10,
+                "locator": {"method": "role", "role": "button", "name": "Export"},
+                "signals": {"hover": {"is_menu_trigger_candidate": True}},
+            },
+        )
+
+        self.assertEqual(len(self.session.steps), 0)
+        self.assertEqual(len(self.session.recorded_actions), 0)
+        self.assertEqual(len(self.session.traces), 0)
+
+    async def test_hover_followed_by_non_menu_click_drops_hover_candidate(self):
+        page = _FakePage("https://example.com", "Example")
+        tab_id = await self.manager.register_page(self.session.id, page, make_active=True)
+
+        await self.manager._handle_event(
+            self.session.id,
+            {
+                "action": "hover",
+                "tab_id": tab_id,
+                "tag": "BUTTON",
+                "timestamp": 1000,
+                "sequence": 10,
+                "locator": {"method": "role", "role": "button", "name": "Export"},
+                "signals": {"hover": {"is_menu_trigger_candidate": True}},
+            },
+        )
+
+        await self.manager._handle_event(
+            self.session.id,
+            {
+                "action": "click",
+                "tab_id": tab_id,
+                "tag": "BUTTON",
+                "timestamp": 1200,
+                "sequence": 11,
+                "locator": {"method": "role", "role": "button", "name": "Export"},
+            },
+        )
+
+        self.assertEqual([step.action for step in self.session.steps], ["click"])
+        self.assertEqual([action.action_kind.value for action in self.session.recorded_actions], ["click"])
 
     async def test_handle_event_orders_steps_by_sequence_when_events_arrive_out_of_order(self):
         page = _FakePage("https://example.com", "Example")

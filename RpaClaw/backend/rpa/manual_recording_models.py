@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, model_validator
 
 
 class ManualActionKind(str, Enum):
+    HOVER = "hover"
     CLICK = "click"
     FILL = "fill"
     PRESS = "press"
@@ -19,6 +20,7 @@ class ManualActionKind(str, Enum):
 
 
 INTERACTIVE_ACTIONS = {
+    ManualActionKind.HOVER,
     ManualActionKind.CLICK,
     ManualActionKind.FILL,
     ManualActionKind.PRESS,

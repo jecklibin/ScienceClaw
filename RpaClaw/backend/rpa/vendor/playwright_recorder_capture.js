@@ -156,6 +156,71 @@
         };
     }
 
+    function hasClassToken(el, pattern) {
+        if (!el || typeof el.className !== 'string') return false;
+        return pattern.test(el.className);
+    }
+
+    function isMenuLikeElement(el) {
+        if (!el || !el.getAttribute) return false;
+        var role = (el.getAttribute('role') || '').toLowerCase();
+        if (role === 'menu' || role === 'listbox') return true;
+        return hasClassToken(el, /(menu|dropdown|popover|popup|listbox)/i);
+    }
+
+    function isMenuItemElement(el) {
+        if (!el || !el.getAttribute) return false;
+        var role = (el.getAttribute('role') || '').toLowerCase();
+        if (['menuitem', 'menuitemcheckbox', 'menuitemradio', 'option'].indexOf(role) >= 0) return true;
+        if (closestElement(el, '[role="menu"], [role="listbox"]')) return true;
+        var cur = el;
+        while (cur && cur !== document.body) {
+            if (isMenuLikeElement(cur)) return true;
+            cur = cur.parentElement;
+        }
+        return false;
+    }
+
+    function isMenuTriggerCandidate(el) {
+        if (!el || !el.getAttribute) return false;
+        var role = (el.getAttribute('role') || '').toLowerCase();
+        var hasPopup = (el.getAttribute('aria-haspopup') || '').toLowerCase();
+        if (hasPopup === 'menu' || hasPopup === 'listbox' || hasPopup === 'true') return true;
+        if (el.hasAttribute('aria-expanded')) return true;
+        if (role === 'button' || role === 'link') return true;
+        return el.tagName === 'BUTTON' || el.tagName === 'A';
+    }
+
+    function mergeSignals(existingSignals, patchSignals) {
+        var next = Object.assign({}, existingSignals || {});
+        for (var key in patchSignals) {
+            if (!Object.prototype.hasOwnProperty.call(patchSignals, key)) continue;
+            next[key] = Object.assign({}, next[key] || {}, patchSignals[key] || {});
+        }
+        return next;
+    }
+
+    function annotateActionPayload(action, el, payload) {
+        var next = Object.assign({}, payload || {});
+        var target = retarget(el);
+        if (!target) return next;
+        if (action === 'hover' && isMenuTriggerCandidate(target)) {
+            next.signals = mergeSignals(next.signals, {
+                hover: {
+                    is_menu_trigger_candidate: true
+                }
+            });
+        }
+        if (action === 'click' && isMenuItemElement(target)) {
+            next.signals = mergeSignals(next.signals, {
+                menu_context: {
+                    is_menu_item: true
+                }
+            });
+        }
+        return next;
+    }
+
     var _eventSequence = 0;
 
     function emit(evt) {
@@ -171,6 +236,7 @@
     function emitAction(action, el, extra) {
         var locatorBundle = buildLocatorBundle(el);
         var payload = extra && typeof extra === 'object' ? extra : {};
+        payload = annotateActionPayload(action, el, payload);
         emit(Object.assign({
             action: action,
             locator: locatorBundle.primary,

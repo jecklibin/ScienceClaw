@@ -249,14 +249,16 @@ class TraceSkillCompiler:
                 lines.append(f"        await {expr}.press({str(trace.value or '')!r})")
             lines.append("    await current_page.wait_for_load_state('domcontentloaded')")
             return lines
-        if not locator and action in {"click", "fill", "press", "check", "uncheck", "select"}:
+        if not locator and action in {"hover", "click", "fill", "press", "check", "uncheck", "select"}:
             lines.extend(self._invalid_manual_action_lines(action))
             return lines
         if not locator:
             lines.append("    # No stable locator was recorded for this manual action.")
             return lines
         expr = _locator_expression("current_page", locator)
-        if action == "click":
+        if action == "hover":
+            lines.append(f"    await {expr}.hover()")
+        elif action == "click":
             lines.append(f"    await {expr}.click()")
             lines.append("    await current_page.wait_for_timeout(500)")
         elif action == "fill":
