@@ -2,6 +2,8 @@ from backend.rpa.trace_models import (
     RPAAcceptedTrace,
     RPAAIExecution,
     RPADataflowMapping,
+    RPALocatorStabilityCandidate,
+    RPALocatorStabilityMetadata,
     RPAPageState,
     RPATargetField,
     RPATraceType,
@@ -549,3 +551,158 @@ def test_embedded_ai_code_rewrites_recorded_subpage_url_to_dynamic_previous_resu
     assert "https://github.com/ruvnet/RuView/issues" not in body
     assert "_resolve_result_ref(_results, 'top_starred_project.url')" in body
     assert "+ '/issues?q=is%3Aissue'" in body
+
+
+def test_embedded_ai_code_rewrites_random_like_data_testid_locator_to_stable_role_candidate():
+    trace = RPAAcceptedTrace(
+        trace_type=RPATraceType.AI_OPERATION,
+        source="ai",
+        description="Open report menu",
+        output_key="opened_menu",
+        locator_stability=RPALocatorStabilityMetadata(
+            primary_locator={"method": "css", "value": '[data-testid="menu-btn-a1b2c3d4"]'},
+            stable_self_signals={"role": "button", "name": "Open menu"},
+            unstable_signals=[{"attribute": "data-testid", "value": "menu-btn-a1b2c3d4"}],
+            alternate_locators=[
+                RPALocatorStabilityCandidate(
+                    locator={"method": "role", "role": "button", "name": "Open menu"},
+                    source="snapshot_actionable_node",
+                    confidence="high",
+                )
+            ],
+        ),
+        ai_execution=RPAAIExecution(
+            code=(
+                "async def run(page, results):\n"
+                "    await page.locator('[data-testid=\"menu-btn-a1b2c3d4\"]').click()\n"
+                "    return {'opened': True}"
+            ),
+        ),
+    )
+
+    script = TraceSkillCompiler().generate_script([trace], is_local=True)
+    body = _execute_body(script)
+
+    assert "get_by_role('button', name='Open menu')" in body
+    assert '[data-testid="menu-btn-a1b2c3d4"]' not in body
+
+
+def test_embedded_ai_code_preserves_random_like_locator_when_multiple_candidates_exist():
+    trace = RPAAcceptedTrace(
+        trace_type=RPATraceType.AI_OPERATION,
+        source="ai",
+        description="Open menu",
+        locator_stability=RPALocatorStabilityMetadata(
+            primary_locator={"method": "css", "value": '[data-testid="menu-btn-a1b2c3d4"]'},
+            unstable_signals=[{"attribute": "data-testid", "value": "menu-btn-a1b2c3d4"}],
+            alternate_locators=[
+                RPALocatorStabilityCandidate(
+                    locator={"method": "role", "role": "button", "name": "Open"},
+                    source="snapshot",
+                    confidence="high",
+                ),
+                RPALocatorStabilityCandidate(
+                    locator={"method": "role", "role": "button", "name": "Open"},
+                    source="anchor",
+                    confidence="high",
+                ),
+            ],
+        ),
+        ai_execution=RPAAIExecution(
+            code="async def run(page, results):\n    await page.locator('[data-testid=\"menu-btn-a1b2c3d4\"]').click()",
+        ),
+    )
+
+    script = TraceSkillCompiler().generate_script([trace], is_local=True)
+    body = _execute_body(script)
+
+    assert '[data-testid="menu-btn-a1b2c3d4"]' in body
+
+
+def test_embedded_ai_code_preserves_non_random_locator_even_when_stable_candidate_exists():
+    trace = RPAAcceptedTrace(
+        trace_type=RPATraceType.AI_OPERATION,
+        source="ai",
+        description="Click search",
+        locator_stability=RPALocatorStabilityMetadata(
+            primary_locator={"method": "css", "value": '[data-testid="search-button"]'},
+            alternate_locators=[
+                RPALocatorStabilityCandidate(
+                    locator={"method": "role", "role": "button", "name": "Search"},
+                    source="snapshot_actionable_node",
+                    confidence="high",
+                )
+            ],
+        ),
+        ai_execution=RPAAIExecution(
+            code="async def run(page, results):\n    await page.locator('[data-testid=\"search-button\"]').click()",
+        ),
+    )
+
+    script = TraceSkillCompiler().generate_script([trace], is_local=True)
+    body = _execute_body(script)
+
+    assert '[data-testid="search-button"]' in body
+    assert "get_by_role('button', name='Search')" not in body
+
+
+def test_embedded_ai_code_uses_single_anchor_scoped_candidate_when_self_signal_is_ambiguous():
+    trace = RPAAcceptedTrace(
+        trace_type=RPATraceType.AI_OPERATION,
+        source="ai",
+        description="Open report menu",
+        locator_stability=RPALocatorStabilityMetadata(
+            primary_locator={"method": "css", "value": '[data-testid="menu-btn-a1b2c3d4"]'},
+            stable_anchor_signals={"title": "Quarterly Report"},
+            unstable_signals=[{"attribute": "data-testid", "value": "menu-btn-a1b2c3d4"}],
+            alternate_locators=[
+                RPALocatorStabilityCandidate(
+                    locator={
+                        "method": "nested",
+                        "parent": {"method": "text", "value": "Quarterly Report"},
+                        "child": {"method": "role", "role": "button", "name": "Open menu"},
+                    },
+                    source="snapshot_anchor_scope",
+                    confidence="high",
+                )
+            ],
+        ),
+        ai_execution=RPAAIExecution(
+            code=(
+                "async def run(page, results):\n"
+                "    await page.locator('[data-testid=\"menu-btn-a1b2c3d4\"]').click()\n"
+                "    return {'opened': True}"
+            ),
+        ),
+    )
+
+    script = TraceSkillCompiler().generate_script([trace], is_local=True)
+    body = _execute_body(script)
+
+    assert "get_by_text('Quarterly Report').get_by_role('button', name='Open menu')" in body
+
+
+def test_embedded_ai_code_does_not_rewrite_without_unstable_signal_even_if_alternate_locator_exists():
+    trace = RPAAcceptedTrace(
+        trace_type=RPATraceType.AI_OPERATION,
+        source="ai",
+        description="Open menu",
+        locator_stability=RPALocatorStabilityMetadata(
+            primary_locator={"method": "css", "value": '[aria-label="Open menu"]'},
+            alternate_locators=[
+                RPALocatorStabilityCandidate(
+                    locator={"method": "role", "role": "button", "name": "Open menu"},
+                    source="snapshot_actionable_node",
+                    confidence="high",
+                )
+            ],
+        ),
+        ai_execution=RPAAIExecution(
+            code="async def run(page, results):\n    await page.locator('[aria-label=\"Open menu\"]').click()",
+        ),
+    )
+
+    script = TraceSkillCompiler().generate_script([trace], is_local=True)
+    body = _execute_body(script)
+
+    assert '[aria-label="Open menu"]' in body

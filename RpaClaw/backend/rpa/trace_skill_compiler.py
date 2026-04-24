@@ -486,6 +486,7 @@ class TraceSkillCompiler:
             (trace.ai_execution.code if trace.ai_execution else "").strip(),
             previous_traces,
         )
+        code = _rewrite_random_like_locator_in_code(code, trace)
         lines = ["", f"    # trace {index}: {trace.description or 'AI operation'}"]
         for code_line in code.splitlines():
             lines.append(f"    {code_line}" if code_line.strip() else "")
@@ -665,6 +666,44 @@ def _locator_expression(scope: str, locator: Dict[str, Any]) -> str:
     if method == "css":
         return f"{scope}.locator({locator.get('value', '')!r}).first"
     return f"{scope}.locator({locator.get('value', 'body')!r}).first"
+
+
+def _trace_has_random_like_primary_locator(trace: RPAAcceptedTrace) -> bool:
+    metadata = trace.locator_stability
+    return bool(metadata and metadata.primary_locator and metadata.unstable_signals)
+
+
+def _select_conservative_replacement_locator(trace: RPAAcceptedTrace) -> Dict[str, Any]:
+    metadata = trace.locator_stability
+    if not metadata or not metadata.alternate_locators:
+        return {}
+    strong_candidates = [
+        candidate.locator
+        for candidate in metadata.alternate_locators
+        if candidate.confidence == "high" and candidate.locator
+    ]
+    if len(strong_candidates) != 1:
+        return {}
+    return strong_candidates[0]
+
+
+def _rewrite_random_like_locator_in_code(code: str, trace: RPAAcceptedTrace) -> str:
+    if not _trace_has_random_like_primary_locator(trace):
+        return code
+    replacement_locator = _select_conservative_replacement_locator(trace)
+    if not replacement_locator:
+        return code
+    metadata = trace.locator_stability
+    if not metadata:
+        return code
+    primary_locator = metadata.primary_locator
+    if primary_locator.get("method") != "css":
+        return code
+    selector = str(primary_locator.get("value") or "")
+    if not selector:
+        return code
+    replacement_expr = _locator_expression("page", replacement_locator)
+    return code.replace(f"page.locator({selector!r})", replacement_expr)
 
 
 def _looks_like_highest_star(text: str) -> bool:
