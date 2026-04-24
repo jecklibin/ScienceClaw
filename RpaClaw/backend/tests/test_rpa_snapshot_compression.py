@@ -224,9 +224,7 @@ def test_compact_recording_snapshot_uses_clean_mode_when_full_details_fit_budget
     assert compact["mode"] == "clean_snapshot"
     assert compact["sampled_regions"] == []
     assert len(compact["expanded_regions"]) == len(regions)
-    assert {region["internal_ref"]["region_id"] for region in compact["expanded_regions"]} == {
-        region["region_id"] for region in regions
-    }
+    assert all("internal_ref" not in region for region in compact["expanded_regions"])
     assert all("region_id" not in region for region in compact["expanded_regions"])
     assert all("container_id" not in region for region in compact["expanded_regions"])
 
@@ -246,6 +244,18 @@ def test_compact_recording_snapshot_uses_clean_mode_when_full_details_fit_budget
     assert "page.locator" in table_region["locator_hints"][0]["expression"]
     assert "region_id" not in table_region
     assert "container_id" not in table_region
+
+
+def test_compact_snapshot_hides_internal_ids_from_llm_regions():
+    compact = compact_recording_snapshot(_build_snapshot(), "extract details", char_budget=100000)
+
+    for bucket in ("expanded_regions", "sampled_regions", "region_catalogue"):
+        for region in compact[bucket]:
+            assert "internal_ref" not in region
+            assert "region_id" not in region
+            assert "container_id" not in region
+            assert "basic-section" not in str(region)
+            assert "table-section" not in str(region)
 
 
 def test_default_char_budget_keeps_medium_detail_snapshot_clean():
@@ -615,9 +625,7 @@ def test_tiered_compaction_keeps_full_tier1_details():
         {"headers", "pairs", "actions", "excerpt"} & set((region.get("evidence") or {}).keys())
         for region in compact["sampled_regions"]
     )
-    assert {region["internal_ref"]["region_id"] for region in compact["sampled_regions"]}.isdisjoint(
-        {region["region_id"] for region in tiers["tier3"]}
-    )
+    assert all("internal_ref" not in region for region in compact["sampled_regions"])
     assert all("summary" in region for region in compact["region_catalogue"])
     assert "tiers" not in compact
 
@@ -847,6 +855,320 @@ def test_tiering_prefers_detail_section_by_title_and_summary_overlap():
 
     assert tiers["tier1"][0]["kind"] == "label_value_group"
     assert tiers["tier1"][0]["title"] == "单据基本信息"
+
+
+def test_tiering_prefers_record_list_for_list_collection_instructions():
+    snapshot = {
+        "url": "https://example.com/repo/pulls",
+        "title": "Pull requests - example/repo",
+        "content_nodes": [
+            {
+                "node_id": "item-1-title",
+                "container_id": "pr-list",
+                "semantic_kind": "item",
+                "role": "",
+                "text": "Add auth badge",
+                "bbox": {"x": 24, "y": 120, "width": 240, "height": 20},
+                "locator": {"method": "text", "value": "Add auth badge"},
+                "element_snapshot": {"tag": "span", "text": "Add auth badge"},
+            },
+            {
+                "node_id": "item-1-meta",
+                "container_id": "pr-list",
+                "semantic_kind": "text",
+                "role": "",
+                "text": "#101 opened by alice",
+                "bbox": {"x": 24, "y": 144, "width": 220, "height": 18},
+                "locator": {"method": "text", "value": "#101 opened by alice"},
+                "element_snapshot": {"tag": "span", "text": "#101 opened by alice"},
+            },
+            {
+                "node_id": "item-2-title",
+                "container_id": "pr-list",
+                "semantic_kind": "item",
+                "role": "",
+                "text": "Fix flaky pull request selector",
+                "bbox": {"x": 24, "y": 192, "width": 280, "height": 20},
+                "locator": {"method": "text", "value": "Fix flaky pull request selector"},
+                "element_snapshot": {"tag": "span", "text": "Fix flaky pull request selector"},
+            },
+            {
+                "node_id": "item-2-meta",
+                "container_id": "pr-list",
+                "semantic_kind": "text",
+                "role": "",
+                "text": "#102 opened by bob",
+                "bbox": {"x": 24, "y": 216, "width": 220, "height": 18},
+                "locator": {"method": "text", "value": "#102 opened by bob"},
+                "element_snapshot": {"tag": "span", "text": "#102 opened by bob"},
+            },
+            {
+                "node_id": "item-3-title",
+                "container_id": "pr-list",
+                "semantic_kind": "item",
+                "role": "",
+                "text": "Refactor PR list pagination",
+                "bbox": {"x": 24, "y": 264, "width": 260, "height": 20},
+                "locator": {"method": "text", "value": "Refactor PR list pagination"},
+                "element_snapshot": {"tag": "span", "text": "Refactor PR list pagination"},
+            },
+            {
+                "node_id": "item-3-meta",
+                "container_id": "pr-list",
+                "semantic_kind": "text",
+                "role": "",
+                "text": "#103 opened by carol",
+                "bbox": {"x": 24, "y": 288, "width": 220, "height": 18},
+                "locator": {"method": "text", "value": "#103 opened by carol"},
+                "element_snapshot": {"tag": "span", "text": "#103 opened by carol"},
+            },
+        ],
+        "actionable_nodes": [
+            {
+                "node_id": "link-1",
+                "container_id": "pr-list",
+                "frame_path": [],
+                "role": "link",
+                "name": "Add auth badge",
+                "text": "Add auth badge",
+                "bbox": {"x": 24, "y": 120, "width": 240, "height": 20},
+                "locator": {"method": "role", "role": "link", "name": "Add auth badge"},
+                "element_snapshot": {"tag": "a", "text": "Add auth badge", "href": "/repo/pull/101"},
+            },
+            {
+                "node_id": "author-1",
+                "container_id": "pr-list",
+                "frame_path": [],
+                "role": "link",
+                "name": "alice",
+                "text": "alice",
+                "bbox": {"x": 170, "y": 144, "width": 50, "height": 18},
+                "locator": {"method": "role", "role": "link", "name": "alice"},
+                "element_snapshot": {"tag": "a", "text": "alice", "href": "/repo/pulls?q=author%3Aalice"},
+            },
+            {
+                "node_id": "link-2",
+                "container_id": "pr-list",
+                "frame_path": [],
+                "role": "link",
+                "name": "Fix flaky pull request selector",
+                "text": "Fix flaky pull request selector",
+                "bbox": {"x": 24, "y": 192, "width": 280, "height": 20},
+                "locator": {"method": "role", "role": "link", "name": "Fix flaky pull request selector"},
+                "element_snapshot": {"tag": "a", "text": "Fix flaky pull request selector", "href": "/repo/pull/102"},
+            },
+            {
+                "node_id": "author-2",
+                "container_id": "pr-list",
+                "frame_path": [],
+                "role": "link",
+                "name": "bob",
+                "text": "bob",
+                "bbox": {"x": 170, "y": 216, "width": 40, "height": 18},
+                "locator": {"method": "role", "role": "link", "name": "bob"},
+                "element_snapshot": {"tag": "a", "text": "bob", "href": "/repo/pulls?q=author%3Abob"},
+            },
+            {
+                "node_id": "link-3",
+                "container_id": "pr-list",
+                "frame_path": [],
+                "role": "link",
+                "name": "Refactor PR list pagination",
+                "text": "Refactor PR list pagination",
+                "bbox": {"x": 24, "y": 264, "width": 260, "height": 20},
+                "locator": {"method": "role", "role": "link", "name": "Refactor PR list pagination"},
+                "element_snapshot": {"tag": "a", "text": "Refactor PR list pagination", "href": "/repo/pull/103"},
+            },
+            {
+                "node_id": "author-3",
+                "container_id": "pr-list",
+                "frame_path": [],
+                "role": "link",
+                "name": "carol",
+                "text": "carol",
+                "bbox": {"x": 170, "y": 288, "width": 45, "height": 18},
+                "locator": {"method": "role", "role": "link", "name": "carol"},
+                "element_snapshot": {"tag": "a", "text": "carol", "href": "/repo/pulls?q=author%3Acarol"},
+            },
+            {
+                "node_id": "repo-tab",
+                "container_id": "repo-nav",
+                "frame_path": [],
+                "role": "link",
+                "name": "Repository",
+                "text": "Repository",
+                "bbox": {"x": 24, "y": 24, "width": 90, "height": 20},
+                "locator": {"method": "role", "role": "link", "name": "Repository"},
+                "element_snapshot": {"tag": "a", "text": "Repository", "href": "/repo"},
+            },
+        ],
+        "containers": [
+            {
+                "container_id": "pr-list",
+                "frame_path": [],
+                "container_kind": "list",
+                "name": "Pull requests list",
+                "summary": "Add auth badge alice Fix flaky pull request selector bob Refactor PR list pagination carol",
+                "child_actionable_ids": ["link-1", "author-1", "link-2", "author-2", "link-3", "author-3"],
+                "child_content_ids": [
+                    "item-1-title",
+                    "item-1-meta",
+                    "item-2-title",
+                    "item-2-meta",
+                    "item-3-title",
+                    "item-3-meta",
+                ],
+            },
+            {
+                "container_id": "repo-nav",
+                "frame_path": [],
+                "container_kind": "toolbar",
+                "name": "Repository",
+                "summary": "Repository",
+                "child_actionable_ids": ["repo-tab"],
+                "child_content_ids": [],
+            },
+        ],
+        "frames": [],
+    }
+
+    regions = build_structured_regions(snapshot)
+    tiers = tier_regions(regions, "Collect pull request titles and authors from the first page as an array")
+
+    assert tiers["tier1"][0]["kind"] == "record_list"
+    assert tiers["tier1"][0]["title"] == "Pull requests list"
+
+    compact = compact_recording_snapshot(snapshot, "Collect pull request titles and authors from the first page as an array", char_budget=600)
+    record_list = next(region for region in compact["expanded_regions"] if region["kind"] == "record_list")
+    assert [item["primary_text"] for item in record_list["evidence"]["items"]] == [
+        "Add auth badge",
+        "Fix flaky pull request selector",
+        "Refactor PR list pagination",
+    ]
+    assert record_list["evidence"]["items"][0]["secondary_text"] == "#101 opened by alice"
+    assert record_list["locator_hints"][0]["source"] == "list_item"
+
+
+def test_actionable_tab_creates_sectioned_label_value_region_from_nearby_fields():
+    snapshot = {
+        "content_nodes": [
+            {
+                "node_id": "label-amount",
+                "container_id": "detail-container",
+                "semantic_kind": "label",
+                "role": "",
+                "text": "预计总金额 (含税）",
+                "bbox": {"x": 89, "y": 574, "width": 120, "height": 20},
+                "locator": {"method": "text", "value": "预计总金额 (含税）"},
+                "element_snapshot": {"tag": "span", "text": "预计总金额 (含税）", "class": "label"},
+            },
+            {
+                "node_id": "value-amount",
+                "container_id": "detail-container",
+                "semantic_kind": "text",
+                "role": "",
+                "text": "100.00",
+                "bbox": {"x": 80, "y": 596, "width": 41, "height": 19},
+                "locator": {"method": "text", "value": "100.00"},
+                "element_snapshot": {"tag": "span", "text": "100.00", "class": "aui-numeric-display-only"},
+            },
+            {
+                "node_id": "label-currency-full",
+                "container_id": "detail-container",
+                "semantic_kind": "label",
+                "role": "",
+                "text": "* 币种",
+                "bbox": {"x": 455, "y": 574, "width": 37, "height": 24},
+                "locator": {"method": "text", "value": "* 币种"},
+                "element_snapshot": {"tag": "label", "text": "* 币种", "class": "aui-form-item__label"},
+            },
+            {
+                "node_id": "required-currency",
+                "container_id": "detail-container",
+                "semantic_kind": "text",
+                "role": "",
+                "text": "*",
+                "bbox": {"x": 455, "y": 574, "width": 5, "height": 20},
+                "locator": {"method": "text", "value": "*"},
+                "element_snapshot": {"tag": "span", "text": "*", "class": "required"},
+            },
+            {
+                "node_id": "label-currency",
+                "container_id": "detail-container",
+                "semantic_kind": "label",
+                "role": "",
+                "text": "币种",
+                "bbox": {"x": 464, "y": 574, "width": 28, "height": 20},
+                "locator": {"method": "text", "value": "币种"},
+                "element_snapshot": {"tag": "span", "text": "币种", "class": "label"},
+            },
+            {
+                "node_id": "value-currency",
+                "container_id": "detail-container",
+                "semantic_kind": "text",
+                "role": "",
+                "text": "USD",
+                "bbox": {"x": 455, "y": 598, "width": 27, "height": 19},
+                "locator": {"method": "text", "value": "USD"},
+                "element_snapshot": {"tag": "span", "text": "USD", "class": "aui-input-display-only"},
+            },
+            {
+                "node_id": "label-type",
+                "container_id": "detail-container",
+                "semantic_kind": "label",
+                "role": "",
+                "text": "物品/服务",
+                "bbox": {"x": 840, "y": 574, "width": 61, "height": 20},
+                "locator": {"method": "text", "value": "物品/服务"},
+                "element_snapshot": {"tag": "span", "text": "物品/服务", "class": "label"},
+            },
+            {
+                "node_id": "value-type",
+                "container_id": "detail-container",
+                "semantic_kind": "text",
+                "role": "",
+                "text": "服务",
+                "bbox": {"x": 831, "y": 598, "width": 28, "height": 19},
+                "locator": {"method": "text", "value": "服务"},
+                "element_snapshot": {"tag": "span", "text": "服务", "class": "aui-input-display-only"},
+            },
+        ],
+        "actionable_nodes": [
+            {
+                "node_id": "tab-purchase",
+                "container_id": "detail-container",
+                "frame_path": [],
+                "role": "tab",
+                "name": "采购信息",
+                "text": "采购信息",
+                "bbox": {"x": 64, "y": 534, "width": 1156, "height": 40},
+                "locator": {"method": "role", "role": "tab", "name": "采购信息"},
+                "element_snapshot": {"tag": "div", "text": "采购信息"},
+            }
+        ],
+        "containers": [
+            {
+                "container_id": "detail-container",
+                "frame_path": [],
+                "container_kind": "form_section",
+                "name": "基础信息",
+                "summary": "基础信息 采购信息 预计总金额 100.00 币种 USD 物品/服务 服务",
+            }
+        ],
+        "frames": [],
+    }
+
+    compact = compact_recording_snapshot(snapshot, "提取采购信息中的内容", char_budget=100000)
+
+    purchase = next(region for region in compact["expanded_regions"] if region["title"] == "采购信息")
+    assert purchase["kind"] == "label_value_group"
+    assert {pair["label"]: pair["value"] for pair in purchase["evidence"]["pairs"]} == {
+        "预计总金额 (含税）": "100.00",
+        "币种": "USD",
+        "物品/服务": "服务",
+    }
+    assert purchase["locator_hints"][0]["source"] == "section_header"
+    assert "get_by_role" in purchase["locator_hints"][0]["expression"]
 
 
 def test_ngram_overlap_handles_partial_typo_and_unrelated_text():

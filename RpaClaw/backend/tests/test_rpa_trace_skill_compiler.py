@@ -103,7 +103,7 @@ def test_compiler_preserves_pr_record_extraction_as_python_playwright():
 
     assert "top10_prs" in script
     assert "page.evaluate" not in script
-    assert "_validate_non_empty_records('top10_prs', _result)" in script
+    assert "_validate_non_empty_records('top10_prs', _result)" not in script
 
 
 def test_compiler_uniquifies_duplicate_ai_output_keys():
@@ -426,6 +426,36 @@ def test_issue_extraction_after_highest_star_uses_dynamic_result_not_recorded_re
     assert "https://github.com/ruvnet/RuView/issues" not in body
     assert "_resolve_first_result_ref(_results, ['top_star_project.url', 'top_star_project.value'])" in body
     assert "+ '/issues?q=is%3Aissue'" in body
+
+
+def test_navigation_after_pr_extraction_does_not_reuse_list_output_as_repo_url():
+    traces = [
+        RPAAcceptedTrace(
+            trace_type=RPATraceType.AI_OPERATION,
+            user_instruction="open the project with the highest star count",
+            output_key="top_repo_result",
+            output=None,
+            after_page=RPAPageState(url="https://github.com/cline/cline"),
+        ),
+        RPAAcceptedTrace(
+            trace_type=RPATraceType.AI_OPERATION,
+            user_instruction="extract PR titles and authors from the first two pages of the repository's pull requests list",
+            output_key="pr_list",
+            output=[{"title": "Recorded", "creator": "alice"}],
+            after_page=RPAPageState(url="https://github.com/cline/cline/pulls?q=is%3Apr&page=2"),
+        ),
+        RPAAcceptedTrace(
+            trace_type=RPATraceType.NAVIGATION,
+            after_page=RPAPageState(url="https://github.com/cline/cline/pulls?page=2&q=is%3Apr+is%3Aopen"),
+        ),
+    ]
+
+    script = TraceSkillCompiler().generate_script(traces, is_local=True)
+    body = _execute_body(script)
+
+    assert "_resolve_first_result_ref(_results, ['pr_list.url', 'pr_list.value'])" not in body
+    assert "_resolve_first_result_ref(_results, ['top_repo_result.url', 'top_repo_result.value'])" in body
+    assert "+ '/pulls?page=2&q=is%3Apr+is%3Aopen'" in body
 
 
 def test_embedded_ai_code_rewrites_recorded_subpage_url_to_dynamic_previous_result():

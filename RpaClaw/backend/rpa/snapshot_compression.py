@@ -47,6 +47,10 @@ def build_structured_regions(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
         region = _build_region(container_id, containers.get(container_id, {}), nodes, fallback_counts)
         if region:
             regions.append(region)
+        record_list_region = _build_record_list_region(container_id, containers.get(container_id, {}), nodes, fallback_counts)
+        if record_list_region:
+            regions.append(record_list_region)
+        regions.extend(_build_sectioned_label_value_regions(container_id, containers.get(container_id, {}), nodes, fallback_counts))
 
     for container_id, container in containers.items():
         if container_id not in grouped_nodes:
@@ -208,6 +212,90 @@ def _build_region(
     }
 
 
+def _build_sectioned_label_value_regions(
+    container_id: str,
+    container: Dict[str, Any],
+    nodes: Sequence[Dict[str, Any]],
+    fallback_counts: Optional[Dict[str, int]] = None,
+) -> List[Dict[str, Any]]:
+    ordered = _sort_nodes(nodes)
+    headers = [node for node in ordered if _is_section_header_node(node)]
+    if not headers:
+        return []
+
+    regions: List[Dict[str, Any]] = []
+    for index, header in enumerate(headers):
+        title = _clean_text(header.get("name") or header.get("text") or "")
+        if not title:
+            continue
+        top = _node_y(header)
+        next_top = _node_y(headers[index + 1]) if index + 1 < len(headers) else None
+        section_nodes = [
+            node
+            for node in ordered
+            if node is not header
+            and not _is_section_header_node(node)
+            and _node_y(node) > top
+            and (next_top is None or _node_y(node) < next_top)
+        ]
+        pairs = _extract_label_value_pairs(section_nodes)
+        if len(pairs) < 2:
+            continue
+        summary = " | ".join(f"{pair['label']}={pair['value']}" for pair in pairs[:4])
+        regions.append(
+            {
+                "region_id": _region_id("section", _next_fallback_index(fallback_counts, "section"), container_id, title),
+                "container_id": container_id,
+                "kind": "label_value_group",
+                "title": title,
+                "summary": summary or title,
+                "pairs": pairs,
+                "frame_path": list(header.get("frame_path") or container.get("frame_path") or _first_frame_path(section_nodes)),
+                "container_kind": "sectioned_form",
+                "section_header": {
+                    "label": title,
+                    "locator": header.get("locator") or _best_locator(header),
+                    "role": header.get("role") or "",
+                },
+            }
+        )
+    return regions
+
+
+def _build_record_list_region(
+    container_id: str,
+    container: Dict[str, Any],
+    nodes: Sequence[Dict[str, Any]],
+    fallback_counts: Optional[Dict[str, int]] = None,
+) -> Optional[Dict[str, Any]]:
+    items = _extract_record_list_items(container, nodes)
+    if len(items) < 3:
+        return None
+
+    title_node = _find_title_node(nodes, container)
+    title = _clean_text(container.get("name") or (title_node or {}).get("text") or "")
+    summary_parts: List[str] = []
+    for item in items[:3]:
+        primary = _clean_text(item.get("primary_text") or "")
+        secondary = _clean_text(item.get("secondary_text") or "")
+        if primary and secondary:
+            summary_parts.append(f"{primary} ({secondary})")
+        elif primary:
+            summary_parts.append(primary)
+    summary = " | ".join(summary_parts)
+    frame_path = list(container.get("frame_path") or _first_frame_path(nodes))
+    return {
+        "region_id": container_id or _region_id("record_list", _next_fallback_index(fallback_counts, "record_list"), title, summary),
+        "container_id": container_id,
+        "kind": "record_list",
+        "title": title or "record_list",
+        "summary": summary or title or "record_list",
+        "items": items,
+        "frame_path": frame_path,
+        "container_kind": container.get("container_kind", ""),
+    }
+
+
 def _index_containers(containers: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     indexed: Dict[str, Dict[str, Any]] = {}
     for container in containers:
@@ -242,9 +330,7 @@ def _collect_frame_actions(frames: Iterable[Dict[str, Any]]) -> List[Dict[str, A
 
 
 def _looks_like_label_value_group(container: Dict[str, Any], nodes: Sequence[Dict[str, Any]]) -> bool:
-    labels = [_ for _ in nodes if _is_label_node(_)]
-    values = [_ for _ in nodes if _is_value_node(_)]
-    return bool(labels and values and len(values) >= len(labels))
+    return bool(_extract_label_value_pairs(nodes))
 
 
 def _looks_like_table(container: Dict[str, Any], nodes: Sequence[Dict[str, Any]]) -> bool:
@@ -267,20 +353,25 @@ def _looks_like_action_group(container: Dict[str, Any], nodes: Sequence[Dict[str
 def _extract_label_value_pairs(nodes: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     ordered = _sort_nodes(nodes)
     pairs: List[Dict[str, Any]] = []
-    labels = [node for node in ordered if _is_label_node(node)]
+    labels = [node for node in ordered if _is_label_node(node) and _clean_label_text(node.get("text") or "")]
     labels.sort(key=lambda node: (_node_y(node), _node_x(node), str(node.get("node_id") or "")))
     used_values: set[int] = set()
     value_entries = [(index, node) for index, node in enumerate(ordered) if _is_value_node(node)]
+    seen_labels: set[str] = set()
 
     for label_node in labels:
+        label_text = _clean_label_text(label_node.get("text") or "")
+        if not label_text or label_text in seen_labels:
+            continue
         value_entry = _find_value_for_label_by_position(label_node, value_entries, used_values)
         if not value_entry:
             continue
         value_index, value_node = value_entry
         used_values.add(value_index)
+        seen_labels.add(label_text)
         pairs.append(
             {
-                "label": _clean_text(label_node.get("text") or ""),
+                "label": label_text,
                 "value": _clean_text(value_node.get("text") or ""),
                 "label_locator": label_node.get("locator") or _best_locator(label_node),
                 "value_locator": value_node.get("locator") or _best_locator(value_node),
@@ -329,6 +420,111 @@ def _extract_actions(nodes: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 }
             )
     return actions
+
+
+def _extract_record_list_items(container: Dict[str, Any], nodes: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    ordered = _sort_nodes(nodes)
+    anchor_nodes = _record_item_anchor_nodes(container, ordered)
+    if len(anchor_nodes) < 3:
+        return []
+
+    items: List[Dict[str, Any]] = []
+    for index, anchor in enumerate(anchor_nodes):
+        top = _node_y(anchor) - 4
+        next_top = _node_y(anchor_nodes[index + 1]) - 4 if index + 1 < len(anchor_nodes) else None
+        section_nodes = [
+            node
+            for node in ordered
+            if node is not anchor
+            and _node_y(node) >= top
+            and (next_top is None or _node_y(node) < next_top)
+        ]
+        primary_text = _clean_text(anchor.get("text") or anchor.get("name") or "")
+        if not primary_text:
+            continue
+        secondary_text = _best_record_secondary_text(section_nodes, primary_text)
+        item = {
+            "primary_text": primary_text,
+            "secondary_text": secondary_text,
+            "locator": anchor.get("locator") or _best_locator(anchor),
+        }
+        href = _node_href(anchor)
+        if href:
+            item["href"] = href
+        items.append(item)
+    return items
+
+
+def _record_item_anchor_nodes(container: Dict[str, Any], nodes: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    item_nodes = [node for node in nodes if _normalize_kind(node.get("semantic_kind")) == "item" and _clean_text(node.get("text") or node.get("name") or "")]
+    item_anchors = _dedupe_nodes_by_row(item_nodes)
+    if len(item_anchors) >= 3:
+        return item_anchors
+
+    if _normalize_kind(container.get("container_kind")) != "list":
+        return []
+
+    grouped_links = _group_nodes_by_y_tolerance(
+        [
+            node
+            for node in nodes
+            if _is_action_node(node)
+            and _normalize_kind(node.get("role")) == "link"
+            and _clean_text(node.get("text") or node.get("name") or "")
+        ],
+        tolerance=20,
+    )
+    anchors: List[Dict[str, Any]] = []
+    for group in grouped_links:
+        preferred = max(
+            group,
+            key=lambda node: (
+                len(_clean_text(node.get("text") or node.get("name") or "")),
+                1 if _node_href(node) else 0,
+                -_node_x(node),
+            ),
+        )
+        if _clean_text(preferred.get("text") or preferred.get("name") or ""):
+            anchors.append(preferred)
+    return _dedupe_nodes_by_row(anchors)
+
+
+def _dedupe_nodes_by_row(nodes: Sequence[Dict[str, Any]], tolerance: int = 20) -> List[Dict[str, Any]]:
+    deduped: List[Dict[str, Any]] = []
+    for group in _group_nodes_by_y_tolerance(nodes, tolerance=tolerance):
+        if not group:
+            continue
+        deduped.append(
+            min(
+                group,
+                key=lambda node: (
+                    _node_x(node),
+                    str(node.get("node_id") or ""),
+                ),
+            )
+        )
+    return deduped
+
+
+def _best_record_secondary_text(nodes: Sequence[Dict[str, Any]], primary_text: str) -> str:
+    candidates = []
+    for node in _sort_nodes(nodes):
+        text = _clean_text(node.get("text") or node.get("name") or "")
+        if not text or text == primary_text:
+            continue
+        if _normalize_kind(node.get("semantic_kind")) == "item":
+            continue
+        if _normalize_kind(node.get("role")) in {"link", "button"} and len(text) <= 4:
+            continue
+        candidates.append(
+            (
+                0 if _normalize_kind(node.get("semantic_kind")) == "text" else 1,
+                abs(_node_y(node) - (_node_y(nodes[0]) if nodes else 0)),
+                -len(text),
+                text,
+            )
+        )
+    return candidates[0][3] if candidates else ""
 
 
 def _build_summary(container: Dict[str, Any], nodes: Sequence[Dict[str, Any]], title_node: Optional[Dict[str, Any]]) -> str:
@@ -380,18 +576,11 @@ def _sampled_region(region: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _llm_region_base(region: Dict[str, Any]) -> Dict[str, Any]:
-    region_id = str(region.get("region_id") or "")
-    container_id = str(region.get("container_id") or "")
     return {
-        "ref": f"region:{region_id}" if region_id else "region:unknown",
         "kind": region.get("kind", ""),
         "title": region.get("title", ""),
         "summary": region.get("summary", ""),
         "frame_path": list(region.get("frame_path") or []),
-        "internal_ref": {
-            "region_id": region_id,
-            "container_id": container_id,
-        },
     }
 
 
@@ -412,6 +601,22 @@ def _region_evidence(region: Dict[str, Any], *, limit: Optional[int]) -> Dict[st
                 }
             )
         return {"pairs": pairs}
+
+    if kind == "record_list":
+        item_entries = list(region.get("items") or [])
+        if limit is not None:
+            item_entries = item_entries[:limit]
+        items = []
+        for item in item_entries:
+            record = {
+                "primary_text": item.get("primary_text", ""),
+                "secondary_text": item.get("secondary_text", ""),
+                "locator": item.get("locator") or {},
+            }
+            if item.get("href"):
+                record["href"] = item.get("href")
+            items.append(record)
+        return {"items": items}
 
     if kind == "table":
         row_items = list(region.get("sample_rows") or [])
@@ -444,9 +649,53 @@ def _region_evidence(region: Dict[str, Any], *, limit: Optional[int]) -> Dict[st
 
 def _locator_hints(region: Dict[str, Any]) -> List[Dict[str, Any]]:
     kind = _normalize_kind(region.get("kind"))
+    if kind == "label_value_group":
+        return _label_value_locator_hints(region)
+    if kind == "record_list":
+        return _record_list_locator_hints(region)
     if kind == "table":
         return _table_locator_hints(region)
     return []
+
+
+def _label_value_locator_hints(region: Dict[str, Any]) -> List[Dict[str, Any]]:
+    hints: List[Dict[str, Any]] = []
+    section_header = region.get("section_header") if isinstance(region.get("section_header"), dict) else {}
+    locator = section_header.get("locator") if isinstance(section_header, dict) else None
+    if isinstance(locator, dict) and locator:
+        expression = _playwright_locator_expression("page", locator)
+        if expression:
+            hints.append(
+                {
+                    "kind": "playwright",
+                    "method": locator.get("method") or "locator",
+                    "expression": expression,
+                    "source": "section_header",
+                    "purpose": "identify the visible section header that scopes the following readonly fields",
+                }
+            )
+    return hints
+
+
+def _record_list_locator_hints(region: Dict[str, Any]) -> List[Dict[str, Any]]:
+    hints: List[Dict[str, Any]] = []
+    for item in list(region.get("items") or [])[:2]:
+        locator = item.get("locator") if isinstance(item, dict) else None
+        if not isinstance(locator, dict) or not locator:
+            continue
+        expression = _playwright_locator_expression("page", locator)
+        if not expression:
+            continue
+        hints.append(
+            {
+                "kind": "playwright",
+                "method": locator.get("method") or "locator",
+                "expression": expression,
+                "source": "list_item",
+                "purpose": "identify representative visible list items before extracting repeated records",
+            }
+        )
+    return hints
 
 
 def _table_locator_hints(region: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -493,7 +742,10 @@ def _table_locator_hints(region: Dict[str, Any]) -> List[Dict[str, Any]]:
 def _region_relevance(region: Dict[str, Any], instruction: str) -> float:
     title_overlap = ngram_overlap(str(instruction or ""), str(region.get("title") or ""))
     summary_overlap = ngram_overlap(str(instruction or ""), str(region.get("summary") or ""))
-    return max(title_overlap, summary_overlap)
+    score = max(title_overlap, summary_overlap)
+    if _looks_like_record_list_task(instruction) and _normalize_kind(region.get("kind")) == "record_list":
+        score += 0.35
+    return score
 
 
 def _find_title_node(nodes: Sequence[Dict[str, Any]], container: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -566,12 +818,17 @@ def _is_label_node(node: Dict[str, Any]) -> bool:
 
 
 def _is_value_node(node: Dict[str, Any]) -> bool:
+    text = _clean_text(node.get("text") or "")
+    if not text or text == "*":
+        return False
     semantic_kind = _normalize_kind(node.get("semantic_kind"))
     tag = _normalize_kind(node.get("element_snapshot", {}).get("tag"))
-    classes = str(node.get("element_snapshot", {}).get("class") or "")
+    classes = str(node.get("element_snapshot", {}).get("class") or "").lower()
     if semantic_kind == "field_value":
         return True
     if "field-value" in classes or "value" in classes:
+        return True
+    if "display-only" in classes or "no-value" in classes:
         return True
     if node.get("data_field"):
         return True
@@ -594,6 +851,19 @@ def _is_action_node(node: Dict[str, Any]) -> bool:
     role = _normalize_kind(node.get("role"))
     tag = _normalize_kind(node.get("element_snapshot", {}).get("tag"))
     return role in {"button", "link"} or tag in {"a", "button"} or _normalize_kind(node.get("semantic_kind")) == "action"
+
+
+def _is_section_header_node(node: Dict[str, Any]) -> bool:
+    text = _clean_text(node.get("name") or node.get("text") or "")
+    if not text:
+        return False
+    role = _normalize_kind(node.get("role"))
+    tag = _normalize_kind(node.get("element_snapshot", {}).get("tag"))
+    if role == "tab" or tag == "summary":
+        return True
+    width = int((node.get("bbox") or {}).get("width", 0) or 0)
+    action_kinds = {str(item).lower() for item in (node.get("action_kinds") or [])}
+    return role == "button" and "click" in action_kinds and width >= 160
 
 
 def _looks_like_title_node(node: Dict[str, Any]) -> bool:
@@ -673,12 +943,64 @@ def _best_locator(node: Dict[str, Any]) -> Dict[str, Any]:
     return {"method": "css", "value": node.get("element_snapshot", {}).get("tag") or "body"}
 
 
+def _playwright_locator_expression(scope: str, locator: Dict[str, Any]) -> str:
+    method = locator.get("method")
+    if method == "role" or (method is None and locator.get("role")):
+        role = locator.get("role", "")
+        name = locator.get("name")
+        args = [repr(role)]
+        if name:
+            args.append(f"name={name!r}")
+        return f"{scope}.get_by_role({', '.join(args)})"
+    if method == "text":
+        return f"{scope}.get_by_text({locator.get('value', '')!r})"
+    if method == "label":
+        return f"{scope}.get_by_label({locator.get('value', '')!r})"
+    if method == "css":
+        return f"{scope}.locator({locator.get('value', 'body')!r})"
+    return ""
+
+
+def _node_href(node: Dict[str, Any]) -> str:
+    element_snapshot = node.get("element_snapshot") if isinstance(node.get("element_snapshot"), dict) else {}
+    href = element_snapshot.get("href") if isinstance(element_snapshot, dict) else ""
+    return _clean_text(href)
+
+
 def _clean_text(value: Any) -> str:
     return " ".join(str(value or "").split())
 
 
+def _clean_label_text(value: Any) -> str:
+    text = _clean_text(value)
+    while text.startswith("*"):
+        text = _clean_text(text[1:])
+    return text
+
+
 def _normalize_kind(value: Any) -> str:
     return str(value or "").strip().lower()
+
+
+def _looks_like_record_list_task(instruction: str) -> bool:
+    text = str(instruction or "").lower()
+    patterns = (
+        "collect",
+        "list",
+        "array",
+        "each",
+        "every",
+        "titles and authors",
+        "records",
+        "收集",
+        "列表",
+        "数组",
+        "每个",
+        "前两页",
+        "标题",
+        "创建人",
+    )
+    return any(pattern in text for pattern in patterns)
 
 
 def _region_rank(region: Dict[str, Any]) -> int:
@@ -687,9 +1009,11 @@ def _region_rank(region: Dict[str, Any]) -> int:
         return 0
     if kind == "table":
         return 1
-    if kind == "action_group":
+    if kind == "record_list":
         return 2
-    return 3
+    if kind == "action_group":
+        return 3
+    return 4
 
 
 def _next_fallback_index(fallback_counts: Optional[Dict[str, int]], prefix: str) -> int:
@@ -745,7 +1069,7 @@ def _extract_intro_text(nodes: Sequence[Dict[str, Any]]) -> str:
     for node in ordered:
         if _node_y(node) >= first_label_y:
             break
-        if _looks_like_title_node(node):
+        if _looks_like_title_node(node) or _is_section_header_node(node):
             continue
         if _is_label_node(node) or _is_value_node(node):
             continue

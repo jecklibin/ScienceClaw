@@ -428,8 +428,6 @@ class TraceSkillCompiler:
             f"    _results[{key!r}] = _result",
             ]
         )
-        if not allow_empty:
-            lines.append(f"    _validate_non_empty_records({key!r}, _result)")
         return lines
 
     @staticmethod
@@ -478,8 +476,6 @@ class TraceSkillCompiler:
         lines.append("    _result = await run(current_page, _results)")
         if key:
             lines.append(f"    _results[{key!r}] = _result")
-            if isinstance(trace.output, list) and trace.output:
-                lines.append(f"    _validate_non_empty_records({key!r}, _result)")
         return lines
 
     def _render_dataflow_fill_trace(self, index: int, trace: RPAAcceptedTrace) -> List[str]:
@@ -538,7 +534,6 @@ class TraceSkillCompiler:
             and (
                 _looks_like_highest_star(instruction)
                 or _looks_like_semantic_repo_selection(instruction, trace.output)
-                or _is_github_repo_url(trace.after_page.url)
             )
         ):
             return f"_resolve_first_result_ref(_results, [{key + '.url'!r}, {key + '.value'!r}])"
