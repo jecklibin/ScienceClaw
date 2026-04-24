@@ -82,6 +82,8 @@ RPA_VENDOR_DIR = Path(__file__).with_name("vendor")
 PLAYWRIGHT_RECORDER_RUNTIME_PATH = RPA_VENDOR_DIR / "playwright_recorder_runtime.js"
 PLAYWRIGHT_RECORDER_ACTIONS_PATH = RPA_VENDOR_DIR / "playwright_recorder_actions.js"
 CAPTURE_SCRIPT_PATH = RPA_VENDOR_DIR / "playwright_recorder_capture.js"
+PLAYWRIGHT_RECORDER_RUNTIME_JS = PLAYWRIGHT_RECORDER_RUNTIME_PATH.read_text(encoding="utf-8")
+PLAYWRIGHT_RECORDER_ACTIONS_JS = PLAYWRIGHT_RECORDER_ACTIONS_PATH.read_text(encoding="utf-8")
 CAPTURE_JS = CAPTURE_SCRIPT_PATH.read_text(encoding="utf-8")
 
 class RPASessionManager:
@@ -173,8 +175,15 @@ class RPASessionManager:
             opener_tab_id=opener_tab_id,
         )
 
+        tab_bootstrap_script = self._build_tab_bootstrap_script(tab_id)
+        await page.add_init_script(script=tab_bootstrap_script)
+        bridged_context_ids = self._bridged_context_ids.setdefault(session_id, set())
+        bootstrap_current_page = id(page.context) in bridged_context_ids
         await self._ensure_context_recorder(session_id, page.context)
         await self._bind_page(session_id, tab_id, page)
+        if bootstrap_current_page:
+            await page.evaluate(tab_bootstrap_script)
+            await self._bootstrap_page_recorder(page)
 
         if make_active or not self.sessions[session_id].active_tab_id:
             await self.activate_tab(session_id, tab_id, source="auto")
@@ -294,6 +303,10 @@ class RPASessionManager:
         if parsed.scheme in {"http", "https"} and not parsed.netloc:
             raise ValueError("Invalid URL")
         return normalized
+
+    @staticmethod
+    def _build_tab_bootstrap_script(tab_id: str) -> str:
+        return f"window.__rpa_tab_id = {json.dumps(tab_id)};"
 
     async def navigate_active_tab(self, session_id: str, url: str) -> Dict[str, str]:
         session = self.sessions.get(session_id)
@@ -491,6 +504,14 @@ class RPASessionManager:
 
     async def build_frame_path(self, frame) -> List[str]:
         return await self._build_frame_path(frame)
+
+    async def _bootstrap_page_recorder(self, page: Page):
+        try:
+            await page.evaluate(PLAYWRIGHT_RECORDER_RUNTIME_JS)
+            await page.evaluate(PLAYWRIGHT_RECORDER_ACTIONS_JS)
+            await page.evaluate(CAPTURE_JS)
+        except Exception as exc:
+            logger.debug("[RPA] Failed to bootstrap recorder runtime for current page: %s", exc)
 
     async def _bind_page(self, session_id: str, tab_id: str, page: Page):
         last_url = {"value": ""}
