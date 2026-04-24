@@ -603,6 +603,7 @@ class RPASessionManager:
         if not session or step_index < 0 or step_index >= len(session.steps):
             return False
         session.steps.pop(step_index)
+        self._rebuild_manual_recording_state(session)
         return True
 
     @staticmethod
@@ -945,6 +946,7 @@ class RPASessionManager:
                 step.validation["status"] = "ok" if strict_match_count == 1 else "fallback"
             if selected_candidate.get("reason"):
                 step.validation["details"] = selected_candidate["reason"]
+        self._rebuild_manual_recording_state(session)
         await self._record_manual_trace_for_step(session_id, step)
         await self._broadcast_step(session_id, step)
         return step
@@ -1152,6 +1154,7 @@ class RPASessionManager:
             previous_step = session.steps[insert_at - 1] if insert_at > 0 else None
             if self._is_same_fill_target(previous_step, step):
                 self._merge_fill_step(previous_step, step)
+                self._rebuild_manual_recording_state(session)
                 await self._record_manual_trace_for_step(session_id, previous_step)
                 await self._broadcast_step(session_id, previous_step)
                 return previous_step
@@ -1161,32 +1164,36 @@ class RPASessionManager:
                 return next_step
 
         session.steps.insert(insert_at, step)
-        self._record_manual_action_outcome(session, step)
+        self._rebuild_manual_recording_state(session)
         await self._record_manual_trace_for_step(session_id, step)
 
         await self._broadcast_step(session_id, step)
         return step
 
     @staticmethod
-    def _record_manual_action_outcome(session: RPASession, step: RPAStep) -> None:
-        if step.source != "record":
-            return
+    def _rebuild_manual_recording_state(session: RPASession) -> None:
+        session.recorded_actions = []
+        session.recording_diagnostics = []
 
-        outcome = build_manual_recording_outcome(
-            action=step.action,
-            description=step.description or "",
-            target=step.target or "",
-            locator_candidates=step.locator_candidates,
-            validation=step.validation,
-            value=step.value,
-            element_snapshot=step.element_snapshot,
-            page_state={"url": step.url or ""},
-            signals=step.signals,
-        )
-        if outcome.accepted_action is not None:
-            session.recorded_actions.append(outcome.accepted_action)
-        if outcome.diagnostic is not None:
-            session.recording_diagnostics.append(outcome.diagnostic)
+        for step in session.steps:
+            if step.source != "record":
+                continue
+            outcome = build_manual_recording_outcome(
+                step_id=step.id,
+                action=step.action,
+                description=step.description or "",
+                target=step.target or "",
+                locator_candidates=step.locator_candidates,
+                validation=step.validation,
+                value=step.value,
+                element_snapshot=step.element_snapshot,
+                page_state={"url": step.url or ""},
+                signals=step.signals,
+            )
+            if outcome.accepted_action is not None:
+                session.recorded_actions.append(outcome.accepted_action)
+            if outcome.diagnostic is not None:
+                session.recording_diagnostics.append(outcome.diagnostic)
 
     @staticmethod
     def _step_event_ts_ms(step: RPAStep) -> int:

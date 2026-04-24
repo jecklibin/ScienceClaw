@@ -95,7 +95,7 @@ def recorded_action_to_trace(action: ManualRecordedAction) -> RPAAcceptedTrace:
         title=str(page_state.get("title", "") or ""),
     )
     return RPAAcceptedTrace(
-        trace_id=f"trace-recorded-action-{action.action_kind.value}",
+        trace_id=f"trace-{action.step_id or action.action_kind.value}",
         trace_type=trace_type,
         source="manual",
         action=action.action_kind.value,

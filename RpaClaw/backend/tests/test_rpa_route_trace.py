@@ -35,6 +35,7 @@ def test_generate_session_script_uses_recorded_actions_when_present():
     session = RPASession(id="s2", user_id="u2", sandbox_session_id="sandbox")
     session.recorded_actions.append(
         ManualRecordedAction(
+            step_id="step-search",
             action_kind=ManualActionKind.CLICK,
             description='点击 button("Search")',
             target={"method": "role", "role": "button", "name": "Search"},
@@ -46,6 +47,46 @@ def test_generate_session_script_uses_recorded_actions_when_present():
 
     assert "get_by_role('button'" in script or 'get_by_role("button"' in script
     assert 'name="Search"' in script or "name='Search'" in script or "name=\"Search\"" in script
+
+
+def test_generate_session_script_keeps_ai_traces_when_recorded_actions_replace_manual_traces():
+    session = RPASession(id="s3", user_id="u3", sandbox_session_id="sandbox")
+    session.recorded_actions.append(
+        ManualRecordedAction(
+            step_id="step-search",
+            action_kind=ManualActionKind.CLICK,
+            description='click button("Search")',
+            target={"method": "role", "role": "button", "name": "Search"},
+            validation={"status": "ok"},
+        )
+    )
+    session.traces.extend(
+        [
+            RPAAcceptedTrace(
+                trace_id="trace-ai-1",
+                trace_type=RPATraceType.AI_OPERATION,
+                source="ai",
+                user_instruction="collect the repository url",
+                output_key="selected_repo",
+                output={"url": "https://github.com/openai/openai-agents-python"},
+                ai_execution=RPAAIExecution(
+                    code="async def run(page, results):\n    return {'url': 'https://github.com/openai/openai-agents-python'}",
+                ),
+            ),
+            RPAAcceptedTrace(
+                trace_id="trace-step-search",
+                trace_type=RPATraceType.MANUAL_ACTION,
+                source="manual",
+                action="click",
+                description="legacy manual click",
+            ),
+        ]
+    )
+
+    script = ROUTE_MODULE._generate_session_script(session, {}, test_mode=True)
+
+    assert "selected_repo" in script
+    assert "get_by_role('button'" in script or 'get_by_role(\"button\"' in script
 
 
 @pytest.mark.asyncio

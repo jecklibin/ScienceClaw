@@ -249,6 +249,101 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
             "canonical_target_missing",
         )
 
+    async def test_select_step_locator_candidate_rebuilds_manual_recording_outcomes(self):
+        await self.manager.add_step(
+            self.session.id,
+            {
+                "action": "click",
+                "target": "",
+                "description": "点击 None",
+                "source": "record",
+                "locator_candidates": [
+                    {
+                        "kind": "role",
+                        "playwright_locator": 'page.locator(".unknown")',
+                        "selected": True,
+                    },
+                    {
+                        "kind": "role",
+                        "locator": {"method": "role", "role": "textbox", "name": "Search"},
+                        "selected": False,
+                        "strict_match_count": 1,
+                    },
+                ],
+                "validation": {"status": "ok"},
+            },
+        )
+
+        self.assertEqual(len(self.session.recorded_actions), 0)
+        self.assertEqual(len(self.session.recording_diagnostics), 1)
+
+        await self.manager.select_step_locator_candidate(self.session.id, 0, 1)
+
+        self.assertEqual(len(self.session.recorded_actions), 1)
+        self.assertEqual(len(self.session.recording_diagnostics), 0)
+        self.assertEqual(self.session.recorded_actions[0].target["method"], "role")
+
+    async def test_delete_step_rebuilds_manual_recording_outcomes(self):
+        await self.manager.add_step(
+            self.session.id,
+            {
+                "action": "click",
+                "target": "",
+                "description": "点击 None",
+                "source": "record",
+                "locator_candidates": [
+                    {
+                        "playwright_locator": 'page.locator(".unknown")',
+                        "selected": True,
+                    }
+                ],
+                "validation": {"status": "ok"},
+            },
+        )
+
+        self.assertEqual(len(self.session.recording_diagnostics), 1)
+
+        deleted = await self.manager.delete_step(self.session.id, 0)
+
+        self.assertTrue(deleted)
+        self.assertEqual(len(self.session.recorded_actions), 0)
+        self.assertEqual(len(self.session.recording_diagnostics), 0)
+
+    async def test_fill_merge_rebuilds_recorded_action_value(self):
+        await self.manager.add_step(
+            self.session.id,
+            {
+                "action": "fill",
+                "target": json.dumps({"method": "role", "role": "textbox", "name": "Search"}),
+                "description": '输入 "a" 到 textbox("Search")',
+                "value": "a",
+                "source": "record",
+                "validation": {"status": "ok"},
+                "sequence": 1,
+                "event_timestamp_ms": 1000,
+                "tab_id": "tab-1",
+            },
+        )
+
+        merged_step = await self.manager.add_step(
+            self.session.id,
+            {
+                "action": "fill",
+                "target": json.dumps({"method": "role", "role": "textbox", "name": "Search"}),
+                "description": '输入 "abc" 到 textbox("Search")',
+                "value": "abc",
+                "source": "record",
+                "validation": {"status": "ok"},
+                "sequence": 2,
+                "event_timestamp_ms": 1001,
+                "tab_id": "tab-1",
+            },
+        )
+
+        self.assertEqual(merged_step.value, "abc")
+        self.assertEqual(len(self.session.recorded_actions), 1)
+        self.assertEqual(self.session.recorded_actions[0].value, "abc")
+
     async def test_create_session_uses_https_ignoring_context(self):
         fake_browser = _FakeBrowser()
 

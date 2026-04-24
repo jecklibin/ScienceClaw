@@ -29,6 +29,11 @@ import {
   isTerminalScreencastClose,
   shouldShowScreencastReconnectNotice,
 } from '@/utils/screencastReconnect';
+import {
+  getManualRecordingDiagnostics,
+  mapRpaConfigureDisplaySteps,
+  type RpaRecordingDiagnosticItem,
+} from '@/utils/rpaConfigureTimeline';
 
 const router = useRouter();
 const route = useRoute();
@@ -77,6 +82,7 @@ const testOutput = ref('');
 const testLogs = ref<string[]>([]);
 const generatedScript = ref('');
 const recordedSteps = ref<any[]>([]);
+const recordingDiagnostics = ref<RpaRecordingDiagnosticItem[]>([]);
 const saving = ref(false);
 const saved = ref(false);
 const showScript = ref(false);
@@ -164,7 +170,9 @@ const loadSessionDiagnostics = async () => {
   if (!sessionId.value) return;
   try {
     const resp = await apiClient.get(`/rpa/session/${sessionId.value}`);
-    recordedSteps.value = resp.data.session?.steps || [];
+    const session = resp.data.session || {};
+    recordedSteps.value = mapRpaConfigureDisplaySteps(session);
+    recordingDiagnostics.value = getManualRecordingDiagnostics(session);
   } catch (err) {
     console.error('[TestPage] Failed to load session diagnostics:', err);
   }
@@ -345,6 +353,14 @@ const runTest = async () => {
     return;
   }
 
+  if (recordingDiagnostics.value.length > 0) {
+    error.value = `还有 ${recordingDiagnostics.value.length} 个待修复步骤，修复后才能开始测试`;
+    testLogs.value = [`错误: 还有 ${recordingDiagnostics.value.length} 个待修复步骤，修复后才能开始测试`];
+    testDone.value = true;
+    testSuccess.value = false;
+    return;
+  }
+
   testing.value = true;
   testDone.value = false;
   testSuccess.value = false;
@@ -463,8 +479,11 @@ const saveSkill = async () => {
 };
 
 onMounted(() => {
-  loadSessionDiagnostics();
-  runTest();
+  loadSessionDiagnostics().then(() => {
+    if (!recordingDiagnostics.value.length) {
+      runTest();
+    }
+  });
 });
 
 onBeforeUnmount(() => {
@@ -518,6 +537,14 @@ onBeforeUnmount(() => {
           <span class="rounded-md bg-[#c384ff]/20 px-2 py-1 text-[10px] font-bold text-[#831bd7]">
             {{ recordedSteps.length }} 步
           </span>
+        </div>
+
+        <div
+          v-if="recordingDiagnostics.length"
+          class="mb-4 rounded-xl border border-rose-200 dark:border-rose-900/60 bg-rose-50/80 dark:bg-rose-950/20 p-3 text-xs text-rose-700 dark:text-rose-300"
+        >
+          <p class="font-semibold">还有 {{ recordingDiagnostics.length }} 个待修复步骤</p>
+          <p class="mt-1">请先回到配置页修复或删除这些步骤，然后再开始测试。</p>
         </div>
 
         <div class="space-y-4">
@@ -750,7 +777,7 @@ onBeforeUnmount(() => {
           >
             <button
               class="flex w-full items-center justify-center gap-2 rounded-xl border border-gray-300 dark:border-gray-600 bg-white dark:bg-[#272728] px-4 py-2.5 text-sm font-medium transition-colors hover:bg-gray-50 dark:hover:bg-[#444345] disabled:opacity-50"
-              :disabled="testing"
+              :disabled="testing || recordingDiagnostics.length > 0"
               @click="runTest"
             >
               <RotateCcw :size="15" />

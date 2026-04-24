@@ -73,9 +73,19 @@ class PromoteLocatorRequest(BaseModel):
 
 def _generate_session_script(session, params: Dict[str, Any], *, test_mode: bool = False) -> str:
     if getattr(session, "recorded_actions", None):
-        derived_traces = [recorded_action_to_trace(action) for action in session.recorded_actions]
+        derived_manual_traces = {
+            trace.trace_id: trace
+            for trace in (recorded_action_to_trace(action) for action in session.recorded_actions)
+        }
+        traces_for_compile = []
+        for trace in getattr(session, "traces", None) or []:
+            if trace.source == "manual" and trace.trace_id in derived_manual_traces:
+                traces_for_compile.append(derived_manual_traces.pop(trace.trace_id))
+            else:
+                traces_for_compile.append(trace)
+        traces_for_compile.extend(derived_manual_traces.values())
         return trace_compiler.generate_script(
-            derived_traces,
+            traces_for_compile,
             params,
             is_local=(settings.storage_backend == "local"),
             test_mode=test_mode,

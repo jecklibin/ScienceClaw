@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -59,13 +60,31 @@ def normalize_manual_candidate(candidate: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
+def _coerce_locator_payload(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
 def resolve_canonical_target(*, target: Any, locator_candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
-    normalized_target = normalize_locator(target if isinstance(target, dict) else {})
+    normalized_target = normalize_locator(_coerce_locator_payload(target))
     if normalized_target:
         return normalized_target
 
-    for candidate in locator_candidates:
-        locator = normalize_locator(candidate.get("locator") if "locator" in candidate else candidate)
+    selected_candidate = next(
+        (candidate for candidate in locator_candidates if candidate.get("selected") is True),
+        locator_candidates[0] if locator_candidates else None,
+    )
+    if isinstance(selected_candidate, dict):
+        locator = normalize_locator(
+            selected_candidate.get("locator") if "locator" in selected_candidate else selected_candidate
+        )
         if locator:
             return locator
     return {}
@@ -73,6 +92,7 @@ def resolve_canonical_target(*, target: Any, locator_candidates: List[Dict[str, 
 
 def build_manual_recording_outcome(
     *,
+    step_id: str = "",
     action: str,
     description: str,
     target: Any,
@@ -95,7 +115,7 @@ def build_manual_recording_outcome(
     ]
     normalized_validation = dict(validation or {})
     canonical_target = resolve_canonical_target(
-        target=target if isinstance(target, dict) else {},
+        target=target,
         locator_candidates=normalized_candidates,
     )
 
@@ -103,6 +123,7 @@ def build_manual_recording_outcome(
         return ManualRecordingOutcome(
             accepted_action=None,
             diagnostic=ManualRecordingDiagnostic(
+                related_step_id=step_id,
                 related_action_kind=action_kind,
                 failure_reason="canonical_target_missing",
                 raw_candidates=normalized_candidates,
@@ -112,6 +133,7 @@ def build_manual_recording_outcome(
         )
 
     accepted_action = ManualRecordedAction(
+        step_id=step_id,
         action_kind=action_kind,
         description=description,
         target=canonical_target,

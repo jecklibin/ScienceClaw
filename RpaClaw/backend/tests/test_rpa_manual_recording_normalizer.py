@@ -54,3 +54,38 @@ def test_build_outcome_routes_missing_canonical_target_to_diagnostic():
     assert outcome.accepted_action is None
     assert outcome.diagnostic is not None
     assert outcome.diagnostic.failure_reason == "canonical_target_missing"
+
+
+def test_build_outcome_does_not_accept_unselected_canonical_candidate():
+    outcome = build_manual_recording_outcome(
+        action="click",
+        description="点击 None",
+        target="",
+        locator_candidates=[
+            {"playwright_locator": 'page.locator(".mystery")', "selected": True},
+            {
+                "locator": {"method": "role", "role": "textbox", "name": "Search"},
+                "selected": False,
+            },
+        ],
+        validation={"status": "ok"},
+    )
+    assert outcome.accepted_action is None
+    assert outcome.diagnostic is not None
+
+
+def test_build_outcome_accepts_json_encoded_target():
+    outcome = build_manual_recording_outcome(
+        action="fill",
+        description='输入 "abc" 到 textbox("Search")',
+        target='{"method":"role","role":"textbox","name":"Search"}',
+        locator_candidates=[],
+        validation={"status": "ok"},
+        value="abc",
+    )
+    assert outcome.accepted_action is not None
+    assert outcome.accepted_action.target == {
+        "method": "role",
+        "role": "textbox",
+        "name": "Search",
+    }

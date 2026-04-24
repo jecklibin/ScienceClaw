@@ -23,6 +23,10 @@ import {
   getRpaAgentProgressForEvent,
   type RpaAgentMessageStatus,
 } from '@/utils/rpaAgentProgress';
+import {
+  getManualRecordingDiagnostics,
+  mapRpaConfigureDisplaySteps,
+} from '@/utils/rpaConfigureTimeline';
 
 const router = useRouter();
 const route = useRoute();
@@ -66,6 +70,7 @@ const steps = ref<any[]>([
   { id: '0', title: '初始化环境', description: '正在配置沙箱录制环境...', status: 'active' }
 ]);
 const acceptedTraces = ref<any[]>([]);
+const recordingDiagnostics = ref<any[]>([]);
 
 const parseLocator = (raw: unknown) => {
   if (!raw) return null;
@@ -172,10 +177,30 @@ const mapServerTraces = (serverTraces: any[]) => ([
   }))
 ]);
 
-const refreshTimeline = (serverSteps: any[] = [], serverTraces: any[] = []) => {
-  if (serverTraces.length > 0) {
-    acceptedTraces.value = serverTraces;
-    steps.value = mapServerTraces(serverTraces);
+const mapConfigureTimelineSteps = (session: any) => ([
+  { id: '0', title: 'Environment ready', description: 'Playwright browser is ready', status: 'completed', deletable: false },
+  ...mapRpaConfigureDisplaySteps(session).map((step: any, index: number) => ({
+    id: String(index + 1),
+    title: step.description || step.action,
+    description: step.description || step.action,
+    status: 'completed',
+    source: step.source || 'record',
+    sensitive: step.sensitive || false,
+    deletable: step.source !== 'ai',
+    locatorSummary: formatLocator(step.target),
+    frameSummary: formatFramePath(step.frame_path),
+    validationStatus: step.validation?.status || '',
+    validationDetails: step.validation?.details || '',
+  })),
+]);
+
+const refreshTimeline = (session: any) => {
+  const serverSteps = Array.isArray(session?.steps) ? session.steps : [];
+  const serverTraces = Array.isArray(session?.traces) ? session.traces : [];
+  acceptedTraces.value = serverTraces;
+  recordingDiagnostics.value = getManualRecordingDiagnostics(session);
+  if ((Array.isArray(session?.recorded_actions) && session.recorded_actions.length > 0) || serverTraces.length > 0) {
+    steps.value = mapConfigureTimelineSteps(session);
     return;
   }
   if (serverSteps.length > 0) {
@@ -283,9 +308,7 @@ const startPollingSteps = () => {
     if (!sessionId.value) return;
     try {
       const resp = await apiClient.get(`/rpa/session/${sessionId.value}`);
-      const serverSteps = resp.data.session?.steps || [];
-      const serverTraces = resp.data.session?.traces || [];
-      refreshTimeline(serverSteps, serverTraces);
+      refreshTimeline(resp.data.session || {});
     } catch (err) {
       // Ignore polling errors
     }
@@ -634,9 +657,7 @@ const deleteStep = async (stepIndex: number) => {
   try {
     await apiClient.delete(`/rpa/session/${sessionId.value}/step/${stepIndex}`);
     const resp = await apiClient.get(`/rpa/session/${sessionId.value}`);
-    const serverSteps = resp.data.session?.steps || [];
-    const serverTraces = resp.data.session?.traces || [];
-    refreshTimeline(serverSteps, serverTraces);
+    refreshTimeline(resp.data.session || {});
   } catch (err) {
     console.error('Failed to delete step:', err);
   }
@@ -864,6 +885,14 @@ const sendMessage = async () => {
         <div class="flex items-center justify-between mb-8">
           <h2 class="text-gray-900 dark:text-gray-100 font-extrabold text-lg">录制步骤</h2>
           <span class="text-[#831bd7] text-[10px] font-bold bg-[#c384ff]/20 px-2 py-1 rounded-md">{{ steps.length }} 步</span>
+        </div>
+
+        <div
+          v-if="recordingDiagnostics.length"
+          class="mb-4 rounded-xl border border-rose-200 dark:border-rose-900/60 bg-rose-50/80 dark:bg-rose-950/20 p-3 text-xs text-rose-700 dark:text-rose-300"
+        >
+          <p class="font-semibold">当前有 {{ recordingDiagnostics.length }} 个待修复步骤</p>
+          <p class="mt-1">这些步骤不会进入 accepted timeline，完成录制后需要在配置页修复或删除。</p>
         </div>
 
         <div class="space-y-4">
