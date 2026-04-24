@@ -3,6 +3,7 @@ import importlib
 import sys
 import unittest
 import json
+import asyncio
 from types import SimpleNamespace
 from pathlib import Path
 from datetime import datetime
@@ -22,6 +23,7 @@ class _FakeContext:
         self.exposed_bindings = []
         self.init_scripts = []
         self.pages = []
+        self.closed = False
 
     def on(self, event_name, handler):
         self.handlers[event_name] = handler
@@ -36,6 +38,9 @@ class _FakeContext:
         page = _FakePage("about:blank", "Blank", context=self)
         self.pages.append(page)
         return page
+
+    async def close(self):
+        self.closed = True
 
 
 class _FakeBrowser:
@@ -958,6 +963,17 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("addListener('mouseover'", js)
         self.assertIn("emitLogicalAction('hover'", js)
 
+    def test_action_runtime_hover_targets_allow_interactive_links_and_buttons(self):
+        js = MANAGER_MODULE.PLAYWRIGHT_RECORDER_ACTIONS_PATH.read_text(encoding="utf-8")
+        self.assertIn("if (target.nodeName === 'BUTTON' || target.nodeName === 'A') return target;", js)
+        self.assertIn("if (role === 'button' || role === 'link') return target;", js)
+
+    def test_capture_runtime_hover_trigger_signals_are_not_generic_links(self):
+        js = MANAGER_MODULE.CAPTURE_SCRIPT_PATH.read_text(encoding="utf-8")
+        self.assertIn("function hasMenuPopupNearby", js)
+        self.assertNotIn("if (role === 'button' || role === 'link') return true;", js)
+        self.assertNotIn("return el.tagName === 'BUTTON' || el.tagName === 'A';", js)
+
     def test_action_runtime_preserves_label_clicks_for_associated_checkbox_targets(self):
         js = MANAGER_MODULE.PLAYWRIGHT_RECORDER_ACTIONS_PATH.read_text(encoding="utf-8")
         click_block = js.split("addListener('click'", 1)[1].split("addListener('input'", 1)[0]
@@ -1345,6 +1361,117 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([step.action for step in self.session.steps], ["click"])
         self.assertEqual([action.action_kind.value for action in self.session.recorded_actions], ["click"])
+
+    async def test_intervening_menu_link_hover_does_not_replace_trigger_hover(self):
+        page = _FakePage("https://example.com", "Example")
+        tab_id = await self.manager.register_page(self.session.id, page, make_active=True)
+
+        await self.manager._handle_event(
+            self.session.id,
+            {
+                "action": "hover",
+                "tab_id": tab_id,
+                "tag": "BUTTON",
+                "timestamp": 1000,
+                "sequence": 10,
+                "locator": {"method": "role", "role": "button", "name": "Resources"},
+                "signals": {"hover": {"is_menu_trigger_candidate": True}},
+            },
+        )
+
+        await self.manager._handle_event(
+            self.session.id,
+            {
+                "action": "hover",
+                "tab_id": tab_id,
+                "tag": "A",
+                "timestamp": 1100,
+                "sequence": 11,
+                "locator": {"method": "role", "role": "link", "name": "Customer stories"},
+                "signals": {"menu_context": {"is_menu_item": True}},
+            },
+        )
+
+        await self.manager._handle_event(
+            self.session.id,
+            {
+                "action": "click",
+                "tab_id": tab_id,
+                "tag": "A",
+                "timestamp": 1200,
+                "sequence": 12,
+                "locator": {"method": "role", "role": "link", "name": "Customer stories"},
+                "signals": {"menu_context": {"is_menu_item": True}},
+            },
+        )
+
+        self.assertEqual([step.action for step in self.session.steps], ["hover", "click"])
+        self.assertEqual(self.session.steps[0].description, '悬停到 button("Resources")')
+        self.assertEqual(self.session.steps[1].description, '点击 link("Customer stories")')
+
+    async def test_generic_hover_can_be_promoted_for_menu_item_click_when_trigger_signal_missing(self):
+        page = _FakePage("https://example.com", "Example")
+        tab_id = await self.manager.register_page(self.session.id, page, make_active=True)
+
+        await self.manager._handle_event(
+            self.session.id,
+            {
+                "action": "hover",
+                "tab_id": tab_id,
+                "tag": "A",
+                "timestamp": 1000,
+                "sequence": 10,
+                "locator": {"method": "role", "role": "link", "name": "Open Source"},
+            },
+        )
+
+        await self.manager._handle_event(
+            self.session.id,
+            {
+                "action": "click",
+                "tab_id": tab_id,
+                "tag": "A",
+                "timestamp": 1200,
+                "sequence": 11,
+                "locator": {"method": "role", "role": "link", "name": "Security Lab"},
+                "signals": {"menu_context": {"is_menu_item": True}},
+            },
+        )
+
+        self.assertEqual([step.action for step in self.session.steps], ["hover", "click"])
+        self.assertEqual(self.session.steps[0].description, '悬停到 link("Open Source")')
+        self.assertEqual(self.session.steps[1].description, '点击 link("Security Lab")')
+
+    async def test_stop_session_waits_for_pending_events_before_marking_stopped(self):
+        context = _FakeContext()
+        self.manager.attach_context(self.session.id, context)
+
+        self.manager._mark_pending_event_started(self.session.id)
+
+        async def delayed_click():
+            try:
+                await asyncio.sleep(0.05)
+                await self.manager._handle_event(
+                    self.session.id,
+                    {
+                        "action": "click",
+                        "tag": "BUTTON",
+                        "timestamp": 1234,
+                        "sequence": 1,
+                        "locator": {"method": "role", "role": "button", "name": "Search"},
+                    },
+                )
+            finally:
+                self.manager._mark_pending_event_finished(self.session.id)
+
+        task = asyncio.create_task(delayed_click())
+
+        await self.manager.stop_session(self.session.id)
+        await task
+
+        self.assertEqual(self.session.status, "stopped")
+        self.assertEqual([step.action for step in self.session.steps], ["click"])
+        self.assertEqual([trace.action for trace in self.session.traces], ["click"])
 
     async def test_handle_event_orders_steps_by_sequence_when_events_arrive_out_of_order(self):
         page = _FakePage("https://example.com", "Example")

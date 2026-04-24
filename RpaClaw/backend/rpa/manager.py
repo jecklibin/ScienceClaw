@@ -106,7 +106,9 @@ class RPASessionManager:
         self._tab_meta: Dict[str, Dict[str, RPATab]] = {}
         self._page_tab_ids: Dict[str, Dict[int, str]] = {}
         self._bridged_context_ids: Dict[str, set[int]] = {}
-        self._pending_hover_candidates: Dict[str, Dict[str, Any]] = {}
+        self._pending_hover_candidates: Dict[str, List[Dict[str, Any]]] = {}
+        self._pending_event_counts: Dict[str, int] = {}
+        self._pending_event_idle: Dict[str, asyncio.Event] = {}
 
     def attach_context(self, session_id: str, context: BrowserContext):
         self._contexts[session_id] = context
@@ -115,6 +117,10 @@ class RPASessionManager:
         self._tab_meta[session_id] = {}
         self._page_tab_ids[session_id] = {}
         self._bridged_context_ids[session_id] = set()
+        self._pending_event_counts[session_id] = 0
+        idle_event = asyncio.Event()
+        idle_event.set()
+        self._pending_event_idle[session_id] = idle_event
 
         session = self.sessions.get(session_id)
         if session:
@@ -132,6 +138,8 @@ class RPASessionManager:
         self._tab_meta.pop(session_id, None)
         self._page_tab_ids.pop(session_id, None)
         self._bridged_context_ids.pop(session_id, None)
+        self._pending_event_counts.pop(session_id, None)
+        self._pending_event_idle.pop(session_id, None)
 
         session = self.sessions.get(session_id)
         if session:
@@ -502,7 +510,7 @@ class RPASessionManager:
                         normalized_signals["reported_frame_path"] = list(reported_frame_path)
                         evt["signals"] = normalized_signals
                     evt["frame_path"] = await self._build_frame_path(source_frame)
-                await self._handle_event(session_id, evt)
+                await self._run_tracked_event(session_id, evt)
             except Exception as e:
                 logger.error(f"[RPA] binding emit error: {e}")
 
@@ -545,7 +553,7 @@ class RPASessionManager:
                     "timestamp": int(datetime.now().timestamp() * 1000),
                     "tab_id": tab_id,
                 }
-                asyncio.create_task(self._handle_event(session_id, evt))
+                asyncio.create_task(self._run_tracked_event(session_id, evt))
 
         page.on("framenavigated", on_navigated)
 
@@ -589,7 +597,7 @@ class RPASessionManager:
                 "timestamp": int(datetime.now().timestamp() * 1000),
                 "tab_id": tab_id,
             }
-            await self._handle_event(session_id, evt)
+            await self._run_tracked_event(session_id, evt)
 
         page.on("download", on_download)
 
@@ -606,6 +614,7 @@ class RPASessionManager:
             return ""
 
     async def stop_session(self, session_id: str):
+        await self.wait_for_pending_events(session_id)
         if session_id in self.sessions:
             self.sessions[session_id].status = "stopped"
 
@@ -992,8 +1001,85 @@ class RPASessionManager:
             return active_page
         return self._pages.get(session_id)
 
-    def _clear_pending_hover_candidate(self, session_id: str) -> None:
+    def _ensure_pending_event_idle(self, session_id: str) -> asyncio.Event:
+        idle_event = self._pending_event_idle.get(session_id)
+        if idle_event is None:
+            idle_event = asyncio.Event()
+            idle_event.set()
+            self._pending_event_idle[session_id] = idle_event
+        self._pending_event_counts.setdefault(session_id, 0)
+        return idle_event
+
+    def _mark_pending_event_started(self, session_id: str) -> None:
+        idle_event = self._ensure_pending_event_idle(session_id)
+        self._pending_event_counts[session_id] = self._pending_event_counts.get(session_id, 0) + 1
+        idle_event.clear()
+
+    def _mark_pending_event_finished(self, session_id: str) -> None:
+        if session_id not in self._pending_event_counts:
+            return
+        remaining = max(0, self._pending_event_counts.get(session_id, 0) - 1)
+        self._pending_event_counts[session_id] = remaining
+        if remaining == 0:
+            self._ensure_pending_event_idle(session_id).set()
+
+    async def _run_tracked_event(self, session_id: str, evt: Dict[str, Any]) -> None:
+        self._mark_pending_event_started(session_id)
+        try:
+            await self._handle_event(session_id, evt)
+        finally:
+            self._mark_pending_event_finished(session_id)
+
+    async def wait_for_pending_events(self, session_id: str, timeout_ms: int = 1500) -> bool:
+        idle_event = self._ensure_pending_event_idle(session_id)
+        if self._pending_event_counts.get(session_id, 0) <= 0:
+            return True
+        try:
+            await asyncio.wait_for(idle_event.wait(), timeout=timeout_ms / 1000)
+            return True
+        except asyncio.TimeoutError:
+            logger.debug("[RPA] Timed out waiting for pending events for session %s", session_id)
+            return False
+
+    def _clear_pending_hover_candidates(self, session_id: str) -> None:
         self._pending_hover_candidates.pop(session_id, None)
+
+    def _trim_pending_hover_candidates(self, session_id: str, reference_ts: Optional[int] = None) -> None:
+        candidates = self._pending_hover_candidates.get(session_id)
+        if not candidates:
+            return
+        if reference_ts is None:
+            reference_ts = max(int(time.time() * 1000), 0)
+        trimmed = []
+        for candidate in candidates:
+            candidate_ts = int(candidate.get("timestamp") or 0)
+            if candidate_ts <= 0:
+                continue
+            if reference_ts >= candidate_ts and reference_ts - candidate_ts <= HOVER_PROMOTION_WINDOW_MS:
+                trimmed.append(candidate)
+        if trimmed:
+            self._pending_hover_candidates[session_id] = trimmed[-8:]
+        else:
+            self._pending_hover_candidates.pop(session_id, None)
+
+    def _queue_hover_candidate(self, session_id: str, evt: Dict[str, Any]) -> None:
+        locator_signature = self._event_locator_signature(evt)
+        if not locator_signature:
+            return
+        self._trim_pending_hover_candidates(session_id, int(evt.get("timestamp") or 0))
+        queue = list(self._pending_hover_candidates.get(session_id, []))
+        if queue:
+            last = queue[-1]
+            if (
+                self._event_locator_signature(last) == locator_signature
+                and (last.get("tab_id") or "") == (evt.get("tab_id") or "")
+                and list(last.get("frame_path") or []) == list(evt.get("frame_path") or [])
+            ):
+                queue[-1] = dict(evt)
+                self._pending_hover_candidates[session_id] = queue
+                return
+        queue.append(dict(evt))
+        self._pending_hover_candidates[session_id] = queue[-8:]
 
     @staticmethod
     def _event_locator_signature(evt: Dict[str, Any]) -> str:
@@ -1011,12 +1097,7 @@ class RPASessionManager:
             return False
         signals = evt.get("signals")
         hover_signal = signals.get("hover") if isinstance(signals, dict) else None
-        if isinstance(hover_signal, dict) and hover_signal.get("is_menu_trigger_candidate") is True:
-            return True
-        locator = evt.get("locator")
-        if isinstance(locator, dict) and locator.get("method") == "role":
-            return str(locator.get("role") or "").lower() in {"button", "link"}
-        return False
+        return isinstance(hover_signal, dict) and hover_signal.get("is_menu_trigger_candidate") is True
 
     @classmethod
     def _is_menu_item_click(cls, evt: Dict[str, Any]) -> bool:
@@ -1034,34 +1115,40 @@ class RPASessionManager:
         return False
 
     def _consume_promotable_hover_candidate(self, session_id: str, click_evt: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        candidate = self._pending_hover_candidates.get(session_id)
-        if not candidate:
+        candidates = list(self._pending_hover_candidates.get(session_id, []))
+        if not candidates:
+            return None
+        self._trim_pending_hover_candidates(session_id, int(click_evt.get("timestamp") or 0))
+        candidates = list(self._pending_hover_candidates.get(session_id, []))
+        if not candidates:
             return None
         if not self._is_menu_item_click(click_evt):
-            self._clear_pending_hover_candidate(session_id)
+            self._clear_pending_hover_candidates(session_id)
             return None
 
-        candidate_ts = int(candidate.get("timestamp") or 0)
         click_ts = int(click_evt.get("timestamp") or 0)
-        if candidate_ts <= 0 or click_ts <= 0 or click_ts < candidate_ts:
-            self._clear_pending_hover_candidate(session_id)
-            return None
-        if click_ts - candidate_ts > HOVER_PROMOTION_WINDOW_MS:
-            self._clear_pending_hover_candidate(session_id)
+        eligible: List[Dict[str, Any]] = []
+        for candidate in candidates:
+            candidate_ts = int(candidate.get("timestamp") or 0)
+            if candidate_ts <= 0 or click_ts <= 0 or click_ts < candidate_ts:
+                continue
+            if click_ts - candidate_ts > HOVER_PROMOTION_WINDOW_MS:
+                continue
+            if (candidate.get("tab_id") or "") != (click_evt.get("tab_id") or ""):
+                continue
+            if list(candidate.get("frame_path") or []) != list(click_evt.get("frame_path") or []):
+                continue
+            if self._event_locator_signature(candidate) == self._event_locator_signature(click_evt):
+                continue
+            eligible.append(candidate)
+
+        self._clear_pending_hover_candidates(session_id)
+        if not eligible:
             return None
 
-        if (candidate.get("tab_id") or "") != (click_evt.get("tab_id") or ""):
-            self._clear_pending_hover_candidate(session_id)
-            return None
-        if list(candidate.get("frame_path") or []) != list(click_evt.get("frame_path") or []):
-            self._clear_pending_hover_candidate(session_id)
-            return None
-        if self._event_locator_signature(candidate) == self._event_locator_signature(click_evt):
-            self._clear_pending_hover_candidate(session_id)
-            return None
-
-        self._clear_pending_hover_candidate(session_id)
-        return candidate
+        strong_candidates = [candidate for candidate in eligible if self._is_menu_trigger_hover_candidate(candidate)]
+        pool = strong_candidates or eligible
+        return max(pool, key=lambda candidate: int(candidate.get("timestamp") or 0))
 
     @staticmethod
     def _step_data_from_event(evt: Dict[str, Any]) -> Dict[str, Any]:
@@ -1107,7 +1194,7 @@ class RPASessionManager:
                 await self.activate_tab(session_id, event_tab_id, source="event")
 
         if evt.get("action") == "navigate":
-            self._clear_pending_hover_candidate(session_id)
+            self._clear_pending_hover_candidates(session_id)
             nav_ts = evt.get("timestamp", 0)
             nav_sequence = evt.get("sequence")
             nav_tab_id = evt.get("tab_id")
@@ -1183,10 +1270,7 @@ class RPASessionManager:
         self._normalize_event_locator_payload(evt)
 
         if evt.get("action") == "hover":
-            if self._is_menu_trigger_hover_candidate(evt):
-                self._pending_hover_candidates[session_id] = dict(evt)
-            else:
-                self._clear_pending_hover_candidate(session_id)
+            self._queue_hover_candidate(session_id, evt)
             return
 
         if evt.get("action") == "click":
@@ -1196,7 +1280,7 @@ class RPASessionManager:
                 await self.add_step(session_id, hover_step)
                 logger.debug(f"[RPA] Step: {hover_step['description'][:60]}")
         else:
-            self._clear_pending_hover_candidate(session_id)
+            self._clear_pending_hover_candidates(session_id)
 
         step_data = self._step_data_from_event(evt)
         await self.add_step(session_id, step_data)

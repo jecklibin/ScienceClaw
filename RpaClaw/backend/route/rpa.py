@@ -447,6 +447,7 @@ async def generate_script(
     request: GenerateRequest = GenerateRequest(),
     current_user: User = Depends(get_current_user),
 ):
+    await rpa_manager.wait_for_pending_events(session_id)
     session = await rpa_manager.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -462,6 +463,7 @@ async def test_script(
     request: GenerateRequest = GenerateRequest(),
     current_user: User = Depends(get_current_user),
 ):
+    await rpa_manager.wait_for_pending_events(session_id)
     session = await rpa_manager.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -566,6 +568,7 @@ async def save_skill(
     request: SaveSkillRequest,
     current_user: User = Depends(get_current_user),
 ):
+    await rpa_manager.wait_for_pending_events(session_id)
     session = await rpa_manager.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
