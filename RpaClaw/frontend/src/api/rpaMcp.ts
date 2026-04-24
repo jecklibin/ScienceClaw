@@ -30,6 +30,17 @@ export interface RpaMcpExecutionResult {
   error?: Record<string, unknown> | null;
 }
 
+export interface RpaMcpExecutionPlan {
+  tool_id: string;
+  generated_at: string;
+  requires_cookies: boolean;
+  compiled_steps: Array<Record<string, unknown>>;
+  compiled_script: string;
+  input_schema: JsonSchemaObject;
+  output_schema: JsonSchemaObject;
+  source_hash: string;
+}
+
 export interface RpaMcpPreview {
   id?: string;
   name: string;
@@ -103,6 +114,11 @@ export async function listRpaMcpTools() {
 
 export async function getRpaMcpTool(toolId: string) {
   const response = await apiClient.get<ApiResponse<RpaMcpToolItem>>(`/rpa-mcp/tools/${encodeURIComponent(toolId)}`);
+  return response.data.data;
+}
+
+export async function getRpaMcpExecutionPlan(toolId: string) {
+  const response = await apiClient.get<ApiResponse<RpaMcpExecutionPlan>>(`/rpa-mcp/tools/${encodeURIComponent(toolId)}/execution-plan`);
   return response.data.data;
 }
 

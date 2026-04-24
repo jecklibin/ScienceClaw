@@ -1,21 +1,24 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useRoute, useRouter } from 'vue-router';
 import { ArrowLeft, Beaker, ChevronDown, ChevronUp, Save, Shield, Wand2 } from 'lucide-vue-next';
 
 import {
   createRpaMcpTool,
+  getRpaMcpExecutionPlan,
   getRpaMcpTool,
   previewRpaMcpTool,
   testPreviewRpaMcpTool,
   testRpaMcpTool,
   updateRpaMcpTool,
+  type RpaMcpExecutionPlan,
   type JsonSchemaObject,
   type RpaMcpExecutionResult,
   type RpaMcpPreview,
 } from '@/api/rpaMcp';
 import { apiClient } from '@/api/client';
+import ExecutionScriptPanel from '@/components/resourceDetail/ExecutionScriptPanel.vue';
 import {
   buildRpaRecorderLocation,
   buildPreviewDraftSignature,
@@ -125,6 +128,10 @@ const savedToolId = computed(() => typeof route.params.toolId === 'string' ? rou
 const editorMode = computed(() => typeof route.query.mode === 'string' ? route.query.mode : 'edit');
 const isExistingTool = computed(() => Boolean(savedToolId.value));
 const isViewMode = computed(() => isExistingTool.value && editorMode.value === 'view');
+const viewActiveTab = ref<'overview' | 'files'>('overview');
+const executionPlan = ref<RpaMcpExecutionPlan | null>(null);
+const executionPlanLoading = ref(false);
+const executionPlanError = ref<string | null>(null);
 const canTuneRecordedSteps = computed(() => Boolean(sessionId.value) && !isExistingTool.value && !isViewMode.value);
 const formatJsonBlock = (value: unknown) => JSON.stringify(value ?? {}, null, 2);
 
@@ -587,6 +594,19 @@ const pageDescription = computed(() => {
     : t('MCP Editor Edit MCP tool metadata, schemas, preview test state, and recorded steps.');
 });
 
+const loadExecutionPlan = async () => {
+  if (!savedToolId.value || executionPlan.value || executionPlanLoading.value) return;
+  executionPlanLoading.value = true;
+  executionPlanError.value = null;
+  try {
+    executionPlan.value = await getRpaMcpExecutionPlan(savedToolId.value);
+  } catch (error: any) {
+    executionPlanError.value = error?.message || t('Failed to load file content');
+  } finally {
+    executionPlanLoading.value = false;
+  }
+};
+
 const isRemovedStep = (index: number) => canHighlightRemovedSteps.value && removedStepIndexSet.value.has(index);
 
 const loadRecordedSession = async (sourceSessionId?: string, options: { silent?: boolean } = {}) => {
@@ -857,6 +877,12 @@ onMounted(async () => {
   }
   await Promise.all([loadRecordedSession(), loadPreview()]);
 });
+
+watch(viewActiveTab, async (tab) => {
+  if (isViewMode.value && tab === 'files') {
+    await loadExecutionPlan();
+  }
+});
 </script>
 
 <template>
@@ -887,7 +913,59 @@ onMounted(async () => {
         </button>
       </div>
 
-      <div class="grid gap-6 xl:grid-cols-[minmax(0,1.02fr)_minmax(360px,0.98fr)]">
+      <div v-if="isViewMode" class="space-y-6">
+        <div class="inline-flex rounded-full border border-slate-200 bg-white p-1 shadow-sm dark:border-white/10 dark:bg-white/[0.04]">
+          <button
+            class="rounded-full px-4 py-2 text-sm font-semibold transition-colors"
+            :class="viewActiveTab === 'overview' ? 'bg-slate-900 text-white dark:bg-white dark:text-slate-900' : 'text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'"
+            @click="viewActiveTab = 'overview'"
+          >
+            {{ t('Overview') }}
+          </button>
+          <button
+            class="rounded-full px-4 py-2 text-sm font-semibold transition-colors"
+            :class="viewActiveTab === 'files' ? 'bg-slate-900 text-white dark:bg-white dark:text-slate-900' : 'text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'"
+            @click="viewActiveTab = 'files'"
+          >
+            {{ t('Files') }}
+          </button>
+        </div>
+        <div v-if="loading" class="rounded-2xl border border-dashed border-slate-300 bg-white/80 p-8 text-sm text-slate-500 dark:border-white/10 dark:bg-white/[0.04]">
+          {{ t('MCP Editor Loading preview...') }}
+        </div>
+
+        <template v-else-if="viewActiveTab === 'files' && preview">
+          <div class="space-y-6 overflow-y-auto bg-[#f5f7fb] py-2 dark:bg-transparent">
+            <ExecutionScriptPanel
+              :script="executionPlan?.compiled_script || ''"
+              :loading="executionPlanLoading"
+              :error="executionPlanError"
+              :title="t('Current execution script')"
+              :description="t(`Read-only generated script for the tool's current execution plan.`)"
+              :generated-at="executionPlan?.generated_at || ''"
+            />
+
+            <section class="rounded-3xl border border-slate-200 bg-white/90 p-6 shadow-sm dark:border-white/10 dark:bg-white/[0.04]">
+              <h2 class="text-lg font-black text-slate-900 dark:text-slate-100">{{ t('MCP Editor Input Schema') }}</h2>
+              <pre class="mt-4 overflow-x-auto rounded-2xl bg-[#101115] p-4 text-xs text-slate-100"><code>{{ JSON.stringify(confirmedInputSchema, null, 2) }}</code></pre>
+            </section>
+
+            <section class="rounded-3xl border border-slate-200 bg-white/90 p-6 shadow-sm dark:border-white/10 dark:bg-white/[0.04]">
+              <h2 class="text-lg font-black text-slate-900 dark:text-slate-100">{{ t('MCP Editor Output Schema') }}</h2>
+              <pre class="mt-4 overflow-x-auto rounded-2xl bg-[#101115] p-4 text-xs text-slate-100"><code>{{ JSON.stringify(preview.output_schema || {}, null, 2) }}</code></pre>
+            </section>
+          </div>
+        </template>
+
+        <section v-else-if="viewActiveTab === 'files'" class="rounded-lg border border-dashed border-slate-300 bg-slate-50/70 p-8 dark:border-white/10 dark:bg-white/[0.03]">
+          <h2 class="text-lg font-black">{{ t('MCP Editor Start from an RPA recording') }}</h2>
+          <p class="mt-2 max-w-2xl text-sm leading-6 text-slate-500 dark:text-slate-400">
+            {{ t('MCP Editor Empty state hint') }}
+          </p>
+        </section>
+      </div>
+
+      <div v-if="!isViewMode || viewActiveTab === 'overview'" class="grid gap-6 xl:grid-cols-[minmax(0,1.02fr)_minmax(360px,0.98fr)]">
         <section class="space-y-5 rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-white/10 dark:bg-white/[0.04]">
           <div class="flex items-center gap-3">
             <div class="flex h-10 w-10 items-center justify-center rounded-2xl bg-violet-100 text-violet-700 dark:bg-violet-500/15 dark:text-violet-200">

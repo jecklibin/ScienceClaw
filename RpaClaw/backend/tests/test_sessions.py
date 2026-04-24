@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import unittest
 import tempfile
 import shutil
@@ -323,6 +324,50 @@ class TestSaveToolFromSession(unittest.IsolatedAsyncioTestCase):
         self.assertIn("@tool", saved_tool.read_text(encoding="utf-8"))
         self.assertEqual(response.data["tool_name"], self.tool_name)
         self.assertTrue(response.data["saved"])
+
+
+class TestRecordedSkillDetail(unittest.IsolatedAsyncioTestCase):
+    async def test_recorded_skill_detail_reads_skill_meta_json(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            skill_dir = _Path(temp_dir) / "recorded_skill"
+            skill_dir.mkdir()
+            (skill_dir / "skill.meta.json").write_text(
+                json.dumps({
+                    "version": 1,
+                    "kind": "rpa-recording",
+                    "name": "recorded_skill",
+                    "description": "Recorded flow",
+                    "entry_script": "skill.py",
+                    "generated_at": "2026-04-24T12:00:00+08:00",
+                    "params": {},
+                    "steps": [{"id": "step_1", "action": "goto"}],
+                    "artifacts": ["SKILL.md", "skill.py", "params.json"],
+                }),
+                encoding="utf-8",
+            )
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: recorded_skill\ndescription: Recorded flow\n---",
+                encoding="utf-8",
+            )
+            (skill_dir / "skill.py").write_text("print('ok')\n", encoding="utf-8")
+
+            original_backend = SESSIONS_MODULE.settings.storage_backend
+            original_dir = SESSIONS_MODULE.settings.external_skills_dir
+            SESSIONS_MODULE.settings.storage_backend = "local"
+            SESSIONS_MODULE.settings.external_skills_dir = temp_dir
+            try:
+                response = await SESSIONS_MODULE.get_skill_detail(
+                    "recorded_skill",
+                    SimpleNamespace(id="user-1"),
+                )
+            finally:
+                SESSIONS_MODULE.settings.storage_backend = original_backend
+                SESSIONS_MODULE.settings.external_skills_dir = original_dir
+
+            self.assertEqual(response.data["mode"], "recorded-overview")
+            self.assertEqual(response.data["name"], "recorded_skill")
+            self.assertEqual(response.data["steps"][0]["action"], "goto")
+            self.assertTrue(response.data["can_use_overview"])
 
 
 if __name__ == "__main__":

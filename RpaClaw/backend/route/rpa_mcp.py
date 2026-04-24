@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from backend.config import settings
 from backend.rpa.cdp_connector import get_cdp_connector
+from backend.rpa.execution_plan import build_rpa_mcp_execution_plan
 from backend.rpa.manager import rpa_manager
 from backend.rpa.mcp_converter import RpaMcpConverter
 from backend.rpa.mcp_executor import InvalidCookieError, RpaMcpExecutor
@@ -333,6 +334,14 @@ async def get_rpa_mcp_tool(tool_id: str, current_user: User = Depends(require_us
     if not tool:
         raise HTTPException(status_code=404, detail='RPA MCP tool not found')
     return ApiResponse(data=tool.model_dump(mode='python'))
+
+
+@router.get('/rpa-mcp/tools/{tool_id}/execution-plan', response_model=ApiResponse)
+async def get_rpa_mcp_execution_plan(tool_id: str, current_user: User = Depends(require_user)) -> ApiResponse:
+    tool = await RpaMcpToolRegistry().get_owned(tool_id, str(current_user.id))
+    if not tool:
+        raise HTTPException(status_code=404, detail='RPA MCP tool not found')
+    return ApiResponse(data=build_rpa_mcp_execution_plan(tool))
 
 
 @router.put('/rpa-mcp/tools/{tool_id}', response_model=ApiResponse)

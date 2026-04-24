@@ -776,6 +776,54 @@ def _list_skill_dirs(base_dir: str, builtin: bool = False) -> List[Dict[str, Any
     return skills
 
 
+def _read_recorded_skill_meta(skill_dir: _Path) -> Dict[str, Any] | None:
+    meta_path = skill_dir / "skill.meta.json"
+    if not meta_path.is_file():
+        return None
+    try:
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if payload.get("kind") != "rpa-recording":
+        return None
+    return payload
+
+
+async def _get_skill_files_payload(skill_name: str, current_user: User) -> List[Dict[str, str]]:
+    if settings.storage_backend == "local":
+        skill_dir = _Path(settings.external_skills_dir) / skill_name
+        if not skill_dir.is_dir():
+            raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
+        items = []
+        for file_path in sorted(skill_dir.rglob("*")):
+            if should_skip_file(file_path):
+                continue
+            if file_path.is_file():
+                rel_path = str(file_path.relative_to(skill_dir))
+                items.append({
+                    "name": file_path.name,
+                    "path": rel_path,
+                    "type": "file",
+                })
+        return items
+
+    col = _get_repo("skills")
+    doc = await col.find_one(
+        {"user_id": current_user.id, "name": skill_name},
+        projection={"files": 1}
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
+    return [
+        {
+            "name": fname,
+            "path": fname,
+            "type": "file",
+        }
+        for fname in sorted(doc.get("files", {}).keys())
+    ]
+
+
 class SkillBlockRequest(BaseModel):
     blocked: bool = Field(default=True)
 
@@ -1004,45 +1052,49 @@ async def list_skill_files(
 ) -> ApiResponse:
     """列出某个外置 skill 内部的文件结构。"""
     try:
-        if settings.storage_backend == "local":
-            # List from filesystem
-            skill_dir = _Path(settings.external_skills_dir) / skill_name
-            if not skill_dir.is_dir():
-                raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
-            items = []
-            for file_path in sorted(skill_dir.rglob("*")):
-                # 跳过不需要展示的文件
-                if should_skip_file(file_path):
-                    continue
-                if file_path.is_file():
-                    rel_path = str(file_path.relative_to(skill_dir))
-                    items.append({
-                        "name": file_path.name,
-                        "path": rel_path,
-                        "type": "file",
-                    })
-            return ApiResponse(data=items)
-        else:
-            # List from MongoDB
-            col = _get_repo("skills")
-            doc = await col.find_one(
-                {"user_id": current_user.id, "name": skill_name},
-                projection={"files": 1}
-            )
-            if not doc:
-                raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
-            items = []
-            for fname in sorted(doc.get("files", {}).keys()):
-                items.append({
-                    "name": fname,
-                    "path": fname,
-                    "type": "file",
-                })
-            return ApiResponse(data=items)
+        return ApiResponse(data=await _get_skill_files_payload(skill_name, current_user))
     except HTTPException:
         raise
     except Exception as exc:
         logger.exception("list_skill_files failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/skills/{skill_name}/detail", response_model=ApiResponse)
+async def get_skill_detail(
+    skill_name: str,
+    current_user: User = Depends(require_user),
+) -> ApiResponse:
+    """Return overview data for recorded RPA skills when metadata is available."""
+    try:
+        if settings.storage_backend != "local":
+            return ApiResponse(data={"can_use_overview": False, "mode": "files"})
+
+        skill_dir = _Path(settings.external_skills_dir) / skill_name
+        if not skill_dir.is_dir():
+            raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
+
+        meta = _read_recorded_skill_meta(skill_dir)
+        if not meta:
+            return ApiResponse(data={"can_use_overview": False, "mode": "files"})
+
+        return ApiResponse(data={
+            "kind": "skill",
+            "mode": "recorded-overview",
+            "can_use_overview": True,
+            "name": meta.get("name") or skill_name,
+            "description": meta.get("description") or "",
+            "entry_script": meta.get("entry_script") or "skill.py",
+            "generated_at": meta.get("generated_at") or "",
+            "params": meta.get("params") or {},
+            "steps": meta.get("steps") or [],
+            "artifacts": meta.get("artifacts") or [],
+            "files": await _get_skill_files_payload(skill_name, current_user),
+        })
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("get_skill_detail failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 

@@ -519,6 +519,7 @@ async def save_skill(
         description=request.description,
         script=script,
         params=request.params,
+        steps=steps,
     )
 
     session.status = "saved"

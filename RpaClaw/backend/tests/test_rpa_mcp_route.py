@@ -1,3 +1,4 @@
+from datetime import datetime
 from types import SimpleNamespace
 
 import anyio
@@ -9,6 +10,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 from backend.route import rpa_mcp as rpa_mcp_route
+from backend.rpa.execution_plan import build_rpa_mcp_execution_plan
 
 
 class _User:
@@ -438,6 +440,56 @@ def test_update_tool_route_allows_clearing_optional_metadata(monkeypatch):
     assert response.json()["data"]["description"] == ""
     assert response.json()["data"]["allowed_domains"] == []
     assert response.json()["data"]["post_auth_start_url"] == ""
+
+
+def test_execution_plan_route_returns_compiled_script(monkeypatch):
+    app = _build_rpa_mcp_app()
+    client = TestClient(app)
+    tool = _sample_tool()
+
+    monkeypatch.setattr(rpa_mcp_route, "RpaMcpToolRegistry", lambda: _FakeRegistry(tool))
+    monkeypatch.setattr(
+        rpa_mcp_route,
+        "build_rpa_mcp_execution_plan",
+        lambda tool: {
+            "tool_id": tool.id,
+            "generated_at": "2026-04-24T12:00:00+08:00",
+            "requires_cookies": tool.requires_cookies,
+            "compiled_steps": tool.steps,
+            "compiled_script": "async def run(page):\n    await page.click('text=Export invoice')\n",
+            "input_schema": tool.input_schema,
+            "output_schema": tool.output_schema,
+            "source_hash": "hash-1",
+        },
+    )
+
+    response = client.get("/api/v1/rpa-mcp/tools/tool-1/execution-plan")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["tool_id"] == "tool-1"
+    assert "await page.click" in response.json()["data"]["compiled_script"]
+
+
+def test_build_execution_plan_serializes_datetime_values():
+    tool = _sample_tool()
+    tool.steps = [{
+        "action": "click",
+        "description": "Export invoice",
+        "captured_at": datetime(2026, 4, 24, 9, 50, 0),
+    }]
+    tool.params = {
+        "from_date": {
+            "type": "string",
+            "last_seen_at": datetime(2026, 4, 24, 9, 51, 0),
+        },
+    }
+
+    payload = build_rpa_mcp_execution_plan(tool)
+
+    assert payload["tool_id"] == "tool-1"
+    assert payload["source_hash"]
+    assert payload["compiled_script"]
+    assert payload["compiled_steps"][0]["captured_at"] == datetime(2026, 4, 24, 9, 50, 0)
 
 
 def test_preview_test_route_returns_execution_result_and_updates_preview_draft(monkeypatch):

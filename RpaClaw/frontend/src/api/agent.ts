@@ -115,6 +115,25 @@ export async function getSkillFiles(skillName: string, path: string = ""): Promi
   return response.data.data;
 }
 
+export interface RecordedSkillDetail {
+  kind: 'skill';
+  mode: 'recorded-overview' | 'files';
+  can_use_overview: boolean;
+  name: string;
+  description: string;
+  entry_script: string;
+  generated_at: string;
+  params: Record<string, unknown>;
+  steps: Array<Record<string, unknown>>;
+  artifacts: string[];
+  files: Array<{ name: string; path: string; type: string }>;
+}
+
+export async function getSkillDetail(skillName: string): Promise<RecordedSkillDetail> {
+  const response = await apiClient.get<ApiResponse<RecordedSkillDetail>>(`/sessions/skills/${encodeURIComponent(skillName)}/detail`);
+  return response.data.data;
+}
+
 export async function readSkillFile(skillName: string, file: string): Promise<{file: string, content: string}> {
   const response = await apiClient.post<ApiResponse<{file: string, content: string}>>(`/sessions/skills/${skillName}/read`, { file });
   return response.data.data;
