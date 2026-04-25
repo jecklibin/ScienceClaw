@@ -133,6 +133,8 @@ def _merge_recorded_action_trace_metadata(session, derived_manual_traces: Dict[s
         if original:
             derived.before_page = original.before_page
             derived.after_page = original.after_page
+        if step and not derived.frame_path:
+            derived.frame_path = list(getattr(step, "frame_path", None) or [])
 
 
 def _ensure_no_unresolved_manual_diagnostics(session) -> None:

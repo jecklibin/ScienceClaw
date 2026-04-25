@@ -495,6 +495,10 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
             self.session.steps[-1].frame_path,
             ["iframe[name='workspace']", "iframe[title='editor']"],
         )
+        self.assertEqual(
+            self.session.recorded_actions[-1].frame_path,
+            ["iframe[name='workspace']", "iframe[title='editor']"],
+        )
 
     async def test_handle_event_persists_locator_candidates_and_validation(self):
         page = _FakePage("https://example.com", "Example")

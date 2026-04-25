@@ -68,6 +68,7 @@ class RPAAcceptedTrace(BaseModel):
     description: str = ""
     before_page: RPAPageState = Field(default_factory=RPAPageState)
     after_page: RPAPageState = Field(default_factory=RPAPageState)
+    frame_path: List[str] = Field(default_factory=list)
     locator_candidates: List[Dict[str, Any]] = Field(default_factory=list)
     validation: Dict[str, Any] = Field(default_factory=dict)
     signals: Dict[str, Any] = Field(default_factory=dict)

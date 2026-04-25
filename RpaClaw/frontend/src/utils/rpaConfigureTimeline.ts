@@ -108,6 +108,7 @@ const mapRecordedAction = (action: any, index: number): RpaConfigureStep => ({
   stepId: String(action?.step_id || ''),
   action: action?.action_kind || 'record',
   target: action?.target || null,
+  frame_path: Array.isArray(action?.frame_path) ? action.frame_path : [],
   locator_candidates: buildAcceptedActionCandidates(action),
   validation: {
     status: action?.validation?.status || 'ok',

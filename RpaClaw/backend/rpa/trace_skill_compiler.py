@@ -281,7 +281,9 @@ class TraceSkillCompiler:
             if not locator:
                 lines.extend(self._invalid_manual_action_lines(action))
                 return lines
-            expr = _locator_expression("current_page", locator)
+            scope_lines, scope_var = self._frame_scope_lines(trace.frame_path)
+            lines.extend(scope_lines)
+            expr = _locator_expression(scope_var, locator)
             lines.append("    async with current_page.expect_navigation(wait_until='domcontentloaded'):")
             if action == "navigate_click":
                 lines.append(f"        await {expr}.click()")
@@ -295,7 +297,9 @@ class TraceSkillCompiler:
         if not locator:
             lines.append("    # No stable locator was recorded for this manual action.")
             return lines
-        expr = _locator_expression("current_page", locator)
+        scope_lines, scope_var = self._frame_scope_lines(trace.frame_path)
+        lines.extend(scope_lines)
+        expr = _locator_expression(scope_var, locator)
         popup_signal = _trace_signal(trace, "popup")
         download_signal = _trace_signal(trace, "download")
         if action in {"click", "press"} and (popup_signal or download_signal):
@@ -382,7 +386,9 @@ class TraceSkillCompiler:
         key = self._allocate_output_key(trace, trace.output_key or f"capture_{index}", used_output_keys)
         lines = ["", f"    # trace {index}: {trace.description or 'data capture'}"]
         if locator:
-            lines.append(f"    _result = await {_locator_expression('current_page', locator)}.inner_text()")
+            scope_lines, scope_var = self._frame_scope_lines(trace.frame_path)
+            lines.extend(scope_lines)
+            lines.append(f"    _result = await {_locator_expression(scope_var, locator)}.inner_text()")
         else:
             lines.append(f"    _result = {trace.output!r}")
         lines.append(f"    _results[{key!r}] = _result")
@@ -618,8 +624,10 @@ class TraceSkillCompiler:
         if not ref or not locator:
             lines.append("    # Unresolved dataflow fill skipped.")
             return lines
+        scope_lines, scope_var = self._frame_scope_lines(trace.frame_path)
+        lines.extend(scope_lines)
         lines.append(f"    _value = _resolve_result_ref(_results, {ref!r})")
-        lines.append(f"    await {_locator_expression('current_page', locator)}.fill(str(_value))")
+        lines.append(f"    await {_locator_expression(scope_var, locator)}.fill(str(_value))")
         return lines
 
     def _best_locator(self, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -629,6 +637,19 @@ class TraceSkillCompiler:
         locator = selected.get("locator") if isinstance(selected, dict) else None
         normalized = normalize_locator(locator if isinstance(locator, dict) else selected)
         return normalized if has_valid_locator(normalized) else {}
+
+    @staticmethod
+    def _frame_scope_lines(frame_path: List[str]) -> tuple[List[str], str]:
+        if not frame_path:
+            return [], "current_page"
+        lines: List[str] = []
+        frame_parent = "current_page"
+        for frame_selector in frame_path:
+            lines.append(
+                f"    frame_scope = {frame_parent}.frame_locator({json.dumps(str(frame_selector), ensure_ascii=False)})"
+            )
+            frame_parent = "frame_scope"
+        return lines, "frame_scope"
 
     def _effective_manual_action(self, trace: RPAAcceptedTrace) -> str:
         action = trace.action or ""

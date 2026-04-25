@@ -108,6 +108,7 @@ class ManualRecordedAction(BaseModel):
     action_kind: ManualActionKind
     description: str = ""
     target: Dict[str, Any] = Field(default_factory=dict)
+    frame_path: List[str] = Field(default_factory=list)
     validation: Dict[str, Any] = Field(default_factory=dict)
     raw_candidates: List[Dict[str, Any]] = Field(default_factory=list)
     page_state: Dict[str, Any] = Field(default_factory=dict)

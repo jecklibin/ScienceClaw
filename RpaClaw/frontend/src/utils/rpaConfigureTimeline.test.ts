@@ -171,4 +171,26 @@ describe('rpaConfigureTimeline', () => {
     });
     expect(hasManualRecordingDiagnostics(session)).toBe(true);
   });
+
+  it('preserves frame path from recorded actions', () => {
+    const session = {
+      recorded_actions: [
+        {
+          step_id: 'step-iframe',
+          action_kind: 'click',
+          description: 'click link("Runoob Note")',
+          target: { method: 'role', role: 'link', name: 'Runoob Note' },
+          frame_path: ['iframe[title="result"]', 'iframe[src="https://www.runoob.com"]'],
+          validation: { status: 'ok' },
+        },
+      ],
+    };
+
+    const displaySteps = mapRpaConfigureDisplaySteps(session);
+
+    expect(displaySteps[0].frame_path).toEqual([
+      'iframe[title="result"]',
+      'iframe[src="https://www.runoob.com"]',
+    ]);
+  });
 });

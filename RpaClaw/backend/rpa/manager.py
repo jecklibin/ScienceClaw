@@ -1394,6 +1394,7 @@ class RPASessionManager:
                 action=step.action,
                 description=step.description or "",
                 target=step.target or "",
+                frame_path=step.frame_path,
                 locator_candidates=step.locator_candidates,
                 validation=step.validation,
                 value=step.value,
