@@ -168,6 +168,8 @@ async def _extract_frame_snapshot_v2(frame) -> Dict[str, Any]:
             "actionable_nodes": list(data.get("actionable_nodes") or []),
             "content_nodes": list(data.get("content_nodes") or []),
             "containers": list(data.get("containers") or []),
+            "table_views": list(data.get("table_views") or []),
+            "detail_views": list(data.get("detail_views") or []),
         }
 
     elements = await _extract_frame_elements(frame)
@@ -245,6 +247,8 @@ async def build_page_snapshot(page, frame_path_builder: Callable[[Any], Any]) ->
     actionable_nodes: List[Dict[str, Any]] = []
     content_nodes: List[Dict[str, Any]] = []
     containers: List[Dict[str, Any]] = []
+    table_views: List[Dict[str, Any]] = []
+    detail_views: List[Dict[str, Any]] = []
 
     async def walk(frame) -> None:
         try:
@@ -278,6 +282,20 @@ async def build_page_snapshot(page, frame_path_builder: Callable[[Any], Any]) ->
             }
             for container in list(snapshot_v2.get("containers") or [])
         ]
+        frame_table_views = [
+            {
+                **view,
+                "frame_path": list(view.get("frame_path") or frame_path),
+            }
+            for view in list(snapshot_v2.get("table_views") or [])
+        ]
+        frame_detail_views = [
+            {
+                **view,
+                "frame_path": list(view.get("frame_path") or frame_path),
+            }
+            for view in list(snapshot_v2.get("detail_views") or [])
+        ]
         collections = _detect_collections(elements, frame_path)
         frames.append(
             {
@@ -291,6 +309,8 @@ async def build_page_snapshot(page, frame_path_builder: Callable[[Any], Any]) ->
         actionable_nodes.extend(frame_actionable_nodes)
         content_nodes.extend(frame_content_nodes)
         containers.extend(frame_containers)
+        table_views.extend(frame_table_views)
+        detail_views.extend(frame_detail_views)
         for child in getattr(frame, "child_frames", []):
             await walk(child)
 
@@ -302,6 +322,8 @@ async def build_page_snapshot(page, frame_path_builder: Callable[[Any], Any]) ->
         "actionable_nodes": actionable_nodes,
         "content_nodes": content_nodes,
         "containers": containers,
+        "table_views": table_views,
+        "detail_views": detail_views,
     }
 
 

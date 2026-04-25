@@ -5,7 +5,7 @@ SNAPSHOT_V2_JS = r"""() => {
     const ACTIONABLE = 'a,button,input,textarea,select,[role=button],[role=link],[role=menuitem],[role=menuitemradio],[role=tab],[role=checkbox],[role=radio],[contenteditable=true]';
     const CONTENT = 'h1,h2,h3,h4,h5,h6,th,td,dt,dd,li,p,span,label,[data-field],[data-label],[data-value],[role=heading],[role=cell],[role=rowheader],[role=columnheader]';
     const recorder = globalThis.__rpaPlaywrightRecorder || null;
-    const result = { actionable_nodes: [], content_nodes: [], containers: [] };
+    const result = { actionable_nodes: [], content_nodes: [], containers: [], table_views: [], detail_views: [] };
     const containerMap = new Map();
     let actionableIndex = 1;
     let contentIndex = 1;
@@ -15,6 +15,18 @@ SNAPSHOT_V2_JS = r"""() => {
         return String(value || '').replace(/\s+/g, ' ').trim().slice(0, limit || 160);
     }
 
+    function textOf(el, limit) {
+        return normalizeText(el ? (el.innerText || el.textContent || '') : '', limit || 200);
+    }
+
+    function classText(el) {
+        return normalizeText(el ? (el.className || '') : '', 160);
+    }
+
+    function attr(el, name, limit) {
+        return normalizeText(el ? el.getAttribute(name) || '' : '', limit || 120);
+    }
+
     function isVisible(el, rect) {
         if (!rect || rect.width <= 0 || rect.height <= 0)
             return false;
@@ -22,6 +34,14 @@ SNAPSHOT_V2_JS = r"""() => {
         if (!style)
             return false;
         return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+    }
+
+    function isHiddenByStyle(el) {
+        if (!el)
+            return true;
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return !style || style.display === 'none' || style.visibility === 'hidden' || rect.width <= 0 || rect.height <= 0;
     }
 
     function centerPoint(rect) {
@@ -345,6 +365,210 @@ SNAPSHOT_V2_JS = r"""() => {
         return 'text';
     }
 
+    function columnRole(header, colId, sampleTexts, hasCheckbox, hasLink) {
+        const text = normalizeText([header, colId, sampleTexts.join(' ')].join(' '), 240).toLowerCase();
+        if (hasCheckbox || /selection|select/.test(text))
+            return 'selection';
+        if (/index|序号|编号/.test(text) || (sampleTexts.length > 0 && sampleTexts.every(value => /^\d+$/.test(value))))
+            return 'row_index';
+        if (hasLink || /\.xlsx|\.xls|\.csv|file|文件/.test(text))
+            return 'file_link';
+        if (/finish|success|failed|status|状态/.test(text))
+            return 'status';
+        if (/\d{4}-\d{2}-\d{2}|time|date|时间|日期/.test(text))
+            return 'datetime';
+        return 'text';
+    }
+
+    function valueKind(text) {
+        const value = normalizeText(text || '', 120);
+        if (!value || value === '-')
+            return 'empty';
+        if (/^-?\d+(?:\.\d+)?$/.test(value))
+            return 'number';
+        if (/^\d{4}-\d{2}-\d{2}/.test(value))
+            return 'date';
+        if (/^(finish|success|failed|approved|pending)$/i.test(value))
+            return 'status';
+        return 'text';
+    }
+
+    function colIdFrom(el) {
+        return attr(el, 'data-colid', 80) || Array.from(el.classList || []).find(cls => /^col_/.test(cls)) || '';
+    }
+
+    function collectTableViews() {
+        const views = [];
+        const gridRoots = Array.from(document.querySelectorAll('.aui-grid, [role=grid], table'))
+            .map(el => el.closest('.aui-grid') || el)
+            .filter((el, index, arr) => el && arr.indexOf(el) === index);
+
+        for (const root of gridRoots.slice(0, 8)) {
+            const headerCells = Array.from(root.querySelectorAll('thead th,[role=columnheader]'));
+            const bodyRows = Array.from(root.querySelectorAll('tbody tr,[role=row]'))
+                .filter(row => row.querySelector('td,[role=cell]'));
+            if (!bodyRows.length)
+                continue;
+
+            const headerByColId = new Map();
+            const headers = [];
+            headerCells.forEach((cell, index) => {
+                const colId = colIdFrom(cell);
+                const header = textOf(cell, 120);
+                const record = { index, column_id: colId, header, role: '' };
+                headers.push(record);
+                if (colId)
+                    headerByColId.set(colId, record);
+            });
+
+            const rows = [];
+            const columnSamples = new Map();
+            for (const row of bodyRows.slice(0, 10)) {
+                const rowIndex = rows.length;
+                const cells = [];
+                const cellEls = Array.from(row.querySelectorAll('td,[role=cell]'));
+                cellEls.forEach((cell, cellIndex) => {
+                    const colId = colIdFrom(cell);
+                    const headerRecord = colId ? headerByColId.get(colId) : headers[cellIndex];
+                    const text = textOf(cell, 200);
+                    const actions = Array.from(cell.querySelectorAll('a,button,input[type=checkbox],[role=button],[role=link]')).slice(0, 4).map(action => {
+                        const tag = action.tagName.toLowerCase();
+                        const role = getRole(action) || tag;
+                        const label = getAccessibleName(action) || textOf(action, 120) || role;
+                        const selector = colId
+                            ? `td[data-colid="${escapeCssAttributeValue(colId)}"] ${tag}`
+                            : `td:nth-child(${cellIndex + 1}) ${tag}`;
+                        return {
+                            kind: role,
+                            label,
+                            locator: { method: 'relative_css', scope: 'row', value: selector },
+                        };
+                    });
+                    const record = {
+                        column_id: colId,
+                        column_index: cellIndex,
+                        column_header: headerRecord ? headerRecord.header : '',
+                        text,
+                        value_kind: valueKind(text),
+                        row_local_actions: actions,
+                        actions,
+                    };
+                    cells.push(record);
+                    const key = colId || `index:${cellIndex}`;
+                    if (!columnSamples.has(key))
+                        columnSamples.set(key, { texts: [], hasCheckbox: false, hasLink: false });
+                    const sample = columnSamples.get(key);
+                    if (text)
+                        sample.texts.push(text);
+                    sample.hasCheckbox = sample.hasCheckbox || Boolean(cell.querySelector('input[type=checkbox]'));
+                    sample.hasLink = sample.hasLink || Boolean(cell.querySelector('a,[role=link]'));
+                });
+                rows.push({
+                    index: rowIndex,
+                    cells,
+                    locator_hints: [
+                        {
+                            kind: 'playwright',
+                            expression: "page.locator('tbody tr').nth(" + rowIndex + ")",
+                        },
+                    ],
+                });
+            }
+
+            const columns = [];
+            const maxCells = Math.max(...rows.map(row => row.cells.length));
+            for (let index = 0; index < maxCells; index++) {
+                const firstCell = rows.map(row => row.cells[index]).find(Boolean) || {};
+                const colId = firstCell.column_id || (headers[index] || {}).column_id || '';
+                const header = (headers.find(item => item.column_id && item.column_id === colId) || headers[index] || {}).header || '';
+                const sample = columnSamples.get(colId || `index:${index}`) || { texts: [], hasCheckbox: false, hasLink: false };
+                columns.push({
+                    index,
+                    column_id: colId,
+                    header,
+                    role: columnRole(header, colId, sample.texts.slice(0, 5), sample.hasCheckbox, sample.hasLink),
+                    sample_values: sample.texts.slice(0, 3),
+                });
+            }
+
+            const auxiliaryText = [];
+            for (const empty of Array.from(root.querySelectorAll('.aui-grid__empty-text')).slice(0, 3)) {
+                const text = textOf(empty, 120);
+                if (text)
+                    auxiliaryText.push({ kind: 'empty_state', text, outside_rows: true });
+            }
+            for (const tip of Array.from(root.parentElement ? root.parentElement.querySelectorAll('[role=tooltip]') : []).slice(0, 3)) {
+                const text = textOf(tip, 120);
+                if (text)
+                    auxiliaryText.push({ kind: 'tooltip', text, outside_rows: true });
+            }
+
+            views.push({
+                kind: 'table_view',
+                framework_hint: classText(root).includes('aui-grid') ? 'aui-grid' : '',
+                title: attr(root, 'aria-label', 120) || attr(root, 'title', 120),
+                row_count_observed: bodyRows.length,
+                columns,
+                rows,
+                auxiliary_text: auxiliaryText,
+            });
+        }
+        return views;
+    }
+
+    function collectDetailViews() {
+        const views = [];
+        const sections = Array.from(document.querySelectorAll('.aui-collapse-item, section, article, form, fieldset,[role=region],[role=group]'));
+        for (const section of sections.slice(0, 12)) {
+            const titleEl = section.querySelector('.aui-collapse-item__word-overflow,legend,h1,h2,h3,h4,[role=heading]');
+            const sectionTitle = textOf(titleEl, 120) || attr(section, 'aria-label', 120) || attr(section, 'title', 120);
+            const fieldEls = Array.from(section.querySelectorAll('.aui-form-item,[data-prop],dt'))
+                .filter((field, index, arr) => arr.indexOf(field) === index);
+            if (!sectionTitle && fieldEls.length < 2)
+                continue;
+
+            const fields = [];
+            for (const field of fieldEls.slice(0, 40)) {
+                const labelEl = field.querySelector('.aui-form-item__label,.field-header .label,label,dt');
+                const contentEl = field.querySelector('.aui-form-item__content,dd') || field;
+                const label = textOf(labelEl, 120).replace(/^\*\s*/, '');
+                if (!label)
+                    continue;
+                const visible = !isHiddenByStyle(field);
+                const dataProp = attr(field, 'data-prop', 120) || attr(contentEl, 'prop', 120);
+                const required = classText(field).includes('is-required') || Boolean(field.querySelector('.required'));
+                const displayValueEl = contentEl.querySelector('.aui-input-display-only__content,.aui-numeric-display-only__value,.aui-range-editor-display-only,.aui-input-display-only,.no-value,input,textarea,select');
+                let value = textOf(displayValueEl, 200);
+                if (!value && displayValueEl && ('value' in displayValueEl))
+                    value = normalizeText(displayValueEl.value || '', 200);
+                fields.push({
+                    label,
+                    value,
+                    data_prop: dataProp,
+                    required,
+                    visible,
+                    hidden_reason: visible ? '' : 'hidden',
+                    value_kind: valueKind(value),
+                    locator_hints: dataProp ? [
+                        {
+                            kind: 'field_container',
+                            expression: `page.locator('[data-prop="${escapeCssAttributeValue(dataProp)}"]')`,
+                        },
+                    ] : [],
+                });
+            }
+            if (fields.length) {
+                views.push({
+                    kind: 'detail_view',
+                    section_title: sectionTitle,
+                    section_locator: sectionTitle ? { method: 'text', value: sectionTitle } : {},
+                    fields,
+                });
+            }
+        }
+        return views;
+    }
+
     const actionableSeen = new Set();
     for (const el of Array.from(document.querySelectorAll(ACTIONABLE))) {
         const rect = el.getBoundingClientRect();
@@ -442,5 +666,7 @@ SNAPSHOT_V2_JS = r"""() => {
             break;
     }
 
+    result.table_views = collectTableViews();
+    result.detail_views = collectDetailViews();
     return JSON.stringify(result);
 }"""
