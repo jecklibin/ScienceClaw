@@ -19,6 +19,7 @@ from backend.rpa.mcp_executor import InvalidCookieError, RpaMcpExecutor
 from backend.rpa.mcp_models import RpaMcpToolDefinition
 from backend.rpa.mcp_preview_registry import RpaMcpPreviewDraftRegistry
 from backend.rpa.mcp_registry import RpaMcpToolRegistry
+from backend.rpa.mcp_step_projection import session_to_mcp_steps
 from backend.user.dependencies import User, require_user
 
 router = APIRouter(tags=["rpa-mcp"])
@@ -83,7 +84,7 @@ async def get_rpa_session_steps(session_id: str, user_id: str) -> dict[str, Any]
     if str(session.user_id) != str(user_id):
         raise HTTPException(status_code=403, detail="Not authorized")
     return {
-        "steps": [step.model_dump() for step in session.steps],
+        "steps": session_to_mcp_steps(session),
         "params": getattr(session, 'params', {}) or {},
         "skill_name": getattr(session, 'skill_name', '') or getattr(session, 'title', '') or '',
     }

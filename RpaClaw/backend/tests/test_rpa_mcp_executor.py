@@ -61,6 +61,30 @@ def _sample_tool(*, requires_cookies: bool = True):
     )
 
 
+def _trace_backed_tool():
+    tool = _sample_tool(requires_cookies=False)
+    tool.steps = [
+        {
+            "id": "trace-ai-select",
+            "action": "ai_script",
+            "description": "Click first project",
+            "source": "ai",
+            "rpa_trace": {
+                "trace_id": "trace-ai-select",
+                "trace_type": "ai_operation",
+                "source": "ai",
+                "user_instruction": "click the first project",
+                "description": "Click first project",
+                "ai_execution": {
+                    "language": "python",
+                    "code": "async def run(page, results):\n    return {'url': 'https://example.com/repo'}",
+                },
+            },
+        }
+    ]
+    return tool
+
+
 def test_validate_cookies_rejects_disallowed_domain():
     executor = RpaMcpExecutor()
 
@@ -102,6 +126,21 @@ async def test_execute_allows_missing_cookies_when_tool_does_not_require_them():
     assert context.calls[0] == ("new_page", None)
     assert all(call[0] != "add_cookies" for call in context.calls)
     assert page.calls[0] == ("goto", "https://example.com/dashboard")
+
+
+@pytest.mark.anyio
+async def test_execute_compiles_trace_backed_steps_with_trace_compiler():
+    page = _FakePage()
+    context = _FakeContext(page)
+    browser = _FakeBrowser(context)
+    executor = RpaMcpExecutor(browser_factory=lambda *_args, **_kwargs: browser, script_runner=_fake_runner)
+
+    result = await executor.execute(_trace_backed_tool(), {})
+
+    script = result["data"]["script"]
+    assert "Auto-generated skill from RPA trace recording" in script
+    assert "Click first project" in script
+    assert "RecordingRuntimeAgent" in script or "async def run(page, results)" in script
 
 
 @pytest.mark.anyio

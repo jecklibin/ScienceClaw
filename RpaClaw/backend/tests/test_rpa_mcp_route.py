@@ -11,6 +11,9 @@ from mcp.client.streamable_http import streamable_http_client
 
 from backend.route import rpa_mcp as rpa_mcp_route
 from backend.rpa.execution_plan import build_rpa_mcp_execution_plan
+from backend.rpa.manager import RPASession
+from backend.rpa.manual_recording_models import ManualActionKind, ManualRecordedAction
+from backend.rpa.trace_models import RPAAcceptedTrace, RPAAIExecution, RPATraceType
 
 
 class _User:
@@ -101,6 +104,58 @@ def _fake_steps(session_id: str, user_id: str):
         "params": {},
         "skill_name": "invoice_skill",
     }
+
+
+def test_get_rpa_session_steps_preserves_ai_traces_with_recorded_actions(monkeypatch):
+    session = RPASession(id="session-1", user_id="user-1", sandbox_session_id="sandbox-1")
+    session.recorded_actions.append(
+        ManualRecordedAction(
+            step_id="step-search",
+            action_kind=ManualActionKind.CLICK,
+            description='click button("Search")',
+            target={"method": "role", "role": "button", "name": "Search"},
+            validation={"status": "ok"},
+            page_state={"url": "https://example.com/search"},
+        )
+    )
+    session.traces.extend(
+        [
+            RPAAcceptedTrace(
+                trace_id="trace-step-search",
+                trace_type=RPATraceType.MANUAL_ACTION,
+                source="manual",
+                action="click",
+                description="legacy manual trace",
+            ),
+            RPAAcceptedTrace(
+                trace_id="trace-ai-select",
+                trace_type=RPATraceType.AI_OPERATION,
+                source="ai",
+                user_instruction="click the first project",
+                description="Click first project",
+                ai_execution=RPAAIExecution(
+                    code="async def run(page, results):\n    return {'url': 'https://example.com/repo'}",
+                ),
+            ),
+        ]
+    )
+
+    async def fake_get_session(session_id):
+        assert session_id == "session-1"
+        return session
+
+    monkeypatch.setattr(rpa_mcp_route.rpa_manager, "get_session", fake_get_session)
+
+    payload = anyio.run(rpa_mcp_route.get_rpa_session_steps, "session-1", "user-1")
+
+    assert [step["description"] for step in payload["steps"]] == [
+        'click button("Search")',
+        "Click first project",
+    ]
+    assert payload["steps"][0]["rpa_trace"]["trace_id"] == "trace-step-search"
+    assert payload["steps"][1]["source"] == "ai"
+    assert payload["steps"][1]["action"] == "ai_script"
+    assert payload["steps"][1]["rpa_trace"]["trace_type"] == "ai_operation"
 
 
 class _FakeConverter:
@@ -490,6 +545,34 @@ def test_build_execution_plan_serializes_datetime_values():
     assert payload["source_hash"]
     assert payload["compiled_script"]
     assert payload["compiled_steps"][0]["captured_at"] == datetime(2026, 4, 24, 9, 50, 0)
+
+
+def test_build_execution_plan_uses_trace_compiler_for_trace_backed_steps():
+    tool = _sample_tool()
+    tool.steps = [
+        {
+            "id": "trace-ai-select",
+            "action": "ai_script",
+            "description": "Click first project",
+            "source": "ai",
+            "rpa_trace": {
+                "trace_id": "trace-ai-select",
+                "trace_type": "ai_operation",
+                "source": "ai",
+                "user_instruction": "click the first project",
+                "description": "Click first project",
+                "ai_execution": {
+                    "language": "python",
+                    "code": "async def run(page, results):\n    return {'url': 'https://example.com/repo'}",
+                },
+            },
+        }
+    ]
+
+    payload = build_rpa_mcp_execution_plan(tool)
+
+    assert "Auto-generated skill from RPA trace recording" in payload["compiled_script"]
+    assert "Click first project" in payload["compiled_script"]
 
 
 def test_preview_test_route_returns_execution_result_and_updates_preview_draft(monkeypatch):

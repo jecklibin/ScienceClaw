@@ -5,7 +5,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from backend.config import settings
-from backend.rpa.generator import PlaywrightGenerator
+from backend.rpa.mcp_script_compiler import generate_mcp_script
 from backend.rpa.playwright_security import get_context_kwargs
 
 
@@ -19,7 +19,6 @@ class RpaMcpExecutor:
         self._script_runner = script_runner or self._default_runner
         self._pw_loop_runner = pw_loop_runner
         self._downloads_dir_factory = downloads_dir_factory
-        self._generator = PlaywrightGenerator()
 
     def validate_cookies(self, *, cookies: list[dict[str, Any]], allowed_domains: list[str], post_auth_start_url: str) -> list[dict[str, Any]]:
         if not isinstance(cookies, list) or not cookies:
@@ -51,7 +50,7 @@ class RpaMcpExecutor:
         downloads_dir = self._prepare_downloads_dir(tool)
         if downloads_dir:
             kwargs.setdefault('_downloads_dir', downloads_dir)
-        script = self._generator.generate_script(tool.steps, tool.params, is_local=(settings.storage_backend == 'local'))
+        script = generate_mcp_script(tool.steps, tool.params, is_local=(settings.storage_backend == 'local'))
 
         async def _run() -> dict[str, Any]:
             browser = await self._resolve_browser(tool)

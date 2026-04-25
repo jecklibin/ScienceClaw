@@ -21,6 +21,7 @@ from backend.rpa.recording_runtime_agent import RecordingRuntimeAgent, Recording
 from backend.rpa.trace_recorder import recorded_action_to_trace
 from backend.rpa.trace_models import RPAAcceptedTrace
 from backend.rpa.trace_skill_compiler import TraceSkillCompiler
+from backend.rpa.mcp_step_projection import session_to_mcp_steps
 from backend.rpa.cdp_connector import get_cdp_connector
 from backend.rpa.screencast import SessionScreencastController
 from backend.user.dependencies import get_current_user, User
@@ -602,6 +603,7 @@ async def save_skill(
         raise HTTPException(status_code=404, detail="Session not found")
 
     script = _generate_session_script(session, request.params)
+    steps = session_to_mcp_steps(session)
 
     skill_name = await exporter.export_skill(
         user_id=str(current_user.id),

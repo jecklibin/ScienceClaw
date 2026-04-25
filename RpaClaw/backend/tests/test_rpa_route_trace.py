@@ -164,6 +164,49 @@ async def test_test_script_blocks_when_recording_diagnostics_exist():
 
 
 @pytest.mark.asyncio
+async def test_save_skill_exports_projected_trace_steps(monkeypatch):
+    manager = ROUTE_MODULE.rpa_manager
+    session = RPASession(id="route-save-trace", user_id="u1", sandbox_session_id="sandbox")
+    session.traces.append(
+        RPAAcceptedTrace(
+            trace_id="trace-ai-select",
+            trace_type=RPATraceType.AI_OPERATION,
+            source="ai",
+            user_instruction="click the first project",
+            description="Click first project",
+            ai_execution=RPAAIExecution(code="async def run(page, results):\n    return {}"),
+        )
+    )
+    manager.sessions[session.id] = session
+    captured: dict = {}
+
+    async def fake_export_skill(**kwargs):
+        captured.update(kwargs)
+        return kwargs["skill_name"]
+
+    monkeypatch.setattr(
+        ROUTE_MODULE,
+        "_generate_session_script",
+        lambda *args, **kwargs: "async def execute_skill(page, **kwargs):\n    return {}",
+    )
+    monkeypatch.setattr(ROUTE_MODULE.exporter, "export_skill", fake_export_skill)
+
+    try:
+        user = type("User", (), {"id": "u1"})()
+        response = await ROUTE_MODULE.save_skill(
+            session.id,
+            ROUTE_MODULE.SaveSkillRequest(skill_name="trace_skill", description="Trace skill", params={}),
+            user,
+        )
+
+        assert response == {"status": "success", "skill_name": "trace_skill"}
+        assert captured["steps"][0]["action"] == "ai_script"
+        assert captured["steps"][0]["rpa_trace"]["trace_id"] == "trace-ai-select"
+    finally:
+        manager.sessions.pop(session.id, None)
+
+
+@pytest.mark.asyncio
 async def test_apply_recording_agent_result_persists_trace_and_runtime_output():
     manager = ROUTE_MODULE.rpa_manager
     session = RPASession(id="route-trace-test", user_id="u1", sandbox_session_id="sandbox")

@@ -51,6 +51,60 @@ describe('rpaConfigureTimeline', () => {
     expect(displaySteps[0].target).toEqual({ method: 'role', role: 'button', name: 'Search' });
   });
 
+  it('keeps AI traces when recorded actions replace manual traces', () => {
+    const session = {
+      steps: [
+        {
+          id: 'step-search',
+          action: 'click',
+          description: 'legacy click should only remain for parameterization',
+        },
+      ],
+      traces: [
+        {
+          trace_id: 'trace-step-search',
+          trace_type: 'manual_action',
+          source: 'manual',
+          action: 'click',
+          description: 'legacy manual trace',
+        },
+        {
+          trace_id: 'trace-ai-select',
+          trace_type: 'ai_operation',
+          source: 'ai',
+          user_instruction: 'click the first project',
+          description: 'Click first project',
+          after_page: { url: 'https://github.com/example/repo' },
+          ai_execution: { code: 'async def run(page, results):\n    return {}' },
+        },
+      ],
+      recorded_actions: [
+        {
+          step_id: 'step-search',
+          action_kind: 'click',
+          description: 'click button("Search")',
+          target: { method: 'role', role: 'button', name: 'Search' },
+          validation: { status: 'ok' },
+          page_state: { url: 'https://example.test/search' },
+        },
+      ],
+    };
+
+    const displaySteps = mapRpaConfigureDisplaySteps(session);
+
+    expect(displaySteps.map((step) => step.description)).toEqual([
+      'click button("Search")',
+      'Click first project',
+    ]);
+    expect(displaySteps.map((step) => step.source)).toEqual(['record', 'ai']);
+    expect(displaySteps[1]).toMatchObject({
+      id: 'trace-ai-select',
+      action: 'ai_operation',
+      url: 'https://github.com/example/repo',
+      validation: { status: 'ok', details: 'AI Trace' },
+    });
+  });
+
   it('keeps accepted traces as fallback when recorded actions are absent', () => {
     const session = {
       steps: [

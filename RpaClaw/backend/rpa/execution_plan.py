@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from backend.config import settings
-from backend.rpa.generator import PlaywrightGenerator
+from backend.rpa.mcp_script_compiler import generate_mcp_script
 
 
 def _json_default(value: Any) -> Any:
@@ -16,8 +16,7 @@ def _json_default(value: Any) -> Any:
 
 
 def build_rpa_mcp_execution_plan(tool: Any) -> dict[str, Any]:
-    generator = PlaywrightGenerator()
-    compiled_script = generator.generate_script(
+    compiled_script = generate_mcp_script(
         tool.steps,
         tool.params,
         is_local=(settings.storage_backend == "local"),

@@ -26,6 +26,7 @@ import {
   getPreviewTestStatus,
   hasMatchingPreviewTest,
 } from '@/utils/rpaMcpConvert';
+import { mapRpaConfigureDisplaySteps } from '@/utils/rpaConfigureTimeline';
 import { buildRecordedStepSummary, buildSchemaSummary, shouldShowCookieSection } from '@/utils/rpaMcpEditorView';
 import { convertCookieInputToPlaywrightCookies, type CookieInputMode } from '@/utils/rpaMcpTest';
 import { showErrorToast, showSuccessToast } from '@/utils/toast';
@@ -92,6 +93,8 @@ interface RecordedStepItem {
   label?: string;
   sensitive?: boolean;
   url?: string;
+  source?: string;
+  configurable?: boolean;
 }
 
 const route = useRoute();
@@ -608,6 +611,11 @@ const loadExecutionPlan = async () => {
 };
 
 const isRemovedStep = (index: number) => canHighlightRemovedSteps.value && removedStepIndexSet.value.has(index);
+const canPromoteStepLocator = (step: RecordedStepItem) => (
+  canTuneRecordedSteps.value
+  && step.configurable !== false
+  && step.source !== 'ai'
+);
 
 const loadRecordedSession = async (sourceSessionId?: string, options: { silent?: boolean } = {}) => {
   const targetSessionId = sourceSessionId || sessionId.value;
@@ -620,7 +628,7 @@ const loadRecordedSession = async (sourceSessionId?: string, options: { silent?:
   try {
     const resp = await apiClient.get(`/rpa/session/${targetSessionId}`);
     const session = resp.data.session;
-    recordedSteps.value = (session.steps || []) as RecordedStepItem[];
+    recordedSteps.value = mapRpaConfigureDisplaySteps(session) as RecordedStepItem[];
     recordedStepsMode.value = 'source-session';
   } catch (error: any) {
     console.error(error);
@@ -1239,8 +1247,8 @@ watch(viewActiveTab, async (tab) => {
                             <button
                               type="button"
                               class="shrink-0 rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors"
-                              :class="candidate.selected || !canTuneRecordedSteps ? 'cursor-default border-slate-200 text-slate-400 dark:border-white/10 dark:text-slate-500' : 'border-violet-300 text-violet-700 hover:bg-violet-50 dark:border-violet-400/30 dark:text-violet-200 dark:hover:bg-violet-500/10'"
-                              :disabled="candidate.selected || promotingStepIndex === idx || !canTuneRecordedSteps"
+                              :class="candidate.selected || !canPromoteStepLocator(step) ? 'cursor-default border-slate-200 text-slate-400 dark:border-white/10 dark:text-slate-500' : 'border-violet-300 text-violet-700 hover:bg-violet-50 dark:border-violet-400/30 dark:text-violet-200 dark:hover:bg-violet-500/10'"
+                              :disabled="candidate.selected || promotingStepIndex === idx || !canPromoteStepLocator(step)"
                               @click.stop="promoteLocator(idx, candidateIndex)"
                             >
                               {{ promotingStepIndex === idx ? t('MCP Editor Switching...') : (candidate.selected ? t('MCP Editor Current') : t('MCP Editor Use this locator')) }}
