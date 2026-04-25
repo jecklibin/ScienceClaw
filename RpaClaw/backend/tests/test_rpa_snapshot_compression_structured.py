@@ -24,7 +24,9 @@ def _structured_view_snapshot() -> dict:
         "table_views": [
             {
                 "kind": "table_view",
-                "title": "",
+                "title": "EDM Request",
+                "title_source": "nearest_preceding_heading",
+                "nearby_headings": ["EDM Request"],
                 "framework_hint": "aui-grid",
                 "row_count_observed": 10,
                 "columns": [
@@ -101,6 +103,9 @@ def test_compact_recording_snapshot_preserves_structured_views():
     compact = compact_recording_snapshot(_structured_view_snapshot(), "点击第一行的文件名称", char_budget=100000)
 
     assert compact["mode"] == "clean_snapshot"
+    assert compact["table_views"][0]["title"] == "EDM Request"
+    assert compact["table_views"][0]["title_source"] == "nearest_preceding_heading"
+    assert compact["table_views"][0]["nearby_headings"] == ["EDM Request"]
     assert compact["table_views"][0]["columns"][2]["header"] == "文件名称"
     assert compact["table_views"][0]["rows"][0]["cells"][1]["actions"][0]["locator"]["scope"] == "row"
     assert compact["table_views"][0]["auxiliary_text"][0]["outside_rows"] is True

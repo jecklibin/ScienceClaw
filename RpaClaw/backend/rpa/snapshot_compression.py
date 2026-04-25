@@ -179,6 +179,8 @@ def _compact_table_views(snapshot: Dict[str, Any], *, row_limit: int = 10, cell_
             {
                 "kind": "table_view",
                 "title": view.get("title", ""),
+                "title_source": view.get("title_source", ""),
+                "nearby_headings": list(view.get("nearby_headings") or [])[:4],
                 "framework_hint": view.get("framework_hint", ""),
                 "frame_path": list(view.get("frame_path") or []),
                 "row_count_observed": view.get("row_count_observed", 0),

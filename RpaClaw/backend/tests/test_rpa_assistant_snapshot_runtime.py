@@ -54,3 +54,10 @@ def test_snapshot_v2_js_marks_non_row_table_text_as_auxiliary():
     assert "empty_state" in SNAPSHOT_V2_JS
     assert "tooltip" in SNAPSHOT_V2_JS
     assert "outside_rows" in SNAPSHOT_V2_JS
+
+
+def test_snapshot_v2_js_assigns_nearby_heading_to_table_view_title():
+    assert "function nearestTableTitle(root)" in SNAPSHOT_V2_JS
+    assert "previousElementSibling" in SNAPSHOT_V2_JS
+    assert "nearest_preceding_heading" in SNAPSHOT_V2_JS
+    assert "title_source" in SNAPSHOT_V2_JS

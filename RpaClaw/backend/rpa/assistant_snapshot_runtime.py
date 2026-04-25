@@ -397,6 +397,39 @@ SNAPSHOT_V2_JS = r"""() => {
         return attr(el, 'data-colid', 80) || Array.from(el.classList || []).find(cls => /^col_/.test(cls)) || '';
     }
 
+    function headingText(el) {
+        if (!el)
+            return '';
+        if (el.matches && el.matches('h1,h2,h3,h4,h5,h6,[role=heading],.title,.panel-title,.card-title,.aui-title'))
+            return textOf(el, 120);
+        const heading = el.querySelector && el.querySelector('h1,h2,h3,h4,h5,h6,[role=heading],.title,.panel-title,.card-title,.aui-title');
+        return textOf(heading, 120);
+    }
+
+    function nearestTableTitle(root) {
+        let current = root;
+        let depth = 0;
+        while (current && current !== document.body && depth < 6) {
+            const internalTitle = headingText(current);
+            if (internalTitle)
+                return { title: internalTitle, source: 'ancestor_heading' };
+
+            let sibling = current.previousElementSibling;
+            let siblingDistance = 0;
+            while (sibling && siblingDistance < 4) {
+                const title = headingText(sibling);
+                if (title)
+                    return { title, source: 'nearest_preceding_heading' };
+                sibling = sibling.previousElementSibling;
+                siblingDistance += 1;
+            }
+
+            current = current.parentElement;
+            depth += 1;
+        }
+        return { title: '', source: '' };
+    }
+
     function collectTableViews() {
         const views = [];
         const gridRoots = Array.from(document.querySelectorAll('.aui-grid, [role=grid], table'))
@@ -503,10 +536,16 @@ SNAPSHOT_V2_JS = r"""() => {
                     auxiliaryText.push({ kind: 'tooltip', text, outside_rows: true });
             }
 
+            const explicitTitle = attr(root, 'aria-label', 120) || attr(root, 'title', 120);
+            const nearbyTitle = nearestTableTitle(root);
+            const title = explicitTitle || nearbyTitle.title;
+
             views.push({
                 kind: 'table_view',
                 framework_hint: classText(root).includes('aui-grid') ? 'aui-grid' : '',
-                title: attr(root, 'aria-label', 120) || attr(root, 'title', 120),
+                title,
+                title_source: explicitTitle ? 'root_attribute' : nearbyTitle.source,
+                nearby_headings: nearbyTitle.title ? [nearbyTitle.title] : [],
                 row_count_observed: bodyRows.length,
                 columns,
                 rows,
