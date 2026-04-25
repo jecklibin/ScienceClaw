@@ -110,7 +110,7 @@ def test_generate_session_script_preserves_frame_path_on_recorded_actions():
 
     assert 'frame_scope = current_page.frame_locator("iframe[title=\'运行结果预览\']")' in script
     assert 'frame_scope = frame_scope.frame_locator("iframe")' in script
-    assert "await frame_scope.get_by_role('link', name='菜鸟笔记').click()" in script or 'await frame_scope.get_by_role("link", name="菜鸟笔记").click()' in script
+    assert "await frame_scope.get_by_role('link', name='菜鸟笔记', exact=True).click()" in script or 'await frame_scope.get_by_role("link", name="菜鸟笔记", exact=True).click()' in script
     assert "expect_popup() as popup_info" in script
 
 def test_generate_session_script_keeps_ai_traces_when_recorded_actions_replace_manual_traces():

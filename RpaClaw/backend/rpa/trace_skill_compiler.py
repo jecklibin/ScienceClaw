@@ -10,6 +10,9 @@ from .trace_locator_utils import has_valid_locator, normalize_locator
 from .trace_models import RPAAcceptedTrace, RPATraceType
 
 
+_EXACT_DEFAULT_METHODS = {"role", "label", "placeholder", "alt", "title", "text"}
+
+
 class TraceSkillCompiler:
     def generate_script(
         self,
@@ -275,7 +278,7 @@ class TraceSkillCompiler:
         stable_subpage = self._manual_github_subpage_navigation(index, trace, previous_traces)
         if stable_subpage:
             return stable_subpage
-        locator = self._best_locator(trace.locator_candidates)
+        locator = self._preferred_locator_for_trace(trace, trace.locator_candidates)
         lines = ["", f"    # trace {index}: {trace.description or action}"]
         if action in {"navigate_click", "navigate_press"}:
             if not locator:
@@ -382,7 +385,7 @@ class TraceSkillCompiler:
         trace: RPAAcceptedTrace,
         used_output_keys: Dict[str, int],
     ) -> List[str]:
-        locator = self._best_locator(trace.locator_candidates)
+        locator = self._preferred_locator_for_trace(trace, trace.locator_candidates)
         key = self._allocate_output_key(trace, trace.output_key or f"capture_{index}", used_output_keys)
         lines = ["", f"    # trace {index}: {trace.description or 'data capture'}"]
         if locator:
@@ -619,7 +622,10 @@ class TraceSkillCompiler:
 
     def _render_dataflow_fill_trace(self, index: int, trace: RPAAcceptedTrace) -> List[str]:
         ref = trace.dataflow.selected_source_ref if trace.dataflow else None
-        locator = self._best_locator(trace.dataflow.target_field.locator_candidates if trace.dataflow else [])
+        locator = self._preferred_locator_for_trace(
+            trace,
+            trace.dataflow.target_field.locator_candidates if trace.dataflow else [],
+        )
         lines = ["", f"    # trace {index}: dataflow fill {ref or ''}"]
         if not ref or not locator:
             lines.append("    # Unresolved dataflow fill skipped.")
@@ -637,6 +643,41 @@ class TraceSkillCompiler:
         locator = selected.get("locator") if isinstance(selected, dict) else None
         normalized = normalize_locator(locator if isinstance(locator, dict) else selected)
         return normalized if has_valid_locator(normalized) else {}
+
+    def _preferred_locator_for_trace(self, trace: RPAAcceptedTrace, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+        locator = self._best_locator(candidates)
+        if not locator:
+            return {}
+        if trace.source == "ai":
+            return locator
+        if trace.trace_type not in {
+            RPATraceType.MANUAL_ACTION,
+            RPATraceType.DATAFLOW_FILL,
+            RPATraceType.DATA_CAPTURE,
+        }:
+            return locator
+        return self._apply_exact_defaults(locator)
+
+    def _apply_exact_defaults(self, locator: Dict[str, Any]) -> Dict[str, Any]:
+        method = locator.get("method")
+        normalized = dict(locator)
+        if method == "nested":
+            parent = locator.get("parent")
+            child = locator.get("child")
+            if isinstance(parent, dict):
+                normalized["parent"] = self._apply_exact_defaults(parent)
+            if isinstance(child, dict):
+                normalized["child"] = self._apply_exact_defaults(child)
+            return normalized
+        if method == "nth":
+            base = locator.get("locator") or locator.get("base")
+            if isinstance(base, dict):
+                normalized["locator"] = self._apply_exact_defaults(base)
+                normalized.pop("base", None)
+            return normalized
+        if method in _EXACT_DEFAULT_METHODS and normalized.get("exact") is None:
+            normalized["exact"] = True
+        return normalized
 
     @staticmethod
     def _frame_scope_lines(frame_path: List[str]) -> tuple[List[str], str]:
