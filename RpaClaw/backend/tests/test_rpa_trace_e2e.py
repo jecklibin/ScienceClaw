@@ -177,136 +177,146 @@ async def test_recording_runtime_agent_browser_e2e_extract_restores_to_last_user
 
 
 @pytest.mark.asyncio
-async def test_generated_highest_star_skill_recomputes_current_page():
+async def test_generated_highest_star_skill_uses_runtime_ai(monkeypatch):
+    async def fake_runtime_ai_run(self, *, page, instruction, runtime_results=None):
+        await page.goto("https://example.test/projects/big", wait_until="domcontentloaded")
+        return SimpleNamespace(
+            success=True,
+            output_key="selected_project",
+            output={"name": "big", "url": "https://example.test/projects/big", "score": 99},
+            diagnostics=[],
+            message="ok",
+        )
+
+    monkeypatch.setattr(RecordingRuntimeAgent, "run", fake_runtime_ai_run)
+
     trace = RPAAcceptedTrace(
         trace_id="trace-star",
         trace_type=RPATraceType.AI_OPERATION,
         source="ai",
         user_instruction="open the project with the highest star count",
         output_key="selected_project",
-        output={"url": "https://github.com/recorded/repo"},
+        output={"url": "https://example.test/projects/recorded"},
         ai_execution=RPAAIExecution(
             language="python",
-            code="async def run(page, results):\n    return {'url': 'https://github.com/recorded/repo'}",
+            code="async def run(page, results):\n    return {'url': 'https://example.test/projects/recorded'}",
         ),
     )
     execute_skill = _load_execute_skill(TraceSkillCompiler().generate_script([trace], is_local=True))
 
-    html = """
-    <html><body>
-      <article class="Box-row">
-        <h2><a href="/small/repo">small / repo</a></h2>
-        <a href="/small/repo/stargazers">10</a>
-      </article>
-      <article class="Box-row">
-        <h2><a href="/big/repo">big / repo</a></h2>
-        <a href="/big/repo/stargazers">99</a>
-      </article>
-    </body></html>
-    """
-
     pw = await async_playwright().start()
     browser = await pw.chromium.launch(headless=True)
     page = await browser.new_page()
-    await page.route("https://github.com/big/repo", lambda route: route.fulfill(body="<html>big repo</html>"))
-    await page.set_content(html)
+    await page.route("https://example.test/projects/big", lambda route: route.fulfill(body="<html>big</html>"))
+    await page.set_content("<html><body>list</body></html>")
     result = await execute_skill(page)
     await browser.close()
     await pw.stop()
 
-    assert result["selected_project"]["url"] == "https://github.com/big/repo"
+    assert result["selected_project"]["url"] == "https://example.test/projects/big"
 
 
 @pytest.mark.asyncio
-async def test_generated_skill_rewrites_recorded_issue_url_to_dynamic_selected_project():
+async def test_generated_skill_rewrites_recorded_subpage_url_to_dynamic_selected_object(monkeypatch):
+    async def fake_runtime_ai_run(self, *, page, instruction, runtime_results=None):
+        await page.goto("https://example.test/projects/live", wait_until="domcontentloaded")
+        return SimpleNamespace(
+            success=True,
+            output_key="top_project",
+            output={"url": "https://example.test/projects/live"},
+            diagnostics=[],
+            message="ok",
+        )
+
+    monkeypatch.setattr(RecordingRuntimeAgent, "run", fake_runtime_ai_run)
+
     traces = [
         RPAAcceptedTrace(
             trace_id="trace-star",
             trace_type=RPATraceType.AI_OPERATION,
             source="ai",
             user_instruction="open the project with the highest star count",
-            output_key="top_starred_project",
-            output={"url": "https://github.com/ruvnet/RuView"},
+            output_key="top_project",
+            output={"url": "https://example.test/projects/recorded"},
             ai_execution=RPAAIExecution(
                 language="python",
-                code="async def run(page, results):\n    return {'url': 'https://github.com/ruvnet/RuView'}",
+                code="async def run(page, results):\n    return {'url': 'https://example.test/projects/recorded'}",
             ),
         ),
         RPAAcceptedTrace(
             trace_id="trace-issue",
             trace_type=RPATraceType.AI_OPERATION,
             source="ai",
-            user_instruction="find the latest issue title",
-            output_key="latest_issue_title",
-            output={"latest_issue_title": "Recorded latest"},
+            user_instruction="find the latest activity title",
+            output_key="latest_activity_title",
+            output={"latest_activity_title": "Recorded latest"},
             ai_execution=RPAAIExecution(
                 language="python",
                 code=(
                     "async def run(page, results):\n"
-                    "    await page.goto('https://github.com/ruvnet/RuView/issues?q=is%3Aissue')\n"
+                    "    await page.goto('https://example.test/projects/recorded/activity')\n"
                     "    title = await page.locator('a.Link--primary').first.inner_text()\n"
-                    "    return {'latest_issue_title': title.strip()}"
+                    "    return {'latest_activity_title': title.strip()}"
                 ),
             ),
         ),
     ]
     execute_skill = _load_execute_skill(TraceSkillCompiler().generate_script(traces, is_local=True))
 
-    trending_html = """
-    <html><body>
-      <article class="Box-row">
-        <h2><a href="/small/repo">small / repo</a></h2>
-        <a href="/small/repo/stargazers">10</a>
-      </article>
-      <article class="Box-row">
-        <h2><a href="/big/repo">big / repo</a></h2>
-        <a href="/big/repo/stargazers">99</a>
-      </article>
-    </body></html>
-    """
-    dynamic_issues_html = '<html><body><a class="Link--primary">Dynamic latest issue</a></body></html>'
-    recorded_issues_html = '<html><body><a class="Link--primary">Recorded latest issue</a></body></html>'
+    dynamic_activity_html = '<html><body><a class="Link--primary">Dynamic latest activity</a></body></html>'
+    recorded_activity_html = '<html><body><a class="Link--primary">Recorded latest activity</a></body></html>'
 
     pw = await async_playwright().start()
     browser = await pw.chromium.launch(headless=True)
     page = await browser.new_page()
-    await page.route("https://github.com/big/repo", lambda route: route.fulfill(body="<html>big repo</html>"))
-    await page.route("https://github.com/big/repo/issues?q=is%3Aissue", lambda route: route.fulfill(body=dynamic_issues_html))
+    await page.route("https://example.test/projects/live", lambda route: route.fulfill(body="<html>live</html>"))
+    await page.route("https://example.test/projects/live/activity", lambda route: route.fulfill(body=dynamic_activity_html))
     await page.route(
-        "https://github.com/ruvnet/RuView/issues?q=is%3Aissue",
-        lambda route: route.fulfill(body=recorded_issues_html),
+        "https://example.test/projects/recorded/activity",
+        lambda route: route.fulfill(body=recorded_activity_html),
     )
-    await page.set_content(trending_html)
+    await page.set_content("<html><body>list</body></html>")
     result = await execute_skill(page)
     await browser.close()
     await pw.stop()
 
-    assert result["top_starred_project"]["url"] == "https://github.com/big/repo"
-    assert result["latest_issue_title"] == {"latest_issue_title": "Dynamic latest issue"}
+    assert result["top_project"]["url"] == "https://example.test/projects/live"
+    assert result["latest_activity_title"] == {"latest_activity_title": "Dynamic latest activity"}
 
 
 @pytest.mark.asyncio
-async def test_generated_pr_extraction_skill_returns_records_from_current_page():
+async def test_generated_record_extraction_skill_runs_recorded_playwright_code():
     trace = RPAAcceptedTrace(
-        trace_id="trace-pr",
+        trace_id="trace-records",
         trace_type=RPATraceType.AI_OPERATION,
         source="ai",
-        user_instruction="collect the first 10 PR titles and creators",
-        output_key="top10_prs",
+        user_instruction="collect visible record titles and owners",
+        output_key="records",
         output=[{"title": "Recorded", "creator": "alice"}],
-        ai_execution=RPAAIExecution(code="async def run(page, results):\n    return []"),
+        ai_execution=RPAAIExecution(
+            code=(
+                "async def run(page, results):\n"
+                "    rows = await page.locator('.record-row').all()\n"
+                "    result = []\n"
+                "    for row in rows:\n"
+                "        title = (await row.locator('.title').inner_text()).strip()\n"
+                "        creator = (await row.locator('.creator').inner_text()).strip()\n"
+                "        result.append({'title': title, 'creator': creator})\n"
+                "    return result"
+            )
+        ),
     )
     execute_skill = _load_execute_skill(TraceSkillCompiler().generate_script([trace], is_local=True))
 
     html = """
     <html><body>
-      <div class="Box-row">
-        <a class="Link--primary" href="/owner/repo/pull/2">Fix parser</a>
-        <a data-hovercard-type="user" href="/alice">alice</a>
+      <div class="record-row">
+        <a class="title" href="/records/2">Fix parser</a>
+        <span class="creator">alice</span>
       </div>
-      <div class="Box-row">
-        <a class="Link--primary" href="/owner/repo/pull/1">Add docs</a>
-        <a data-hovercard-type="user" href="/bob">bob</a>
+      <div class="record-row">
+        <a class="title" href="/records/1">Add docs</a>
+        <span class="creator">bob</span>
       </div>
     </body></html>
     """
@@ -319,9 +329,9 @@ async def test_generated_pr_extraction_skill_returns_records_from_current_page()
     await browser.close()
     await pw.stop()
 
-    assert result["top10_prs"][:2] == [
-        {"title": "Fix parser", "creator": "alice", "url": "https://github.com/owner/repo/pull/2"},
-        {"title": "Add docs", "creator": "bob", "url": "https://github.com/owner/repo/pull/1"},
+    assert result["records"][:2] == [
+        {"title": "Fix parser", "creator": "alice"},
+        {"title": "Add docs", "creator": "bob"},
     ]
 
 
@@ -421,7 +431,19 @@ async def test_generated_skill_replays_trending_semantic_project_to_pr_extractio
             user_instruction="collect the first 10 PR titles and creators",
             output_key="top10_prs",
             output=[{"title": "Recorded", "creator": "alice"}],
-            ai_execution=RPAAIExecution(code="async def run(page, results):\n    return []"),
+            ai_execution=RPAAIExecution(
+                code=(
+                    "async def run(page, results):\n"
+                    "    rows = await page.locator('div.Box-row').all()\n"
+                    "    result = []\n"
+                    "    for row in rows:\n"
+                    "        title = (await row.locator('a.Link--primary').inner_text()).strip()\n"
+                    "        creator = (await row.locator('a[data-hovercard-type=\"user\"]').inner_text()).strip()\n"
+                    "        url = await row.locator('a.Link--primary').get_attribute('href')\n"
+                    "        result.append({'title': title, 'creator': creator, 'url': 'https://github.com' + url})\n"
+                    "    return result"
+                )
+            ),
         ),
     ]
     execute_skill = _load_execute_skill(TraceSkillCompiler().generate_script(traces, is_local=True))
@@ -538,7 +560,23 @@ async def test_generated_skill_replays_semantic_project_manual_pr_click_and_two_
             user_instruction="收集当前仓库的前两页PR（无论是什么状态）的信息，要求记录每个pr的创建人和标题，输出严格为数组",
             output_key="pr_list",
             output=[{"title": "Recorded", "creator": "alice"}],
-            ai_execution=RPAAIExecution(code="async def run(page, results):\n    return []"),
+            ai_execution=RPAAIExecution(
+                code=(
+                    "async def run(page, results):\n"
+                    "    result = []\n"
+                    "    async def collect():\n"
+                    "        rows = await page.locator('div.Box-row').all()\n"
+                    "        for row in rows:\n"
+                    "            title = (await row.locator('a.Link--primary').inner_text()).strip()\n"
+                    "            creator = (await row.locator('a[data-hovercard-type=\"user\"]').inner_text()).strip()\n"
+                    "            url = await row.locator('a.Link--primary').get_attribute('href')\n"
+                    "            result.append({'title': title, 'creator': creator, 'url': 'https://github.com' + url})\n"
+                    "    await collect()\n"
+                    "    await page.goto('https://github.com/openai/openai-agents-python/pulls?q=is%3Apr&page=2')\n"
+                    "    await collect()\n"
+                    "    return result"
+                )
+            ),
         ),
     ]
     execute_skill = _load_execute_skill(TraceSkillCompiler().generate_script(traces, is_local=True))
@@ -566,7 +604,13 @@ async def test_generated_skill_replays_semantic_project_manual_pr_click_and_two_
     await page.route("https://github.com/trending", lambda route: route.fulfill(body="<html>trending</html>"))
     await page.route(
         "https://github.com/openai/openai-agents-python",
-        lambda route: route.fulfill(body="<html>repo</html>"),
+        lambda route: route.fulfill(
+            body='<html><body><a href="/openai/openai-agents-python/pulls">Pull requests</a></body></html>'
+        ),
+    )
+    await page.route(
+        "https://github.com/openai/openai-agents-python/pulls",
+        lambda route: route.fulfill(body=pulls_page_1),
     )
     await page.route(
         "https://github.com/openai/openai-agents-python/pulls?q=is%3Apr",

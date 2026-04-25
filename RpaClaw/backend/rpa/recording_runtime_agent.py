@@ -1505,8 +1505,6 @@ def _is_machine_endpoint_url(url: str, *, before_url: str = "") -> bool:
     path = parsed.path.lower()
     if host.startswith("api.") or ".api." in host:
         return True
-    if host in {"api.github.com"}:
-        return True
     if "/api/" in path or path.startswith("/api/"):
         return True
     if path.endswith((".json", ".xml")):

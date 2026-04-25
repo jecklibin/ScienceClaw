@@ -31,6 +31,23 @@ def test_compiler_renders_navigation_trace():
     assert "https://github.com/trending" in script
 
 
+def test_compiler_does_not_emit_github_helpers_for_generic_web_trace():
+    script = TraceSkillCompiler().generate_script(
+        [
+            RPAAcceptedTrace(
+                trace_type=RPATraceType.NAVIGATION,
+                after_page=RPAPageState(url="https://example.test/customers/alpha"),
+            )
+        ],
+        is_local=True,
+    )
+
+    assert "https://example.test/customers/alpha" in script
+    assert "github" not in script.lower()
+    assert "_abs_github_url" not in script
+    assert "_github_repo_base" not in script
+
+
 def test_compiler_wraps_each_trace_with_trace_level_logging():
     script = TraceSkillCompiler().generate_script(
         [
@@ -60,7 +77,7 @@ def test_compiler_wraps_each_trace_with_trace_level_logging():
     assert "TRACE_ERROR" in script
 
 
-def test_compiler_generalizes_highest_star_trace_instead_of_hardcoding_url():
+def test_compiler_preserves_highest_star_selection_as_runtime_ai():
     script = TraceSkillCompiler().generate_script(
         [
             RPAAcceptedTrace(
@@ -79,8 +96,10 @@ def test_compiler_generalizes_highest_star_trace_instead_of_hardcoding_url():
         is_local=True,
     )
 
-    assert "stargazers" in script
-    assert "max_stars" in script
+    assert "_execute_runtime_ai_instruction(" in script
+    assert "stargazers" not in script
+    assert "max_stars" not in script
+    assert "_abs_github_url" not in script
     assert "https://github.com/recorded/repo" not in _execute_body(script)
 
 
@@ -562,7 +581,7 @@ def test_semantic_project_selection_compiles_to_runtime_ai_not_recorded_click():
     assert "page.locator('a[href=\"/openai/openai-agents-python\"]')" not in body
 
 
-def test_manual_pull_request_click_compiles_to_dynamic_repo_subpage_navigation():
+def test_manual_pull_request_click_keeps_recorded_locator_without_github_subpage_template():
     traces = [
         RPAAcceptedTrace(
             trace_type=RPATraceType.AI_OPERATION,
@@ -583,12 +602,12 @@ def test_manual_pull_request_click_compiles_to_dynamic_repo_subpage_navigation()
     script = TraceSkillCompiler().generate_script(traces, is_local=True)
     body = _execute_body(script)
 
-    assert "_github_repo_base(str(_resolve_result_ref(_results, 'selected_project.url')))" in body
-    assert "+ '/pulls?q=is%3Apr'" in body
-    assert "get_by_role('link', name='Pull requests').click()" not in body
+    assert "_github_repo_base" not in body
+    assert "+ '/pulls?q=is%3Apr'" not in body
+    assert "get_by_role('link', name='Pull requests').click()" in body
 
 
-def test_pr_extraction_two_pages_all_states_uses_paged_dynamic_pulls_template():
+def test_pr_extraction_instruction_stays_runtime_ai_without_pulls_template():
     traces = [
         RPAAcceptedTrace(
             trace_type=RPATraceType.AI_OPERATION,
@@ -607,9 +626,10 @@ def test_pr_extraction_two_pages_all_states_uses_paged_dynamic_pulls_template():
     script = TraceSkillCompiler().generate_script(traces, is_local=True)
     body = _execute_body(script)
 
-    assert "_page_count = 2" in body
-    assert "_target_url = _repo_base + '/pulls?q=is%3Apr'" in body
-    assert "_target_url += f'&page={_page_number}'" in body
+    assert "_execute_runtime_ai_instruction(" in body
+    assert "_page_count = 2" not in body
+    assert "_target_url = _repo_base + '/pulls?q=is%3Apr'" not in body
+    assert "_target_url += f'&page={_page_number}'" not in body
     assert "rows[:10]" not in body
 
 
@@ -640,8 +660,9 @@ def test_pr_extraction_does_not_fallback_to_recorded_observed_repo_url():
     body = _execute_body(script)
 
     assert "https://github.com/openai/openai-agents-python" not in body
-    assert "_resolve_first_result_ref(_results, ['selected_project.url', 'selected_project.value'])" in body
-    assert "_target_url = _repo_base + '/pulls?q=is%3Apr'" in body
+    assert "_execute_runtime_ai_instruction(" in body
+    assert "_resolve_first_result_ref(_results, ['selected_project.url', 'selected_project.value'])" not in body
+    assert "_target_url = _repo_base + '/pulls?q=is%3Apr'" not in body
 
 
 def test_issue_extraction_after_highest_star_uses_dynamic_result_not_recorded_repo_url():
