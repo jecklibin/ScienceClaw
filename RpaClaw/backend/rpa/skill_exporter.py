@@ -34,8 +34,10 @@ class SkillExporter:
         description: str,
         params: Dict[str, Any],
         recording_meta: Dict[str, Any],
+        projected_steps: list[Dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         legacy_steps = recording_meta.get("legacy_steps", [])
+        mcp_steps = projected_steps if projected_steps is not None else recording_meta.get("mcp_steps", legacy_steps)
         return {
             "version": 2,
             "kind": "rpa-recording",
@@ -47,6 +49,7 @@ class SkillExporter:
             "recording_source": recording_meta.get("recording_source", "trace"),
             "recording": recording_meta,
             "steps": legacy_steps,
+            "mcp_steps": mcp_steps,
             "artifacts": ["SKILL.md", "params.json", "skill.py"],
         }
 
@@ -150,6 +153,7 @@ The skill is implemented in `skill.py` using Playwright for browser automation.
                 "trace_diagnostics": [],
                 "recording_diagnostics": [],
             },
+            projected_steps=steps,
         )
 
         if settings.storage_backend == "local":
