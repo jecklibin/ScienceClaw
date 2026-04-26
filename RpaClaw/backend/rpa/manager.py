@@ -1139,22 +1139,6 @@ class RPASessionManager:
             return False
         return cls._is_menu_item_event(evt)
 
-    @staticmethod
-    def _is_document_body_click(evt: Dict[str, Any]) -> bool:
-        if evt.get("action") != "click":
-            return False
-        tag = str(evt.get("tag") or "").lower()
-        snapshot = evt.get("element_snapshot") if isinstance(evt.get("element_snapshot"), dict) else {}
-        snapshot_tag = str(snapshot.get("tag") or "").lower()
-        locator = evt.get("locator") if isinstance(evt.get("locator"), dict) else {}
-        locator_method = str(locator.get("method") or "").lower()
-        locator_value = str(locator.get("value") or "").strip().lower()
-        return (
-            tag in {"body", "html"}
-            or snapshot_tag in {"body", "html"}
-            or (locator_method == "css" and locator_value in {"body", "html"})
-        )
-
     @classmethod
     def _is_menu_item_event(cls, evt: Dict[str, Any]) -> bool:
         signals = evt.get("signals")
@@ -1326,12 +1310,6 @@ class RPASessionManager:
         if evt.get("action") == "hover":
             self._queue_hover_candidate(session_id, evt)
             return
-
-        if self._is_document_body_click(evt):
-            self._trim_pending_hover_candidates(session_id, int(evt.get("timestamp") or 0))
-            if self._pending_hover_candidates.get(session_id):
-                logger.debug("[RPA] Ignoring body click while preserving pending hover candidate")
-                return
 
         if evt.get("action") == "click":
             hover_evt = self._consume_promotable_hover_candidate(session_id, evt)

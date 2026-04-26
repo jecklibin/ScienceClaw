@@ -1383,58 +1383,6 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([action.action_kind.value for action in self.session.recorded_actions], ["hover", "click"])
         self.assertEqual([trace.action for trace in self.session.traces], ["hover", "click"])
 
-    async def test_body_click_between_hover_and_menu_item_does_not_drop_hover_candidate(self):
-        page = _FakePage("https://example.com", "Example")
-        tab_id = await self.manager.register_page(self.session.id, page, make_active=True)
-
-        await self.manager._handle_event(
-            self.session.id,
-            {
-                "action": "hover",
-                "tab_id": tab_id,
-                "tag": "BUTTON",
-                "timestamp": 1000,
-                "sequence": 10,
-                "locator": {"method": "role", "role": "button", "name": "Export"},
-                "signals": {"hover": {"is_menu_trigger_candidate": True}},
-            },
-        )
-
-        await self.manager._handle_event(
-            self.session.id,
-            {
-                "action": "click",
-                "tab_id": tab_id,
-                "tag": "BODY",
-                "timestamp": 1100,
-                "sequence": 11,
-                "locator": {"method": "css", "value": "body"},
-                "element_snapshot": {"tag": "body"},
-                "validation": {"status": "fallback", "details": "fallback css candidate"},
-            },
-        )
-
-        await self.manager._handle_event(
-            self.session.id,
-            {
-                "action": "click",
-                "tab_id": tab_id,
-                "tag": "A",
-                "timestamp": 1200,
-                "sequence": 12,
-                "locator": {"method": "text", "value": "Export all"},
-                "signals": {"menu_context": {"is_menu_item": True}},
-            },
-        )
-
-        self.assertEqual([step.action for step in self.session.steps], ["hover", "click"])
-        self.assertIn('button("Export")', self.session.steps[0].description)
-        self.assertIn('text("Export all")', self.session.steps[1].description)
-        self.assertNotIn("body", self.session.steps[0].description.lower())
-        self.assertNotIn("body", self.session.steps[1].description.lower())
-        self.assertEqual([action.action_kind.value for action in self.session.recorded_actions], ["hover", "click"])
-        self.assertEqual([trace.action for trace in self.session.traces], ["hover", "click"])
-
     async def test_hover_without_followup_click_does_not_enter_timeline(self):
         page = _FakePage("https://example.com", "Example")
         tab_id = await self.manager.register_page(self.session.id, page, make_active=True)
