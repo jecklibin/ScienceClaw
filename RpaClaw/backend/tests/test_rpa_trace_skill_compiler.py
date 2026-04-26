@@ -212,7 +212,7 @@ def test_compiler_uses_source_ref_for_dataflow_fill():
     script = TraceSkillCompiler().generate_script([trace], is_local=True)
 
     assert "customer_info.name" in script
-    assert "await current_page.get_by_role('textbox', name='Customer Name').fill(str(_value))" in script
+    assert "await current_page.get_by_role('textbox', name='Customer Name', exact=True).fill(str(_value))" in script
     assert "Alice Zhang" not in _execute_body(script)
 
 
@@ -240,7 +240,7 @@ def test_manual_fill_uses_sensitive_credential_param():
     )
     body = _execute_body(script)
 
-    assert "get_by_role('textbox', name='Password').fill(kwargs['password'])" in body
+    assert "get_by_role('textbox', name='Password', exact=True).fill(kwargs['password'])" in body
     assert "fill('{{credential}}')" not in body
 
 
@@ -268,11 +268,11 @@ def test_manual_fill_uses_plain_param_default_when_configured():
     )
     body = _execute_body(script)
 
-    assert "get_by_role('textbox', name='Username').fill(kwargs.get('username', 'admi'))" in body
+    assert "get_by_role('textbox', name='Username', exact=True).fill(kwargs.get('username', 'admi'))" in body
     assert "fill('admi')" not in body
 
 
-def test_manual_click_preserves_role_locator_without_forcing_exact():
+def test_manual_click_defaults_to_exact_match_for_role_locator():
     trace = RPAAcceptedTrace(
         trace_id="manual-click",
         trace_type=RPATraceType.MANUAL_ACTION,
@@ -286,8 +286,7 @@ def test_manual_click_preserves_role_locator_without_forcing_exact():
     script = TraceSkillCompiler().generate_script([trace], is_local=True)
     body = _execute_body(script)
 
-    assert "await current_page.get_by_role('link', name='菜鸟笔记').click()" in body
-    assert "exact=True" not in body
+    assert "await current_page.get_by_role('link', name='菜鸟笔记', exact=True).click()" in body
 
 
 def test_ai_data_capture_does_not_force_exact_match_when_unspecified():
@@ -349,8 +348,8 @@ def test_duplicate_sensitive_fill_values_consume_params_in_order():
     )
     body = _execute_body(script)
 
-    assert "get_by_role('textbox', name='Portal Password').fill(kwargs['password'])" in body
-    assert "get_by_role('textbox', name='ERP Password').fill(kwargs['password_2'])" in body
+    assert "get_by_role('textbox', name='Portal Password', exact=True).fill(kwargs['password'])" in body
+    assert "get_by_role('textbox', name='ERP Password', exact=True).fill(kwargs['password_2'])" in body
 
 
 def test_manual_hover_compiles_to_locator_hover():
@@ -367,7 +366,7 @@ def test_manual_hover_compiles_to_locator_hover():
     script = TraceSkillCompiler().generate_script([trace], is_local=True)
     body = _execute_body(script)
 
-    assert "get_by_role('button', name='Export').hover()" in body
+    assert "get_by_role('button', name='Export', exact=True).hover()" in body
 
 
 def test_manual_popup_click_compiles_to_expect_popup_and_switches_page():
@@ -695,7 +694,7 @@ def test_manual_navigate_click_preserves_click_navigation_semantics():
     body = _execute_body(script)
 
     assert "expect_navigation" in body
-    assert "get_by_role('button', name='登录').click()" in body
+    assert "get_by_role('button', name='登录', exact=True).click()" in body
     assert "goto(_target_url" not in body
 
 
@@ -825,12 +824,12 @@ def test_navigation_after_manual_action_that_already_reached_url_is_skipped():
     script = TraceSkillCompiler().generate_script(traces, is_local=True)
     body = _execute_body(script)
 
-    assert "get_by_role('link', name='Pull requests').click()" in body
+    assert "get_by_role('link', name='Pull requests', exact=True).click()" in body
     assert "goto(_target_url" not in body
     assert "导航到 https://github.com/owner/repo/pulls" not in body
 
 
-def test_manual_link_locator_does_not_force_exact_when_unspecified():
+def test_manual_link_locator_defaults_to_exact_when_unspecified():
     trace = RPAAcceptedTrace(
         trace_type=RPATraceType.MANUAL_ACTION,
         action="click",
@@ -843,8 +842,7 @@ def test_manual_link_locator_does_not_force_exact_when_unspecified():
     script = TraceSkillCompiler().generate_script([trace], is_local=True)
     body = _execute_body(script)
 
-    assert "get_by_role('link', name='Pull requests').click()" in body
-    assert "exact=True" not in body
+    assert "get_by_role('link', name='Pull requests', exact=True).click()" in body
 
 
 def test_semantic_project_selection_compiles_to_runtime_ai_not_recorded_click():
@@ -901,7 +899,7 @@ def test_manual_pull_request_click_keeps_recorded_locator_without_github_subpage
 
     assert "_github_repo_base" not in body
     assert "+ '/pulls?q=is%3Apr'" not in body
-    assert "get_by_role('link', name='Pull requests').click()" in body
+    assert "get_by_role('link', name='Pull requests', exact=True).click()" in body
 
 
 def test_pr_extraction_instruction_stays_runtime_ai_without_pulls_template():

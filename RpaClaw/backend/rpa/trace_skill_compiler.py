@@ -10,6 +10,9 @@ from .trace_locator_utils import has_valid_locator, normalize_locator
 from .trace_models import RPAAcceptedTrace, RPATraceType
 
 
+_EXACT_DEFAULT_METHODS = {"role", "label", "placeholder", "alt", "title", "text"}
+
+
 class TraceSkillCompiler:
     def generate_script(
         self,
@@ -653,7 +656,36 @@ class TraceSkillCompiler:
         locator = self._best_locator(candidates)
         if not locator:
             return {}
-        return locator
+        if trace.source == "ai":
+            return locator
+        if trace.trace_type not in {
+            RPATraceType.MANUAL_ACTION,
+            RPATraceType.DATAFLOW_FILL,
+            RPATraceType.DATA_CAPTURE,
+        }:
+            return locator
+        return self._apply_exact_defaults(locator)
+
+    def _apply_exact_defaults(self, locator: Dict[str, Any]) -> Dict[str, Any]:
+        method = locator.get("method")
+        normalized = dict(locator)
+        if method == "nested":
+            parent = locator.get("parent")
+            child = locator.get("child")
+            if isinstance(parent, dict):
+                normalized["parent"] = self._apply_exact_defaults(parent)
+            if isinstance(child, dict):
+                normalized["child"] = self._apply_exact_defaults(child)
+            return normalized
+        if method == "nth":
+            base = locator.get("locator") or locator.get("base")
+            if isinstance(base, dict):
+                normalized["locator"] = self._apply_exact_defaults(base)
+                normalized.pop("base", None)
+            return normalized
+        if method in _EXACT_DEFAULT_METHODS and normalized.get("exact") is None:
+            normalized["exact"] = True
+        return normalized
 
     @staticmethod
     def _frame_scope_lines(frame_path: List[str]) -> tuple[List[str], str]:
