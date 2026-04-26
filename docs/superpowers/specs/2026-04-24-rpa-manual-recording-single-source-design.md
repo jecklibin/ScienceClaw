@@ -1,5 +1,9 @@
 # RPA Manual Recording Single Source Design
 
+> Status: Implemented with compatibility layers.
+>
+> The current code has `ManualRecordedAction` and `ManualRecordingDiagnostic` in `RpaClaw/backend/rpa/manual_recording_models.py`, normalizes manual actions in `manual_recording_normalizer.py`, and derives traces for compilation. Legacy `steps` and `traces` still exist for UI/API/compiler compatibility, so this document's "replace" language should be read as the target invariant, not a complete removal of old fields.
+
 Branch: `codex/rpa-trace-first-recording`
 
 Date: `2026-04-24`

@@ -1,5 +1,9 @@
 # RPA Node Engine Design
 
+> Status: Superseded / not implemented as the current architecture.
+>
+> This document is historical context. The current RPA runtime remains Python/Playwright-led in `RpaClaw/backend/rpa/*`, with vendored recorder runtime pieces where useful. Do not use this document as authority for current runtime ownership, process topology, or implementation tasks.
+
 ## Summary
 
 The current RPA recorder is implemented as a Python-driven Playwright session plus a custom injected recorder script. In practice, this design still suffers from two structural problems:

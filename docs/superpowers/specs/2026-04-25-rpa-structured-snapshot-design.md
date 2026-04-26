@@ -1,5 +1,9 @@
 # RPA Structured Snapshot Design
 
+> Status: Core implementation landed.
+>
+> Snapshot v2 currently collects `table_views` and `detail_views` in `RpaClaw/backend/rpa/assistant_snapshot_runtime.py`; `snapshot_compression.py` preserves compact structured facts; `recording_runtime_agent.py` uses them for prompt context and guarded table/ordinal overlay plans. Treat future-branch wording below as historical.
+
 ## Goal
 
 Improve natural-language browser operation accuracy for internal enterprise pages by upgrading recording-time page evidence from compressed DOM regions to structured page facts.

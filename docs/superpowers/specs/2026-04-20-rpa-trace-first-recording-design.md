@@ -1,5 +1,9 @@
 # RPA Trace-first Recording Design
 
+> Status: Current baseline direction, partially implemented.
+>
+> The current code follows this direction: operate the browser first, record facts/traces, and compile/generalize later. Verify exact behavior in `RpaClaw/backend/rpa/manager.py`, `recording_runtime_agent.py`, `trace_recorder.py`, and `trace_skill_compiler.py`.
+
 Date: 2026-04-20
 
 Branch: `codex/rpa-trace-first-recording`
