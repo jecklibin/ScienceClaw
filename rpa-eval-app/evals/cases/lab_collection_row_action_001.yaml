@@ -1,0 +1,27 @@
+id: lab_collection_row_action_001
+name: Preserve scoped collection row action semantics
+tags: [regression, compiler, locator_rewrite, replay]
+user:
+  username: buyer
+  password: buyer123
+start_path: /regression-lab
+timeout_s: 120
+instruction: >
+  在 Collection locator rewrite guard 区域，打开 scoped collection 表格第二行里的
+  Open row action 操作按钮。目标行的 Row key 是 COLLECTION-ROW-002。
+pre_api_assertions:
+  - name: collection_row_action_not_done_before_run
+    path: /api/lab/events
+    find:
+      event_key: collection_row_action
+    absent: true
+api_assertions:
+  - name: collection_second_row_action_done
+    path: /api/lab/events
+    find:
+      event_key: collection_row_action
+      entity_id: COLLECTION-ROW-002
+    expect:
+      status: completed
+assertions:
+  accepted_trace_min: 1

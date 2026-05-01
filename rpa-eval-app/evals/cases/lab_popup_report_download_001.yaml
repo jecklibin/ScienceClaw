@@ -1,0 +1,36 @@
+id: lab_popup_report_download_001
+name: Preserve popup tab and download signal ownership
+tags: [regression, popup, tab, download]
+user:
+  username: buyer
+  password: buyer123
+start_path: /regression-lab
+timeout_s: 150
+instruction: >
+  在 Popup tab download 区域，打开 popup report 新标签页或新窗口，
+  切换到这个 popup report 页面，并下载 popup_report_2026.csv。
+expected:
+  download:
+    filename: popup_report_2026.csv
+pre_api_assertions:
+  - name: popup_report_not_downloaded_before_run
+    path: /api/reports/download-events
+    find:
+      filename: popup_report_2026.csv
+    absent: true
+api_assertions:
+  - name: popup_report_download_event
+    path: /api/reports/download-events
+    find:
+      filename: popup_report_2026.csv
+    expect:
+      source: popup_report_download
+  - name: popup_report_lab_event
+    path: /api/lab/events
+    find:
+      event_key: popup_report_downloaded
+      entity_id: POPUP-2026-RPA-001
+    expect:
+      status: completed
+assertions:
+  accepted_trace_min: 1

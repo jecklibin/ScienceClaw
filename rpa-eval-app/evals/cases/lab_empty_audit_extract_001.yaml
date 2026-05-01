@@ -1,0 +1,30 @@
+id: lab_empty_audit_extract_001
+name: Treat explicit empty extraction as valid output
+tags: [regression, extraction, empty_result]
+user:
+  username: buyer
+  password: buyer123
+start_path: /regression-lab
+timeout_s: 90
+instruction: >
+  在 Legitimate empty extraction 区域，按 failed 状态筛选审计记录。
+  请确认筛选后的 failed 审计记录列表为空，并在结果中明确说明这是一个空结果。
+expected:
+  output_text:
+    - [empty, "No failed audit records", "0"]
+pre_api_assertions:
+  - name: empty_audit_not_filtered_before_run
+    path: /api/lab/events
+    find:
+      event_key: empty_audit_filtered
+    absent: true
+api_assertions:
+  - name: empty_audit_filter_applied
+    path: /api/lab/events
+    find:
+      event_key: empty_audit_filtered
+      entity_id: AUDIT-FAILED-EMPTY
+    expect:
+      status: completed
+assertions:
+  accepted_trace_min: 1

@@ -132,3 +132,11 @@ class DownloadEventOut(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class LabEventOut(BaseModel):
+    event_key: str
+    entity_id: str
+    status: str
+    payload: dict
+    created_at: datetime

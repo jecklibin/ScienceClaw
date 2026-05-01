@@ -1,0 +1,27 @@
+id: lab_parameterized_contract_001
+name: Open parameterized alternate contract rather than recorded default
+tags: [regression, parameterization, dehardcode]
+user:
+  username: buyer
+  password: buyer123
+start_path: /regression-lab
+timeout_s: 120
+instruction: >
+  在 Parameterized contract target 区域，搜索合同 CT-2026-RPA-ALT-001，
+  并打开这个 alternate contract。不要打开 CT-2026-RPA-001。
+pre_api_assertions:
+  - name: parameterized_contract_not_opened_before_run
+    path: /api/lab/events
+    find:
+      event_key: parameterized_contract_opened
+    absent: true
+api_assertions:
+  - name: alternate_contract_opened
+    path: /api/lab/events
+    find:
+      event_key: parameterized_contract_opened
+      entity_id: CT-2026-RPA-ALT-001
+    expect:
+      status: completed
+assertions:
+  accepted_trace_min: 1

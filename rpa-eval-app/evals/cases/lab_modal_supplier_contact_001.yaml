@@ -1,0 +1,33 @@
+id: lab_modal_supplier_contact_001
+name: Keep form filling scoped to the active modal dialog
+tags: [regression, modal, actionability]
+user:
+  username: buyer
+  password: buyer123
+start_path: /regression-lab
+timeout_s: 120
+instruction: >
+  在 Modal scoped form 区域，打开供应商联系人弹窗。只在弹窗里操作：
+  Supplier number 填 SUP-2026-MODAL，Contact person 填 Modal Contact，
+  Contact phone 填 138-0000-7777，Contact email 填 modal.contact@example.com。
+  然后保存弹窗里的供应商信息。不要编辑背景区域里的 Contact person 字段。
+pre_api_assertions:
+  - name: modal_supplier_not_saved_before_run
+    path: /api/lab/events
+    find:
+      event_key: modal_supplier_saved
+    absent: true
+api_assertions:
+  - name: modal_supplier_saved
+    path: /api/lab/events
+    find:
+      event_key: modal_supplier_saved
+      entity_id: SUP-2026-MODAL
+    expect:
+      status: completed
+      payload:
+        contact_person: Modal Contact
+        contact_phone: 138-0000-7777
+        contact_email: modal.contact@example.com
+assertions:
+  accepted_trace_min: 1

@@ -83,6 +83,18 @@ def load_fixtures(db: Session) -> None:
             contact_phone="139-0000-2603",
             contact_email="linjf@cloudchain.example",
         ),
+        Supplier(
+            number="SUP-2026-ALT-001",
+            name="RPA Alt Supplier Ltd.",
+            status="active",
+            category="RPA test data",
+            region="East",
+            risk_level="low",
+            compliance_rating="A",
+            contact_person="Alex Chen",
+            contact_phone="138-0000-2699",
+            contact_email="alex.chen@alt-supplier.example",
+        ),
     ]
     db.add_all(suppliers)
     db.flush()
@@ -124,6 +136,18 @@ def load_fixtures(db: Session) -> None:
             start_date="2026-03-01",
             end_date="2026-09-30",
             compliance_clause="项目交付必须通过内控抽样复核并保留验收证据。",
+        ),
+        Contract(
+            number="CT-2026-RPA-ALT-001",
+            title="RPA regression alternate contract",
+            contract_type="software_subscription",
+            status="effective",
+            supplier_id=supplier_by_number["SUP-2026-ALT-001"].id,
+            amount=910000.0,
+            owner_department="Regression Lab",
+            start_date="2026-04-01",
+            end_date="2026-12-31",
+            compliance_clause="Alternate replay fixture for parameterized recording checks.",
         ),
     ]
     db.add_all(contracts)

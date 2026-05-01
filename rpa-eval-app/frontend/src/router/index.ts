@@ -19,7 +19,9 @@ const router = createRouter({
         { path: 'purchase-requests/new', name: 'purchase-request-form', component: () => import('@/views/PurchaseRequestForm.vue') },
         { path: 'purchase-orders', name: 'purchase-orders', component: () => import('@/views/PurchaseOrders.vue') },
         { path: 'approvals', name: 'approvals', component: () => import('@/views/Approvals.vue') },
-        { path: 'reports', name: 'reports', component: () => import('@/views/Reports.vue') }
+        { path: 'reports', name: 'reports', component: () => import('@/views/Reports.vue') },
+        { path: 'regression-lab', name: 'regression-lab', component: () => import('@/views/RegressionLab.vue') },
+        { path: 'regression-lab/popup-report', name: 'regression-popup-report', component: () => import('@/views/PopupReport.vue') }
       ]
     }
   ]

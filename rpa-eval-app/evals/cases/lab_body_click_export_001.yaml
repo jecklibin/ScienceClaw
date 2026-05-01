@@ -1,0 +1,27 @@
+id: lab_body_click_export_001
+name: Guard against weak body click pollution after row selection
+tags: [regression, manual_recording, dropdown, body_click]
+user:
+  username: buyer
+  password: buyer123
+start_path: /regression-lab
+timeout_s: 120
+instruction: >
+  在 Weak body click guard 区域，先勾选导出表格中的全选框，然后打开 Export menu，
+  再点击 Export all columns。只有确认导出全部列动作已经触发后，才结束本次操作。
+pre_api_assertions:
+  - name: body_click_export_not_triggered_before_run
+    path: /api/lab/events
+    find:
+      event_key: body_click_export_all
+    absent: true
+api_assertions:
+  - name: body_click_export_triggered
+    path: /api/lab/events
+    find:
+      event_key: body_click_export_all
+      entity_id: EXPORT-ALL-2026
+    expect:
+      status: completed
+assertions:
+  accepted_trace_min: 1
