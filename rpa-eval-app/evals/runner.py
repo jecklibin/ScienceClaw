@@ -233,6 +233,8 @@ def run_case(
         assert_metrics(case.get("assertions", {}), result["metrics"])
         if getattr(args, "verify_replay", False):
             eval_client.reset(args.reset_token)
+            eval_session = eval_client.login(username, password)
+            result["eval_user"] = eval_session.user
             try:
                 replay_result = replay_generated_skill(
                     rpa_client=rpa_client,
@@ -240,18 +242,25 @@ def run_case(
                     params=case.get("params") or {},
                     timeout_s=float(getattr(args, "replay_timeout_s", 90.0)),
                     allow_runtime_ai=bool(getattr(args, "allow_runtime_ai_replay", False)),
+                    setup_navigation=[
+                        build_eval_auth_url(args.eval_frontend_url, eval_session.token),
+                        start_url,
+                    ],
                 )
             except CaseAssertionError as exc:
                 if exc.stage in result["phase_results"]:
                     result["phase_results"][exc.stage] = {"status": "failed", "message": str(exc)}
                 raise
-            eval_session = eval_client.login(username, password)
-            result["eval_user"] = eval_session.user
             result["phase_results"]["compile"] = replay_result["compile"]
             result["phase_results"]["replay"] = replay_result["replay"]
             result["replay"] = replay_result
         assert_api_assertions(case.get("api_assertions", []), eval_client, eval_session.token)
-        assert_expected_telemetry(case.get("expected", {}), result["metrics"])
+        telemetry_metrics = result["metrics"]
+        if getattr(args, "verify_replay", False):
+            replay_metrics = (result.get("replay") or {}).get("metrics")
+            if isinstance(replay_metrics, dict):
+                telemetry_metrics = replay_metrics
+        assert_expected_telemetry(case.get("expected", {}), telemetry_metrics)
         result["passed"] = True
     except RpaClawTimeoutError as exc:
         result["session_id"] = exc.session_id
@@ -291,6 +300,7 @@ def replay_generated_skill(
     params: dict[str, Any],
     timeout_s: float,
     allow_runtime_ai: bool = False,
+    setup_navigation: list[str] | None = None,
 ) -> dict[str, Any]:
     generated = rpa_client.generate_script(session_id, params)
     script = str(generated.get("script") or "")
@@ -306,7 +316,12 @@ def replay_generated_skill(
         compile_result["status"] = "failed"
         raise CaseAssertionError("compile", "generated script uses runtime AI and is not deterministic for replay")
 
-    tested = rpa_client.test_script(session_id, params, timeout_s=timeout_s)
+    tested = rpa_client.test_script(
+        session_id,
+        params,
+        timeout_s=timeout_s,
+        setup_navigation=setup_navigation,
+    )
     success = str(tested.get("status") or "").lower() == "success"
     result = tested.get("result") if isinstance(tested.get("result"), dict) else {}
     if result and result.get("success") is False:
@@ -315,11 +330,36 @@ def replay_generated_skill(
         "status": "passed" if success else "failed",
         "logs": tested.get("logs") or [],
         "error": result.get("error") if isinstance(result, dict) else None,
+        "metrics": replay_telemetry_metrics(tested),
     }
     if not success:
         message = replay_result.get("error") or tested.get("error") or "generated script replay failed"
         raise CaseAssertionError("replay", str(message))
     return {"compile": compile_result, "replay": replay_result}
+
+
+def replay_telemetry_metrics(tested: dict[str, Any]) -> dict[str, Any]:
+    result = tested.get("result") if isinstance(tested.get("result"), dict) else {}
+    telemetry = result.get("telemetry") if isinstance(result.get("telemetry"), dict) else {}
+    output_parts = []
+    for key in ("output", "data"):
+        value = result.get(key)
+        if value in (None, ""):
+            continue
+        if isinstance(value, str):
+            output_parts.append(value)
+        else:
+            output_parts.append(json.dumps(value, ensure_ascii=False, default=str))
+    return {
+        "accepted_trace_count": 0,
+        "diagnostics_count": 0,
+        "event_count": 0,
+        "runtime_result_count": 0,
+        "final_url": str(telemetry.get("final_url") or ""),
+        "visible_text": str(telemetry.get("visible_text") or ""),
+        "output_text": "\n".join(output_parts),
+        "downloads": telemetry.get("downloads") or [],
+    }
 
 
 def generated_script_uses_runtime_ai(script: str) -> bool:
@@ -480,6 +520,12 @@ def assert_expected_telemetry(expected: dict[str, Any], metrics: dict[str, Any])
             raise CaseAssertionError("assertion", f"expected final URL path {expected_path}, got {actual_path}")
 
     extracted_fields = expected.get("extracted_fields") or {}
+    empty_result_confirmed = False
+    if expected.get("empty_result"):
+        empty_result_confirmed = output_confirms_empty_result(metrics, expected.get("empty_result") or {})
+        if not empty_result_confirmed:
+            raise CaseAssertionError("assertion", "expected empty-result evidence was not found in agent output")
+
     visible_text = expected.get("visible_text") or []
     if visible_text:
         text_blob = metrics.get("visible_text") or ""
@@ -495,7 +541,7 @@ def assert_expected_telemetry(expected: dict[str, Any], metrics: dict[str, Any])
         if not output_blob:
             raise CaseAssertionError("unsupported_output_telemetry", "output_text assertions require agent output telemetry")
         missing = [value for value in expected_output_text if not text_contains_expected(output_blob, value)]
-        if missing:
+        if missing and not empty_result_confirmed:
             raise CaseAssertionError("assertion", f"expected output text values were not found: {missing}")
 
     if extracted_fields:
@@ -761,7 +807,10 @@ def flatten_strings(value: Any) -> list[str]:
         return [str(value)]
     if isinstance(value, dict):
         strings = []
-        for item in value.values():
+        for key, item in value.items():
+            key_text = str(key or "").strip()
+            if key_text:
+                strings.append(key_text)
             strings.extend(flatten_strings(item))
         return strings
     if isinstance(value, list):
@@ -785,6 +834,137 @@ def text_contains_expected(text: str, expected: Any) -> bool:
     normalized_text = normalize_text_for_match(text)
     normalized_expected = normalize_text_for_match(expected_text)
     return bool(normalized_expected and normalized_expected in normalized_text)
+
+
+def output_confirms_empty_result(metrics: dict[str, Any], expected_empty: dict[str, Any]) -> bool:
+    output_blob = metrics.get("output_text") or ""
+    if not output_blob:
+        return False
+    normalized = normalize_text_for_match(output_blob).lower()
+    query = str(expected_empty.get("query") or "").strip()
+    if query and normalize_text_for_match(query).lower() not in normalized:
+        return False
+    if any(_structured_empty_result_evidence(item) for item in _extract_structured_output_values(output_blob)):
+        return True
+    if _flattened_output_confirms_empty_result(output_blob):
+        return True
+    positive_markers = (
+        "empty_result_confirmedtrue",
+        "emptytrue",
+        "empty_state_visibletrue",
+        "empty_visibletrue",
+        "is_emptytrue",
+        "no_matchtrue",
+        "no_resulttrue",
+    )
+    zero_count_markers = (
+        "row_count0",
+        "result_count0",
+        "record_count0",
+        "matched_count0",
+        "total0",
+        "count0",
+    )
+    return any(marker in normalized for marker in positive_markers) or any(
+        marker in normalized for marker in zero_count_markers
+    )
+
+
+def _extract_structured_output_values(output_blob: str) -> list[Any]:
+    values: list[Any] = []
+    decoder = json.JSONDecoder()
+    text = str(output_blob or "")
+    for prefix in ("SKILL_DATA:", ""):
+        start = 0
+        while True:
+            index = text.find(prefix, start) if prefix else min(
+                [pos for pos in (text.find("{", start), text.find("[", start)) if pos >= 0],
+                default=-1,
+            )
+            if index < 0:
+                break
+            json_start = index + len(prefix) if prefix else index
+            try:
+                value, offset = decoder.raw_decode(text[json_start:].lstrip())
+            except json.JSONDecodeError:
+                start = json_start + 1
+                continue
+            values.append(value)
+            start = json_start + offset + 1
+    return values
+
+
+def _structured_empty_result_evidence(value: Any, parent_key: str = "") -> bool:
+    key = normalize_text_for_match(parent_key).lower()
+    if isinstance(value, dict):
+        for child_key, child_value in value.items():
+            child_key_text = str(child_key or "")
+            normalized_key = normalize_text_for_match(child_key_text).lower()
+            if isinstance(child_value, bool) and child_value and _is_empty_boolean_key(normalized_key):
+                return True
+            if _is_zero_count_value(child_value) and _is_count_or_collection_key(normalized_key):
+                return True
+            if _structured_empty_result_evidence(child_value, child_key_text):
+                return True
+        return False
+    if isinstance(value, list):
+        if not value and _is_count_or_collection_key(key):
+            return True
+        return any(_structured_empty_result_evidence(item, parent_key) for item in value)
+    return False
+
+
+def _flattened_output_confirms_empty_result(output_blob: str) -> bool:
+    lines = [line.strip() for line in str(output_blob or "").splitlines() if line.strip()]
+    for key, value in zip(lines, lines[1:]):
+        normalized_key = normalize_text_for_match(key).lower()
+        if _is_count_or_collection_key(normalized_key) and _is_zero_count_value(value):
+            return True
+        if _is_empty_boolean_key(normalized_key) and normalize_text_for_match(value).lower() == "true":
+            return True
+    return False
+
+
+def _is_empty_boolean_key(key: str) -> bool:
+    normalized = normalize_text_for_match(key).lower()
+    return normalized in {
+        "empty",
+        "isempty",
+        "emptyresult",
+        "emptyresultconfirmed",
+        "emptystatevisible",
+        "emptyvisible",
+        "nomatch",
+        "noresult",
+    }
+
+
+def _is_count_or_collection_key(key: str) -> bool:
+    normalized = normalize_text_for_match(key).lower()
+    return (
+        "count" in normalized
+        or normalized.endswith("rows")
+        or normalized.endswith("items")
+        or normalized.endswith("results")
+        or normalized.endswith("records")
+        or normalized.endswith("matches")
+    )
+
+
+def _is_zero_count_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float, Decimal)):
+        return Decimal(str(value)) == 0
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return False
+        try:
+            return Decimal(text.replace(",", "")) == 0
+        except InvalidOperation:
+            return False
+    return False
 
 
 def is_number_like(value: Any) -> bool:

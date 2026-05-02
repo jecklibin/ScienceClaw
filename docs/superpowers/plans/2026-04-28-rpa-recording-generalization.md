@@ -237,3 +237,97 @@ Latest full run after the adapter and structured-instruction cleanup passed 7 of
 - `report_contract_export_001`
 
 Remaining failures were timeouts, replay start-state mismatch, and record-stage failures after bounded repairs.
+
+### Task 9: Runtime Module Boundary Cleanup
+
+**Files:**
+- Add: `RpaClaw/backend/rpa/recording_contracts.py`
+- Add: `RpaClaw/backend/rpa/recording_effects.py`
+- Add: `RpaClaw/backend/rpa/recording_repair.py`
+- Add: `RpaClaw/backend/rpa/recording_terminal_recovery.py`
+- Add: `RpaClaw/backend/rpa/recording_verifier.py`
+- Add: `RpaClaw/backend/rpa/playwright_code_normalizer.py`
+- Modify: `RpaClaw/backend/rpa/recording_runtime_agent.py`
+- Modify: `RpaClaw/backend/rpa/trace_skill_compiler.py`
+- Tests: `RpaClaw/backend/tests/test_rpa_recording_runtime_agent.py`
+- Tests: `RpaClaw/backend/tests/test_rpa_trace_skill_compiler.py`
+
+- [x] **Step 1: Extract terminal contract and effect verification responsibilities**
+
+Move terminal contract normalization and effect verification out of the main runtime agent. The runtime remains responsible for the observe/plan/execute/repair loop; `recording_effects.py` and `recording_verifier.py` own terminal evidence and state-change validation.
+
+- [x] **Step 2: Keep recovery evidence structured**
+
+`recording_terminal_recovery.py` only promotes recovery evidence from declared input bindings, terminal contracts, postconditions, structured outputs, and before/after browser evidence. Raw generated code and error strings remain diagnostic context.
+
+- [x] **Step 3: Normalize Playwright code with conservative helpers**
+
+`playwright_code_normalizer.py` centralizes fill, combobox, dialog action, and download stabilization helpers. Direct DOM value mutation is not considered a success path; combobox and dialog fallbacks require observable structural evidence.
+
+- [x] **Step 4: Preserve trace-first failure semantics**
+
+Recovered attempts and replayable preconditions are only non-fatal when a strong compiled postcondition validates the terminal state. Otherwise browser-side failures remain fatal.
+
+### Task 10: Snapshot Adapter Module Split
+
+**Files:**
+- Add: `RpaClaw/backend/rpa/assistant_snapshot_adapters.py`
+- Modify: `RpaClaw/backend/rpa/assistant_snapshot_runtime.py`
+- Tests: `RpaClaw/backend/tests/test_rpa_assistant_snapshot_runtime.py`
+
+- [x] **Step 1: Keep the default collector semantic**
+
+Default snapshot collection is based on HTML, ARIA, `data-*`, label/value, table, dialog, and region semantics. It does not include AUI selectors or eval-app business selectors.
+
+- [x] **Step 2: Move framework selectors into adapters**
+
+Jalor iGrid table support and Element/Ant/Vant/class-modal dialog support live in `assistant_snapshot_adapters.py`. Each adapter emits the same schema as the default collector.
+
+### Task 11: Evaluation Framework Hardening
+
+**Files:**
+- Modify: `rpa-eval-app/evals/runner.py`
+- Modify: `rpa-eval-app/evals/rpa_client.py`
+- Modify: `rpa-eval-app/frontend/src/views/RegressionLab.vue`
+- Modify: `rpa-eval-app/frontend/src/views/PopupReport.vue`
+- Tests: `rpa-eval-app/evals/test_runner.py`
+- Tests: `rpa-eval-app/evals/test_rpa_client.py`
+
+- [x] **Step 1: Verify replay from a clear starting state**
+
+The runner resets data, establishes eval authentication, records the task, compiles the generated skill, re-establishes the replay start state, and then runs the script.
+
+- [x] **Step 2: Strengthen assertion sources**
+
+Extraction assertions prefer structured output/trace data. Empty-result assertions parse structured outputs instead of flat text markers. Download assertions require real API/download evidence instead of filename mentions.
+
+- [x] **Step 3: Replace test-only visible messages**
+
+The eval pages keep internal `event_key` values in API telemetry and display user-facing status messages in the UI.
+
+### Task 12: Full Verify-Replay Evaluation Refresh
+
+**Files:**
+- No production file changes expected.
+
+- [x] **Step 1: Clean stale local processes**
+
+Clear stale listeners on `8085`, `5175`, and `12001` before running full verification.
+
+- [x] **Step 2: Run full verification**
+
+Command used:
+
+```powershell
+python -u rpa-eval-app\evals\runner.py --all --verify-replay --eval-backend-url http://127.0.0.1:8085 --eval-frontend-url http://127.0.0.1:5175 --rpaclaw-url http://127.0.0.1:12001 --case-timeout-s 180 --replay-timeout-s 120
+```
+
+- [x] **Step 3: Record result**
+
+Latest full run passed 15 of 20 cases, for a 75.0% pass rate. Remaining failures are:
+
+- `approval_high_priority_001`: record-stage table/list row not visible or not loaded.
+- `contract_lookup_then_purchase_request_001`: multi-stage read/write flow stops after contract detail read.
+- `lab_dataflow_cost_center_001`: generated output claims correct dataflow, but API assertion shows form state was not submitted with the expected values.
+- `lab_empty_audit_extract_001`: explicit empty extraction routes through slow planning and times out.
+- `report_async_download_001`: async report polling/download scopes the wrong table when detail and list tables share header text.

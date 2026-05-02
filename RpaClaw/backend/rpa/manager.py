@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import uuid
 import asyncio
 import re
@@ -21,7 +22,17 @@ from .trace_recorder import infer_dataflow_for_ai_fill, infer_dataflow_for_fill,
 
 logger = logging.getLogger(__name__)
 
-RPA_PAGE_TIMEOUT_MS = 60000
+
+def _env_positive_int(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+RPA_ACTION_TIMEOUT_MS = _env_positive_int("RPA_RECORDING_ACTION_TIMEOUT_MS", 12000)
+RPA_NAVIGATION_TIMEOUT_MS = _env_positive_int("RPA_RECORDING_NAVIGATION_TIMEOUT_MS", 30000)
 HOVER_PROMOTION_WINDOW_MS = 2500
 
 
@@ -162,8 +173,8 @@ class RPASessionManager:
         )
         context = await browser.new_context(**get_context_kwargs())
         page = await context.new_page()
-        page.set_default_timeout(RPA_PAGE_TIMEOUT_MS)
-        page.set_default_navigation_timeout(RPA_PAGE_TIMEOUT_MS)
+        page.set_default_timeout(RPA_ACTION_TIMEOUT_MS)
+        page.set_default_navigation_timeout(RPA_NAVIGATION_TIMEOUT_MS)
 
         self.attach_context(session_id, context)
         await self.register_page(session_id, page, make_active=True)

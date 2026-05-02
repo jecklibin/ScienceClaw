@@ -6,6 +6,12 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from backend.rpa.playwright_security import get_chromium_launch_kwargs, get_context_kwargs
 
+from .playwright_code_normalizer import (
+    stabilize_bare_text_clicks,
+    stabilize_callable_locator_filters,
+    stabilize_fill_targets,
+    stabilize_unsupported_locator_options,
+)
 from .trace_locator_utils import has_valid_locator, normalize_locator
 from .trace_models import RPAAcceptedTrace, RPATraceType
 
@@ -465,7 +471,7 @@ class TraceSkillCompiler:
 
         body_text = "\n".join(body_lines)
         lines = self._select_required_helper_lines(helper_lines, body_text)
-        if self._requires_table_row_helper(traces):
+        if self._requires_table_row_helper(traces) or "_find_table_row_by_headers(" in body_text or "_extract_table_cell_value(" in body_text:
             lines.extend(self._table_row_helper_lines())
         lines.extend(body_lines)
         return lines
@@ -528,6 +534,14 @@ class TraceSkillCompiler:
             required.add("_extract_node_text_or_value")
         if "_extract_labeled_field_value(" in body_text:
             required.update({"_extract_labeled_field_value", "_normalize_visible_text"})
+        if "_extract_table_cell_value(" in body_text:
+            required.update(
+                {
+                    "_find_table_row_by_headers",
+                    "_extract_node_text_or_value",
+                    "_extract_table_cell_value",
+                }
+            )
         if "_extract_url_path_value(" in body_text:
             required.add("_extract_url_path_value")
         if "_extract_text_pattern_value(" in body_text:
@@ -564,7 +578,7 @@ class TraceSkillCompiler:
     def _requires_table_row_helper(traces: List[RPAAcceptedTrace]) -> bool:
         return any(
             isinstance(trace.postcondition, dict)
-            and str(trace.postcondition.get("kind") or "") == "table_row_exists"
+            and str(trace.postcondition.get("kind") or "") in {"table_row_exists", "table_row_absent"}
             for trace in traces
         )
 
@@ -572,17 +586,19 @@ class TraceSkillCompiler:
     def _table_row_helper_lines() -> List[str]:
         return [
             "async def _find_table_row_by_headers(page, table_headers, key_values, *, timeout_ms=10000):",
+            "    def _norm_cell(value):",
+            "        return re.sub(r'\\s+', ' ', str(value or '')).strip()",
             "    headers = [str(item).strip() for item in (table_headers or []) if str(item).strip()]",
             "    expected = {str(key).strip(): str(value).strip() for key, value in (key_values or {}).items()}",
             "    deadline = time.perf_counter() + (timeout_ms / 1000)",
             "    last_seen = ''",
             "    while time.perf_counter() < deadline:",
-            "        tables = page.locator('table')",
+            "        tables = page.locator('table, [role=table], [role=grid], [role=treegrid]')",
             "        for table_index in range(await tables.count()):",
             "            table = tables.nth(table_index)",
-            "            header_cells = table.locator('thead tr:first-child th, thead tr:first-child td')",
+            "            header_cells = table.locator('thead tr:first-child th, thead tr:first-child td, [role=columnheader]')",
             "            if not await header_cells.count():",
-            "                header_cells = table.locator('tr:first-child th, tr:first-child td')",
+            "                header_cells = table.locator('tr:first-child th, tr:first-child td, [role=row]:first-child [role=cell], [role=row]:first-child [role=gridcell]')",
             "            header_map = {}",
             "            for cell_index in range(await header_cells.count()):",
             "                text = str(await header_cells.nth(cell_index).inner_text()).strip()",
@@ -592,34 +608,72 @@ class TraceSkillCompiler:
             "                continue",
             "            if any(key not in header_map for key in expected):",
             "                continue",
-            "            rows = table.locator('tbody tr')",
-            "            if not await rows.count():",
-            "                rows = table.locator('tr')",
-            "            for row_index in range(await rows.count()):",
-            "                row = rows.nth(row_index)",
-            "                cells = row.locator('th, td')",
-            "                matched = True",
-            "                for key, value in expected.items():",
-            "                    cell_index = header_map[key]",
-            "                    if await cells.count() <= cell_index:",
-            "                        matched = False",
-            "                        break",
-            "                    actual = str(await cells.nth(cell_index).inner_text()).strip()",
-            "                    if actual != value:",
-            "                        matched = False",
-            "                        break",
-            "                if matched:",
-            "                    return row",
+            "            row_sets = []",
+            "            primary_rows = table.locator('tbody tr, [role=row]')",
+            "            if await primary_rows.count():",
+            "                row_sets.append(primary_rows)",
+            "            split_body_rows = table.locator('xpath=following-sibling::table[1]//tbody/tr')",
+            "            if not row_sets and await split_body_rows.count():",
+            "                same_split_root = await table.evaluate(\"\"\"table => {",
+            "                    const parent = table.parentElement;",
+            "                    if (!parent || table.querySelector('tbody tr')) return false;",
+            "                    const tableChildren = Array.from(parent.children).filter(el => (el.tagName || '').toLowerCase() === 'table');",
+            "                    const index = tableChildren.indexOf(table);",
+            "                    if (index < 0 || index + 1 >= tableChildren.length) return false;",
+            "                    const bodyTable = tableChildren[index + 1];",
+            "                    return Boolean(bodyTable.querySelector('tbody tr')) && tableChildren.length <= 3;",
+            "                }\"\"\")",
+            "                if same_split_root:",
+            "                    row_sets.append(split_body_rows)",
+            "            if not row_sets:",
+            "                root_body_rows = table.locator(\"xpath=ancestor::*[count(.//table) <= 6 and .//table[.//tbody/tr]][1]//table[.//tbody/tr]//tbody/tr\")",
+            "                if await root_body_rows.count():",
+            "                    row_sets.append(root_body_rows)",
+            "            if not row_sets:",
+            "                row_sets.append(table.locator('tr'))",
+            "            for rows in row_sets:",
+            "                for row_index in range(await rows.count()):",
+            "                    row = rows.nth(row_index)",
+            "                    cells = row.locator('th, td, [role=cell], [role=gridcell], [role=rowheader]')",
+            "                    if await cells.count() < len(header_map):",
+            "                        continue",
+            "                    matched = True",
+            "                    for key, value in expected.items():",
+            "                        cell_index = header_map[key]",
+            "                        if await cells.count() <= cell_index:",
+            "                            matched = False",
+            "                            break",
+            "                        actual = _norm_cell(await cells.nth(cell_index).inner_text())",
+            "                        expected_value = _norm_cell(value)",
+            "                        if actual != expected_value:",
+            "                            matched = False",
+            "                            break",
+            "                    if matched:",
+            "                        return row",
             "            last_seen = ', '.join(header_map.keys())",
             "        await page.wait_for_timeout(250)",
             "    detail = f' Last headers seen: {last_seen}' if last_seen else ''",
             "    raise RuntimeError(f'Table row matching {expected} was not found.{detail}')",
             "",
+            "async def _extract_table_cell_value(page, spec):",
+            "    row = await _find_table_row_by_headers(page, spec.get('table_headers') or [], spec.get('row_key') or {})",
+            "    cells = row.locator('th, td, [role=cell], [role=gridcell], [role=rowheader]')",
+            "    cell_count = await cells.count()",
+            "    column_index = spec.get('column_index')",
+            "    try:",
+            "        column_index = int(column_index)",
+            "    except Exception:",
+            "        column_index = -1",
+            "    if column_index < 0 or column_index >= cell_count:",
+            "        raise RuntimeError(f'Table cell column index {column_index} is out of range')",
+            "    return await _extract_node_text_or_value(cells.nth(column_index))",
+            "",
         ]
 
     def _render_postcondition_trace(self, trace: RPAAcceptedTrace) -> List[str]:
         postcondition = trace.postcondition if isinstance(trace.postcondition, dict) else {}
-        if str(postcondition.get("kind") or "") != "table_row_exists":
+        kind = str(postcondition.get("kind") or "")
+        if kind not in {"table_row_exists", "table_row_absent"}:
             return []
         headers = [
             str(item).strip()
@@ -629,12 +683,27 @@ class TraceSkillCompiler:
         key_values = self._postcondition_table_values(trace, postcondition)
         if not headers or not key_values:
             return []
+        expression = f"{{{', '.join(f'{key!r}: {value}' for key, value in key_values)}}}"
+        if kind == "table_row_absent":
+            return [
+                "",
+                "    # verify table row absence postcondition",
+                "    try:",
+                (
+                    "        await _find_table_row_by_headers("
+                    f"current_page, {headers!r}, {expression}, timeout_ms=1500)"
+                ),
+                "    except RuntimeError:",
+                "        pass",
+                "    else:",
+                "        raise RuntimeError('Table row matching postcondition was still present')",
+            ]
         return [
             "",
             "    # verify table row postcondition",
             (
                 "    await _find_table_row_by_headers("
-                f"current_page, {headers!r}, {{{', '.join(f'{key!r}: {value}' for key, value in key_values)}}})"
+                f"current_page, {headers!r}, {expression})"
             ),
         ]
 
@@ -980,9 +1049,21 @@ class TraceSkillCompiler:
             url_extraction = self._snapshot_url_extraction(field.get("url_extraction"))
             text_pattern = self._snapshot_text_pattern(field.get("text_pattern"))
             label_extraction = self._snapshot_label_extraction(field)
+            table_cell = self._snapshot_table_cell(field.get("table_cell"))
             replay_required = bool(field.get("replay_required", True))
             if url_extraction:
                 lines.append(f"    _value = _extract_url_path_value(current_page.url, {url_extraction!r})")
+                lines.append("    if _value:")
+                lines.append(f"        _result[{label!r}] = _value")
+                if replay_required:
+                    lines.append("    else:")
+                    lines.append(f"        _missing_required_fields.append({label!r})")
+                continue
+            if table_cell:
+                lines.append("    try:")
+                lines.append(f"        _value = await _extract_table_cell_value(current_page, {self._table_cell_spec_expression(table_cell)})")
+                lines.append("    except Exception:")
+                lines.append("        _value = ''")
                 lines.append("    if _value:")
                 lines.append(f"        _result[{label!r}] = _value")
                 if replay_required:
@@ -1100,9 +1181,49 @@ class TraceSkillCompiler:
             return True
         if TraceSkillCompiler._snapshot_text_pattern(field.get("text_pattern")):
             return True
+        if TraceSkillCompiler._snapshot_table_cell(field.get("table_cell")):
+            return True
         if TraceSkillCompiler._snapshot_label_extraction(field):
             return True
         return False
+
+    @staticmethod
+    def _snapshot_table_cell(value: Any) -> Dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        headers = [str(item).strip() for item in list(value.get("table_headers") or []) if str(item).strip()]
+        row_key = {
+            str(key).strip(): str(item).strip()
+            for key, item in dict(value.get("row_key") or {}).items()
+            if str(key).strip() and str(item).strip()
+        }
+        column_header = str(value.get("column_header") or "").strip()
+        try:
+            column_index = int(value.get("column_index"))
+        except Exception:
+            column_index = -1
+        if not headers or not row_key or not column_header or column_index < 0:
+            return {}
+        return {
+            "table_headers": headers,
+            "row_key": row_key,
+            "column_header": column_header,
+            "column_index": column_index,
+        }
+
+    def _table_cell_spec_expression(self, spec: Dict[str, Any]) -> str:
+        row_items = []
+        for key, value in dict(spec.get("row_key") or {}).items():
+            row_items.append(f"{key!r}: {self._maybe_parameterize_value(str(value))}")
+        row_expr = "{" + ", ".join(row_items) + "}"
+        return (
+            "{"
+            f"'table_headers': {list(spec.get('table_headers') or [])!r}, "
+            f"'row_key': {row_expr}, "
+            f"'column_header': {str(spec.get('column_header') or '')!r}, "
+            f"'column_index': {int(spec.get('column_index') or 0)}"
+            "}"
+        )
 
     @staticmethod
     def _snapshot_label_extraction(field: Dict[str, Any]) -> Dict[str, str]:
@@ -1203,13 +1324,18 @@ class TraceSkillCompiler:
         )
         code = self._rewrite_input_bindings_in_code(code, trace.input_bindings)
         code = _rewrite_random_like_locator_in_code(code, trace)
+        code = stabilize_callable_locator_filters(code)
+        code = stabilize_unsupported_locator_options(code)
+        code = stabilize_bare_text_clicks(code)
+        code = stabilize_fill_targets(code)
         download_signal = _trace_signal(trace, "download")
         if download_signal:
             self._classify_download_signal(trace, download_signal)
         recovered_attempt = _trace_signal(trace, "recovered_attempt")
+        idempotent_postcondition = _trace_signal(trace, "idempotent_postcondition_replay")
         code_handles_download = "expect_download" in code or ".save_as(" in code
         lines = ["", f"    # trace {index}: {trace.description or 'AI operation'}"]
-        if recovered_attempt and self._has_compilable_postcondition(trace):
+        if (recovered_attempt or idempotent_postcondition) and self._has_compilable_postcondition(trace):
             lines.append("    try:")
             for code_line in code.splitlines():
                 lines.append(f"        {code_line}" if code_line.strip() else "")
@@ -1221,11 +1347,12 @@ class TraceSkillCompiler:
             return lines
         for code_line in code.splitlines():
             lines.append(f"    {code_line}" if code_line.strip() else "")
-        if download_signal and self._download_trigger_mode(download_signal) == "export_task":
+        if download_signal and self._download_trigger_mode(download_signal) == "export_task" and not code_handles_download:
             download_name = str(download_signal.get("filename") or "file")
             safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", download_name.split(".")[0]) or "file"
             download_key = "download_" + safe_name
             heading, row_selector, action_selector = self._export_task_download_hints(code)
+            lines.append("    _result = await run(current_page, _results)")
             lines.append(
                 "    _download_payload = await _download_from_export_task("
                 "current_page, kwargs, _results, "
@@ -1434,9 +1561,9 @@ class TraceSkillCompiler:
                 return match.group(0)
             if self._is_prefixed_string_literal(code, match.start()):
                 return match.group(0)
-            if self._is_ui_search_literal(code, match.start()):
-                return match.group(0)
             param_name, param_info = binding
+            if self._is_stable_ui_anchor_literal(code, match.start(), param_info):
+                return match.group(0)
             return self._parameter_expression(param_name, param_info, value)
 
         return re.sub(
@@ -1460,10 +1587,12 @@ class TraceSkillCompiler:
         return True
 
     @staticmethod
-    def _is_ui_search_literal(code: str, quote_index: int) -> bool:
+    def _is_stable_ui_anchor_literal(code: str, quote_index: int, param_info: Dict[str, Any]) -> bool:
+        if not _binding_is_stable_ui_anchor(param_info):
+            return False
         prefix = code[max(0, quote_index - 48):quote_index]
         return bool(
-            re.search(r"\b(name|label|placeholder|alt|title|has_text)\s*=\s*$", prefix)
+            re.search(r"\b(name|label|placeholder|alt|title)\s*=\s*$", prefix)
             or re.search(r"\.(get_by_text|get_by_label|get_by_placeholder|get_by_alt_text|get_by_title)\(\s*$", prefix)
             or re.search(r"\.locator\(\s*$", prefix)
         )
@@ -1619,13 +1748,70 @@ def _rewrite_random_like_locator_in_code(code: str, trace: RPAAcceptedTrace) -> 
     selector = str(primary_locator.get("value") or "")
     if not selector:
         return code
+    if _selector_is_structural_collection(selector):
+        return code
     if _code_uses_positional_collection_locator(code, selector):
+        return code
+    if _code_uses_fill_locator(code, selector) and not _locator_is_editable_target(replacement_locator):
         return code
     replacement_expr = _locator_expression("page", replacement_locator)
     rewritten = code
     for selector_literal in _string_literals_for_value(selector):
         rewritten = rewritten.replace(f"page.locator({selector_literal})", replacement_expr)
     return rewritten
+
+
+def _code_uses_fill_locator(code: str, selector: str) -> bool:
+    text = str(code or "")
+    for selector_literal in _string_literals_for_value(selector):
+        if re.search(rf"page\.locator\({re.escape(selector_literal)}\)\.fill\(", text):
+            return True
+        assignment_pattern = re.compile(
+            rf"(?P<var>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*page\.locator\({re.escape(selector_literal)}\)"
+        )
+        for match in assignment_pattern.finditer(text):
+            var_name = re.escape(match.group("var"))
+            if re.search(rf"\b{var_name}\.fill\(", text[match.end():]):
+                return True
+    return False
+
+
+def _selector_is_structural_collection(selector: str) -> bool:
+    text = str(selector or "").strip().lower()
+    structural_tokens = (
+        " tbody",
+        "thead",
+        " tr",
+        "td",
+        "th",
+        "[role=row]",
+        "[role=cell]",
+        "[role=gridcell]",
+        ".el-table",
+        "table",
+    )
+    return any(token in text for token in structural_tokens)
+
+
+def _locator_is_editable_target(locator: Dict[str, Any]) -> bool:
+    method = str(locator.get("method") or "").strip().lower()
+    if method == "role":
+        return str(locator.get("role") or "").strip().lower() in {
+            "textbox",
+            "searchbox",
+            "combobox",
+            "spinbutton",
+        }
+    if method == "css":
+        selector = str(locator.get("value") or "").strip().lower()
+        return any(token in selector for token in ("input", "textarea", "select", "contenteditable"))
+    if method == "nested":
+        child = locator.get("child")
+        return isinstance(child, dict) and _locator_is_editable_target(child)
+    if method == "nth":
+        base = locator.get("locator") or locator.get("base")
+        return isinstance(base, dict) and _locator_is_editable_target(base)
+    return False
 
 
 def _code_uses_positional_collection_locator(code: str, selector: str) -> bool:
@@ -1652,38 +1838,25 @@ def _string_literals_for_value(value: str) -> List[str]:
     return unique
 
 
+def _binding_is_stable_ui_anchor(param_info: Dict[str, Any]) -> bool:
+    classification = str(param_info.get("classification") or param_info.get("kind") or "").strip().lower()
+    source = str(param_info.get("source") or "").strip().lower()
+    stable_values = {
+        "stable_ui_anchor",
+        "ui_anchor",
+        "ui_label",
+        "label",
+        "placeholder",
+        "role_name",
+        "title",
+    }
+    return classification in stable_values or source in stable_values
+
+
 def _should_preserve_runtime_ai_instruction(trace: RPAAcceptedTrace) -> bool:
-    text = f"{trace.user_instruction or ''} {trace.description or ''}".lower()
     runtime_ai_signal = _trace_signal(trace, "runtime_ai")
     if runtime_ai_signal.get("preserve") is True or runtime_ai_signal.get("preserve_runtime_ai") is True:
         return True
-    if not text.strip():
-        return False
-    strong_semantic_markers = (
-        "best",
-        "most relevant",
-        "most related",
-        "related to",
-        "semantic",
-        "similar",
-        "summarize",
-        "highest",
-        "lowest",
-        "top ",
-        "most ",
-        "highest risk",
-        "highest priority",
-        "recommend",
-        "最相关",
-        "最匹配",
-        "推荐",
-        "最佳",
-        "最适合",
-    )
-    if any(marker in text for marker in strong_semantic_markers):
-        return True
-    if not trace.ai_execution or not trace.ai_execution.code:
-        return False
     return False
 
 

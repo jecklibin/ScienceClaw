@@ -11,6 +11,7 @@ _MODULE = module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
 
 SNAPSHOT_V2_JS = _MODULE.SNAPSHOT_V2_JS
+SNAPSHOT_V2_TEMPLATE = _MODULE.SNAPSHOT_V2_TEMPLATE
 
 
 def test_snapshot_v2_js_captures_visible_business_fields():
@@ -81,6 +82,13 @@ def test_snapshot_v2_js_collects_jalor_grid_as_scoped_table_view():
     assert "td[field=\"" in SNAPSHOT_V2_JS
     assert "framework_hint: 'jalor-igrid'" in SNAPSHOT_V2_JS
     assert "const jalorViews = Array.from" not in SNAPSHOT_V2_JS
+
+
+def test_snapshot_v2_template_keeps_framework_adapters_out_of_main_collector():
+    assert "__RPA_TABLE_VIEW_ADAPTERS__" in SNAPSHOT_V2_TEMPLATE
+    assert "__RPA_MODAL_VIEW_ADAPTERS__" in SNAPSHOT_V2_TEMPLATE
+    assert "collectJalorGridTableView" not in SNAPSHOT_V2_TEMPLATE
+    assert "rootSelector: '.el-overlay-dialog'" not in SNAPSHOT_V2_TEMPLATE
 
 
 def test_snapshot_v2_js_uses_modal_adapter_registry_for_framework_dialogs():

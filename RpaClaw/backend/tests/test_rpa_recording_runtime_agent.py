@@ -13,9 +13,11 @@ from backend.rpa.recording_runtime_agent import (
     RECORDING_RUNTIME_SYSTEM_PROMPT,
     _classify_recording_failure,
     _build_detail_extract_plan,
+    _combine_run_python_attempts,
     _ensure_expected_effect,
     _expected_effect,
     _instruction_is_detail_extract_only,
+    _merge_runtime_ai_signal,
     _normalize_generated_playwright_code,
     _parse_json_object,
     _resolve_recording_snapshot_debug_dir,
@@ -23,7 +25,8 @@ from backend.rpa.recording_runtime_agent import (
     _snapshot_plan_fields,
 )
 from backend.rpa.trace_skill_compiler import TraceSkillCompiler
-from backend.rpa.trace_models import RPAPageState
+from backend.rpa.trace_models import RPAAcceptedTrace, RPAAIExecution, RPAPageState, RPATraceType
+from backend.rpa.recording_terminal_recovery import recover_failed_side_effect_from_snapshot_diff
 
 
 class _FakePage:
@@ -35,7 +38,9 @@ class _FakePage:
     async def title(self):
         return "Example"
 
-    def locator(self, _selector):
+    def locator(self, selector):
+        if "input" in str(selector):
+            return _FakeEditableLocator()
         return _FakeLocator()
 
     async def goto(self, url, wait_until=None):
@@ -67,14 +72,90 @@ class _FakePage:
 
 
 class _FakeLocator:
+    @property
+    def first(self):
+        return self
+
+    def locator(self, _selector):
+        return self
+
     def nth(self, _index):
         return self
+
+    async def count(self):
+        return 0
+
+    async def is_visible(self):
+        return False
+
+    async def is_enabled(self):
+        return False
+
+    async def wait_for(self, *args, **kwargs):
+        return None
+
+    async def inner_text(self, *args, **kwargs):
+        return ""
 
     async def click(self):
         return None
 
     async def fill(self, _value):
         return None
+
+
+class _FakeEditableLocator(_FakeLocator):
+    async def count(self):
+        return 1
+
+    async def is_visible(self):
+        return True
+
+    async def is_enabled(self):
+        return True
+
+    async def evaluate(self, script, *args, **kwargs):
+        text = str(script or "")
+        if "tagName" in text and "toLowerCase" in text:
+            return "input"
+        if "getAttribute('role')" in text or "getAttribute(\"role\")" in text:
+            return False
+        return True
+
+    async def fill(self, _value, *args, **kwargs):
+        return None
+
+
+class _FakeModalClosedPage(_FakePage):
+    def locator(self, selector):
+        if selector == "body":
+            return _FakeTextLocator("Saved successfully")
+        return _FakeLocator()
+
+
+class _FakeVisibleDialogPage(_FakePage):
+    def locator(self, selector):
+        if selector in {"[role='dialog']", "[aria-modal='true']"}:
+            return _FakeVisibleLocator()
+        if selector == "body":
+            return _FakeTextLocator("")
+        return _FakeLocator()
+
+
+class _FakeTextLocator(_FakeLocator):
+    def __init__(self, text):
+        self._text = text
+
+    async def inner_text(self, *args, **kwargs):
+        return self._text
+
+
+class _FakeVisibleLocator(_FakeLocator):
+    async def count(self):
+        return 1
+
+    async def is_visible(self):
+        return True
 
 
 class _FakeListPage(_FakePage):
@@ -137,6 +218,15 @@ def _find_region_with_pair(snapshot, label, value):
             if pair.get("label") == label and pair.get("value") == value:
                 return region
     return None
+
+
+def _required_terminal_contract(*evidence_types, kind="state_change", allow_semantic_judge=False):
+    return {
+        "required": True,
+        "kind": kind,
+        "success_evidence": [{"type": evidence_type} for evidence_type in evidence_types],
+        "allow_semantic_judge": allow_semantic_judge,
+    }
 
 
 def _ordinal_snapshot():
@@ -610,6 +700,7 @@ def test_recording_runtime_prompt_requires_terminal_business_evidence():
     assert "do not unconditionally add a new row" in RECORDING_RUNTIME_SYSTEM_PROMPT
     assert "scope field locators to the dialog/form container" in RECORDING_RUNTIME_SYSTEM_PROMPT
     assert "structured snapshot.detail_views fields as the source of truth" in RECORDING_RUNTIME_SYSTEM_PROMPT
+    assert "Do not substitute current user/menu/role text" in RECORDING_RUNTIME_SYSTEM_PROMPT
 
 
 def test_recording_runtime_prompt_uses_bounded_waits_and_avoids_callable_locator_names():
@@ -621,6 +712,8 @@ def test_recording_runtime_prompt_includes_replay_metadata_contract():
     assert "input_bindings" in RECORDING_RUNTIME_SYSTEM_PROMPT
     assert "output_bindings" in RECORDING_RUNTIME_SYSTEM_PROMPT
     assert "postcondition" in RECORDING_RUNTIME_SYSTEM_PROMPT
+    assert "terminal_contract" in RECORDING_RUNTIME_SYSTEM_PROMPT
+    assert "semantic_intent must be \"semantic_candidate_selection\"" in RECORDING_RUNTIME_SYSTEM_PROMPT
     assert "in-page filter/search forms" in RECORDING_RUNTIME_SYSTEM_PROMPT
     assert "intercepts pointer events" in RECORDING_RUNTIME_SYSTEM_PROMPT
     assert "Do not click unnamed increment/decrement controls repeatedly" in RECORDING_RUNTIME_SYSTEM_PROMPT
@@ -667,8 +760,35 @@ async def test_recording_runtime_agent_accepts_successful_python_plan():
     assert result.trace.output == {"title": "Example"}
     assert result.trace.ai_execution.repair_attempted is False
 
-@pytest.mark.asyncio
-async def test_recording_runtime_agent_persists_runtime_ai_preserve_signal():
+def test_recording_runtime_agent_persists_runtime_ai_preserve_signal():
+    async def planner(_payload):
+        return {
+            "description": "Select the closest matching project",
+            "action_type": "run_python",
+            "expected_effect": "extract",
+            "output_key": "selected_project",
+            "preserve_runtime_ai": True,
+            "semantic_intent": "select_best_matching_candidate",
+            "code": (
+                "async def run(page, results):\n"
+                "    return {'target': 'alpha', 'url': 'https://example.test/projects/alpha'}"
+            ),
+        }
+
+    result = asyncio.run(
+        RecordingRuntimeAgent(planner=planner).run(
+            page=_FakePage(),
+            instruction="open the closest matching project",
+            runtime_results={},
+        )
+    )
+
+    assert result.success is True
+    assert result.trace.signals["runtime_ai"]["preserve"] is True
+    assert result.trace.signals["runtime_ai"]["reason"] == "select_best_matching_candidate"
+
+
+def test_recording_runtime_agent_does_not_preserve_mutating_runtime_ai_plan():
     async def planner(_payload):
         return {
             "description": "Select the closest matching project",
@@ -684,15 +804,16 @@ async def test_recording_runtime_agent_persists_runtime_ai_preserve_signal():
             ),
         }
 
-    result = await RecordingRuntimeAgent(planner=planner).run(
-        page=_FakePage(),
-        instruction="open the closest matching project",
-        runtime_results={},
+    result = asyncio.run(
+        RecordingRuntimeAgent(planner=planner).run(
+            page=_FakePage(),
+            instruction="open the closest matching project",
+            runtime_results={},
+        )
     )
 
     assert result.success is True
-    assert result.trace.signals["runtime_ai"]["preserve"] is True
-    assert result.trace.signals["runtime_ai"]["reason"] == "select_best_matching_candidate"
+    assert "runtime_ai" not in result.trace.signals
 
 
 def test_recording_runtime_agent_persists_replay_metadata_into_compilable_trace(monkeypatch):
@@ -836,6 +957,57 @@ def test_recording_runtime_agent_ignores_postcondition_without_snapshot_evidence
     assert result.trace.postcondition == {}
 
 
+def test_recording_runtime_agent_infers_idempotent_row_absent_postcondition(monkeypatch):
+    snapshots = iter(
+        [
+            {
+                "table_views": [
+                    {
+                        "columns": [{"header": "Task ID"}, {"header": "Status"}],
+                        "rows": [
+                            {
+                                "cells": [
+                                    {"column_header": "Task ID", "text": "TASK-001"},
+                                    {"column_header": "Status", "text": "pending"},
+                                ]
+                            }
+                        ],
+                    }
+                ]
+            },
+            {"table_views": []},
+        ]
+    )
+
+    async def fake_build_page_snapshot(*_args, **_kwargs):
+        return next(snapshots)
+
+    monkeypatch.setattr("backend.rpa.recording_runtime_agent.build_page_snapshot", fake_build_page_snapshot)
+
+    async def planner(_payload):
+        return {
+            "description": "Complete task TASK-001",
+            "action_type": "run_python",
+            "expected_effect": "mixed",
+            "code": (
+                "async def run(page, results):\n"
+                "    return {'action_performed': True, 'task_id': 'TASK-001'}"
+            ),
+        }
+
+    result = asyncio.run(
+        RecordingRuntimeAgent(planner=planner).run(
+            page=_FakePage(),
+            instruction="complete task TASK-001",
+            runtime_results={},
+        )
+    )
+
+    assert result.success is True
+    assert result.trace.postcondition["kind"] == "table_row_absent"
+    assert result.trace.signals["idempotent_postcondition_replay"]["ignore_precondition_errors"] is True
+
+
 def test_recording_runtime_agent_accepts_extract_snapshot_plan(monkeypatch):
     async def fake_build_page_snapshot(_page, _build_frame_path):
         return {
@@ -891,6 +1063,255 @@ def test_recording_runtime_agent_accepts_extract_snapshot_plan(monkeypatch):
     assert "预计总金额 (含税）" in result.trace.ai_execution.code
     assert result.trace.signals["extract_snapshot"]["source"] == "detail_views"
     assert result.trace.signals["extract_snapshot"]["fields"][0]["data_prop"] == "2652409177955720363"
+
+
+def test_recording_runtime_agent_repairs_incomplete_snapshot_extract(monkeypatch):
+    async def fake_build_page_snapshot(_page, _build_frame_path):
+        return {
+            "url": "https://example.test/detail",
+            "title": "Detail",
+            "frames": [],
+            "actionable_nodes": [],
+            "content_nodes": [],
+            "containers": [],
+            "detail_views": [],
+        }
+
+    plans = [
+        {
+            "description": "Read current record fields",
+            "action_type": "extract_snapshot",
+            "expected_effect": "extract",
+            "output_key": "record_info",
+            "source": "detail_views",
+            "fields": [{"label": "Record", "value": "R-001", "visible": True}],
+        },
+        {
+            "description": "Complete requested browser action",
+            "action_type": "run_python",
+            "expected_effect": "extract",
+            "output_key": "created_record",
+            "code": "async def run(page, results):\n    return {'created': True}",
+        },
+    ]
+
+    async def planner(_payload):
+        return plans.pop(0)
+
+    async def completion_verifier(payload):
+        assert payload["plan"]["action_type"] == "extract_snapshot"
+        return {
+            "passed": False,
+            "missing_requirements": ["requested browser action after data read"],
+            "reason": "Only data extraction was completed.",
+        }
+
+    monkeypatch.setattr("backend.rpa.recording_runtime_agent.build_page_snapshot", fake_build_page_snapshot)
+
+    result = asyncio.run(
+        RecordingRuntimeAgent(planner=planner, completion_verifier=completion_verifier).run(
+            page=_FakePage(),
+            instruction="read the current record and then create the next item",
+            runtime_results={},
+        )
+    )
+
+    assert result.success is True
+    assert result.output == {"created": True}
+    assert result.diagnostics
+    assert "Instruction completion verification failed" in result.diagnostics[0].message
+
+
+def test_preplanned_snapshot_extract_skips_default_completion_llm(monkeypatch):
+    async def fake_build_page_snapshot(_page, _build_frame_path):
+        return {
+            "url": "https://example.test/detail",
+            "title": "Detail",
+            "frames": [],
+            "actionable_nodes": [],
+            "content_nodes": [],
+            "containers": [],
+            "detail_views": [
+                {
+                    "section_title": "Record",
+                    "fields": [
+                        {
+                            "label": "Record number",
+                            "value": "R-001",
+                            "visible": True,
+                            "field_locator": {"method": "role", "role": "row", "name": "Record number R-001"},
+                        }
+                    ],
+                }
+            ],
+        }
+
+    async def forbidden_completion_verifier(_payload):
+        raise AssertionError("default completion verifier should not run for deterministic preplans")
+
+    monkeypatch.setattr("backend.rpa.recording_runtime_agent.build_page_snapshot", fake_build_page_snapshot)
+    agent = RecordingRuntimeAgent()
+    agent._default_instruction_completion_judge = forbidden_completion_verifier
+
+    result = asyncio.run(
+        agent.run(
+            page=_FakePage(),
+            instruction="extract the visible record fields",
+            runtime_results={},
+        )
+    )
+
+    assert result.success is True
+    assert result.trace.signals["instruction_completion"]["source"] == "structural_preplan"
+    assert result.trace.signals["extract_snapshot"]["fields"][0]["label"] == "Record number"
+
+
+def test_extract_snapshot_plan_resolves_alias_fields_from_observed_detail_snapshot():
+    execute = getattr(recording_runtime_agent, "_execute_extract_snapshot_plan")
+    plan = {
+        "action_type": "extract_snapshot",
+        "source": "detail_views",
+        "fields": {
+            "record_no": {"label": "Record No", "value_kind": "text"},
+            "status": {"label": "Status", "value_kind": "text"},
+        },
+    }
+    snapshot = {
+        "detail_views": [
+            {
+                "fields": [
+                    {"label": "Record No", "value": "REQ-100", "visible": True},
+                    {"label": "Status", "value": "submitted", "visible": True},
+                ]
+            }
+        ]
+    }
+
+    result = execute(plan, snapshot=snapshot)
+
+    assert result["success"] is True
+    assert result["output"] == {"record_no": "REQ-100", "status": "submitted"}
+    fields = result["signals"]["extract_snapshot"]["fields"]
+    assert fields[0]["observed_label"] == "Record No"
+
+
+def test_recording_llm_call_has_internal_timeout(monkeypatch):
+    class SlowModel:
+        async def ainvoke(self, _messages):
+            await asyncio.sleep(0.05)
+            return SimpleNamespace(content="{}")
+
+    monkeypatch.setattr(recording_runtime_agent, "_RECORDING_LLM_TIMEOUT_S", 0.001)
+
+    with pytest.raises(TimeoutError, match="recording LLM call exceeded"):
+        asyncio.run(recording_runtime_agent._ainvoke_model_with_recording_timeout(SlowModel(), []))
+
+
+def test_identifier_gap_triggers_instruction_completion_verification():
+    should_verify = getattr(recording_runtime_agent, "_should_verify_instruction_completion")
+
+    assert should_verify(
+        {"action_type": "run_python", "expected_effect": "mixed"},
+        {
+            "success": True,
+            "output": {"created": True, "record": "PR-100"},
+            "effect": {"terminal_evidence": "row_exists"},
+        },
+        "create PR-100 and then create PO-200",
+    )
+
+
+def test_weak_terminal_evidence_still_triggers_instruction_completion_verification():
+    should_verify = getattr(recording_runtime_agent, "_should_verify_instruction_completion")
+
+    assert should_verify(
+        {"action_type": "run_python", "expected_effect": "mixed"},
+        {
+            "success": True,
+            "output": {"submitted": True, "record": "R-001"},
+            "effect": {"terminal_evidence": "feedback_visible"},
+        },
+        "submit the form and generate the follow-up record",
+    )
+
+
+def test_verified_terminal_contract_skips_instruction_completion_verification():
+    should_verify = getattr(recording_runtime_agent, "_should_verify_instruction_completion")
+
+    assert not should_verify(
+        {"action_type": "run_python", "expected_effect": "mixed"},
+        {
+            "success": True,
+            "terminal_verification": {"passed": True, "evidence": [{"type": "row_exists"}]},
+        },
+        "submit the form",
+    )
+
+
+def test_action_only_success_is_checked_for_instruction_completion(monkeypatch):
+    plans = [
+        {
+            "description": "Open target dialog",
+            "action_type": "run_python",
+            "expected_effect": "click",
+            "output_key": "dialog",
+        },
+        {
+            "description": "Submit target dialog",
+            "action_type": "run_python",
+            "expected_effect": "click",
+            "output_key": "submitted",
+        },
+    ]
+    verifier_calls = []
+
+    async def planner(_payload):
+        return plans.pop(0)
+
+    async def executor(_page, plan, _results):
+        if plan["output_key"] == "dialog":
+            return {
+                "success": True,
+                "output": {"action_performed": True, "action_type": "click", "target": "dialog"},
+            }
+        return {
+            "success": True,
+            "output": {"submitted": True, "record": "R-001"},
+            "effect": {"type": "click", "action_performed": True, "terminal_evidence": "feedback_visible"},
+        }
+
+    async def completion_verifier(_payload):
+        verifier_calls.append(_payload)
+        return {
+            "passed": False,
+            "missing_requirements": ["terminal submit"],
+            "reason": "Only an intermediate action was completed.",
+        }
+
+    async def fake_build_page_snapshot(_page, _build_frame_path):
+        return {
+            "url": "https://example.test",
+            "title": "Example",
+            "frames": [],
+            "actionable_nodes": [],
+            "content_nodes": [],
+            "containers": [],
+        }
+
+    monkeypatch.setattr("backend.rpa.recording_runtime_agent.build_page_snapshot", fake_build_page_snapshot)
+
+    result = asyncio.run(
+        RecordingRuntimeAgent(planner=planner, executor=executor, completion_verifier=completion_verifier).run(
+            page=_FakePage(),
+            instruction="open the dialog and submit it",
+            runtime_results={},
+        )
+    )
+
+    assert result.success is False
+    assert verifier_calls
+    assert result.output is None
+    assert "Instruction completion verification failed" in result.diagnostics[0].message
 
 
 def test_recording_runtime_agent_enriches_snapshot_extract_with_replay_evidence(monkeypatch):
@@ -1135,22 +1556,430 @@ async def test_ensure_expected_effect_accepts_run_python_click_when_url_changes(
     assert result["effect"]["url"] == "https://github.com/HKUDS/RAG-Anything"
 
 
-@pytest.mark.asyncio
-async def test_ensure_expected_effect_accepts_mixed_with_action_evidence_without_url_change():
+def test_ensure_expected_effect_accepts_mixed_with_action_evidence_without_url_change():
     page = _FakePage()
     before = RPAPageState(url=page.url, title="Example")
 
-    result = await _ensure_expected_effect(
-        page=page,
-        instruction="fill the form and collect the confirmation",
-        plan={"action_type": "run_python", "expected_effect": "mixed"},
-        result={"success": True, "effect": {"type": "fill", "action_performed": True}},
-        before=before,
+    result = asyncio.run(
+        _ensure_expected_effect(
+            page=page,
+            instruction="open the tools panel",
+            plan={"action_type": "run_python", "expected_effect": "mixed"},
+            result={"success": True, "effect": {"type": "fill", "action_performed": True}},
+            before=before,
+        )
     )
 
     assert result["success"] is True
     assert page.url == before.url
     assert result["effect"]["action_performed"] is True
+
+
+def test_ensure_expected_effect_rejects_terminal_write_with_only_action_evidence():
+    page = _FakePage()
+    before = RPAPageState(url=page.url, title="Example")
+
+    result = asyncio.run(
+        _ensure_expected_effect(
+            page=page,
+            instruction="submit the form and create the record",
+            plan={
+                "action_type": "run_python",
+                "expected_effect": "mixed",
+                "terminal_contract": _required_terminal_contract("row_exists", kind="record_created"),
+            },
+            result={"success": True, "output": {"action_performed": True, "action_type": "click", "target": "Submit"}},
+            before=before,
+        )
+    )
+
+    assert result["success"] is False
+    assert "required terminal evidence" in result["error"]
+
+
+def test_ensure_expected_effect_accepts_closed_modal_after_terminal_submit():
+    page = _FakeModalClosedPage()
+    before = RPAPageState(url=page.url, title="Example")
+
+    result = asyncio.run(
+        _ensure_expected_effect(
+            page=page,
+            instruction="submit the current dialog form and confirm completion",
+            plan={
+                "action_type": "run_python",
+                "expected_effect": "mixed",
+                "terminal_contract": _required_terminal_contract("feedback_visible", kind="record_updated"),
+                "code": (
+                    "async def run(page, results):\n"
+                    "    dialog = page.get_by_role('dialog', name='Edit record')\n"
+                    "    await dialog.get_by_role('button', name='Submit').click()\n"
+                ),
+            },
+            result={
+                "success": True,
+                "output": {"action_performed": True, "action_type": "submit_form"},
+                "browser_evidence": {
+                    "before": {"visible_dialog_count": 1, "feedback_texts": [], "validation_texts": []},
+                    "after": {"visible_dialog_count": 0, "feedback_texts": ["Saved successfully"], "validation_texts": []},
+                },
+            },
+            before=before,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["effect"]["terminal_evidence"] == "feedback_visible"
+
+
+def test_ensure_expected_effect_accepts_new_feedback_for_generic_state_change():
+    page = _FakePage()
+    before = RPAPageState(url=page.url, title="Example")
+
+    result = asyncio.run(
+        _ensure_expected_effect(
+            page=page,
+            instruction="perform an action and confirm the page changed state",
+            plan={
+                "action_type": "run_python",
+                "expected_effect": "mixed",
+                "terminal_contract": _required_terminal_contract("url_changed", kind="state_change"),
+            },
+            result={
+                "success": True,
+                "output": {"action_performed": True, "action_type": "click"},
+                "browser_evidence": {
+                    "before": {"visible_dialog_count": 0, "feedback_texts": [], "validation_texts": []},
+                    "after": {"visible_dialog_count": 0, "feedback_texts": ["Action completed"], "validation_texts": []},
+                },
+            },
+            before=before,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["effect"]["terminal_evidence"] == "feedback_visible"
+
+
+def test_ensure_expected_effect_rejects_preexisting_feedback_as_terminal_success():
+    page = _FakeModalClosedPage()
+    before = RPAPageState(url=page.url, title="Example")
+
+    result = asyncio.run(
+        _ensure_expected_effect(
+            page=page,
+            instruction="submit the current dialog form and confirm completion",
+            plan={
+                "action_type": "run_python",
+                "expected_effect": "mixed",
+                "terminal_contract": _required_terminal_contract("feedback_visible", kind="record_updated"),
+            },
+            result={
+                "success": True,
+                "output": {"action_performed": True, "action_type": "submit_form"},
+                "browser_evidence": {
+                    "before": {"visible_dialog_count": 1, "feedback_texts": ["Saved successfully"], "validation_texts": []},
+                    "after": {"visible_dialog_count": 0, "feedback_texts": ["Saved successfully"], "validation_texts": []},
+                },
+            },
+            before=before,
+        )
+    )
+
+    assert result["success"] is False
+    assert "required terminal evidence" in result["error"]
+
+
+def test_ensure_expected_effect_rejects_terminal_submit_when_modal_stays_visible():
+    page = _FakeVisibleDialogPage()
+    before = RPAPageState(url=page.url, title="Example")
+
+    result = asyncio.run(
+        _ensure_expected_effect(
+            page=page,
+            instruction="submit the current dialog form and confirm completion",
+            plan={
+                "action_type": "run_python",
+                "expected_effect": "mixed",
+                "terminal_contract": _required_terminal_contract("feedback_visible", kind="record_updated"),
+                "code": (
+                    "async def run(page, results):\n"
+                    "    dialog = page.get_by_role('dialog', name='Edit record')\n"
+                    "    await dialog.get_by_role('button', name='Submit').click()\n"
+                ),
+            },
+            result={"success": True, "output": {"action_performed": True, "action_type": "submit_form"}},
+            before=before,
+        )
+    )
+
+    assert result["success"] is False
+    assert "required terminal evidence" in result["error"]
+
+
+def test_ensure_expected_effect_accepts_terminal_write_with_structured_terminal_evidence():
+    page = _FakePage()
+    before = RPAPageState(url=page.url, title="Example")
+
+    result = asyncio.run(
+        _ensure_expected_effect(
+            page=page,
+            instruction="submit the form and create the record",
+            plan={
+                "action_type": "run_python",
+                "expected_effect": "mixed",
+                "terminal_contract": _required_terminal_contract("row_exists", kind="record_created"),
+            },
+            result={
+                "success": True,
+                "output": {
+                    "action_performed": True,
+                    "action_type": "click",
+                    "created_record": {"id": "REQ-1", "status": "Submitted"},
+                    "terminal_evidence": {"type": "row_exists", "source": "observed", "observed": True},
+                },
+            },
+            before=before,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["effect"]["terminal_evidence"] == "row_exists"
+
+
+def test_ensure_expected_effect_rejects_terminal_write_with_unrelated_structured_output():
+    page = _FakePage()
+    before = RPAPageState(url=page.url, title="Example")
+
+    result = asyncio.run(
+        _ensure_expected_effect(
+            page=page,
+            instruction="open the detail, create the request, and submit it",
+            plan={
+                "action_type": "run_python",
+                "expected_effect": "mixed",
+                "terminal_contract": _required_terminal_contract("row_exists", kind="record_created"),
+            },
+            result={
+                "success": True,
+                "output": {
+                    "action_performed": True,
+                    "opened_record": {"id": "A-1", "status": "effective"},
+                    "detail_page_text_sample": "record detail",
+                },
+            },
+            before=before,
+        )
+    )
+
+    assert result["success"] is False
+    assert "required terminal evidence" in result["error"]
+
+
+def test_ensure_expected_effect_rejects_create_with_only_source_status():
+    page = _FakePage()
+    before = RPAPageState(url=page.url, title="Example")
+
+    result = asyncio.run(
+        _ensure_expected_effect(
+            page=page,
+            instruction="read the source record, create a new request, and submit it",
+            plan={
+                "action_type": "run_python",
+                "expected_effect": "mixed",
+                "terminal_contract": _required_terminal_contract("row_exists", kind="record_created"),
+            },
+            result={
+                "success": True,
+                "output": {
+                    "source_record": {"id": "SRC-1", "status": "effective"},
+                    "action_performed": True,
+                },
+            },
+            before=before,
+        )
+    )
+
+    assert result["success"] is False
+    assert "required terminal evidence" in result["error"]
+
+
+def test_ensure_expected_effect_accepts_expected_empty_result_state():
+    page = _FakePage()
+    before = RPAPageState(url=page.url, title="Example")
+
+    result = asyncio.run(
+        _ensure_expected_effect(
+            page=page,
+            instruction="search for a record that should have no matching results",
+            plan={
+                "action_type": "run_python",
+                "expected_effect": "mixed",
+                "terminal_contract": _required_terminal_contract("empty_result", kind="empty_result"),
+            },
+            result={"success": True, "output": {"empty_state": "No matching results found", "row_count": 0}},
+            before=before,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["effect"]["terminal_evidence"] == "empty_result"
+
+
+def test_ensure_expected_effect_accepts_match_count_zero_for_empty_result_state():
+    page = _FakePage()
+    before = RPAPageState(url=page.url, title="Example")
+
+    result = asyncio.run(
+        _ensure_expected_effect(
+            page=page,
+            instruction="search and confirm no records",
+            plan={
+                "action_type": "run_python",
+                "expected_effect": "mixed",
+                "terminal_contract": _required_terminal_contract("empty_result", kind="empty_result"),
+            },
+            result={"success": True, "output": {"match_count": 0, "rows": []}},
+            before=before,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["effect"]["terminal_evidence"] == "empty_result"
+
+
+def test_ensure_expected_effect_accepts_matched_rows_zero_for_empty_result_state():
+    page = _FakePage()
+    before = RPAPageState(url=page.url, title="Example")
+
+    result = asyncio.run(
+        _ensure_expected_effect(
+            page=page,
+            instruction="search and confirm no matching records",
+            plan={
+                "action_type": "run_python",
+                "expected_effect": "mixed",
+                "terminal_contract": _required_terminal_contract("empty_result", kind="empty_result"),
+            },
+            result={"success": True, "output": {"matched_rows": 0, "conclusion": "no matching records"}},
+            before=before,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["effect"]["terminal_evidence"] == "empty_result"
+
+
+def test_ensure_expected_effect_accepts_explicit_no_matching_results_output():
+    page = _FakePage()
+    before = RPAPageState(url=page.url, title="Example")
+
+    result = asyncio.run(
+        _ensure_expected_effect(
+            page=page,
+            instruction="search and confirm no matching records",
+            plan={
+                "action_type": "run_python",
+                "expected_effect": "mixed",
+                "terminal_contract": _required_terminal_contract("empty_result", "row_absent", kind="empty_result"),
+            },
+            result={"success": True, "output": {"no_matching_results": True, "visible_row_count": 0}},
+            before=before,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["effect"]["terminal_evidence"] in {"empty_result", "row_absent"}
+
+
+def test_ensure_expected_effect_does_not_accept_postcondition_values_from_structured_output_only():
+    page = _FakePage()
+    before = RPAPageState(url=page.url, title="Example")
+
+    result = asyncio.run(
+        _ensure_expected_effect(
+            page=page,
+            instruction="create a record and verify the resulting row",
+            plan={
+                "action_type": "run_python",
+                "expected_effect": "mixed",
+                "terminal_contract": _required_terminal_contract("row_exists", "field_value_equals", kind="record_created"),
+                "postcondition": {
+                    "kind": "table_row_exists",
+                    "source": "observed",
+                    "key": {"Record ID": "{{record_id}}"},
+                    "expect": {"Status": "Submitted"},
+                },
+                "output_bindings": {"record_id": "output.record_id", "status": "output.status"},
+            },
+            result={
+                "success": True,
+                "output": {
+                    "record_id": "REQ-100",
+                    "status": "Submitted",
+                    "action_performed": True,
+                },
+            },
+            before=before,
+        )
+    )
+
+    assert result["success"] is False
+    assert "required terminal evidence" in result["error"]
+
+
+def test_completion_verifier_error_fails_without_strong_terminal_evidence():
+    async def planner(_payload):
+        return {
+            "description": "Submit a form",
+            "action_type": "run_python",
+            "expected_effect": "mixed",
+            "code": (
+                "async def run(page, results):\n"
+                "    return {'action_performed': True, 'action_type': 'click'}"
+            ),
+        }
+
+    async def verifier(_payload):
+        raise TimeoutError("verifier infrastructure timeout")
+
+    result = asyncio.run(
+        RecordingRuntimeAgent(planner=planner, completion_verifier=verifier).run(
+            page=_FakePage(),
+            instruction="submit the form",
+            runtime_results={},
+        )
+    )
+
+    assert result.success is False
+    assert result.diagnostics
+    assert "Instruction completion verification failed" in result.diagnostics[0].message
+
+
+def test_ensure_expected_effect_recovers_structured_row_absent_failure():
+    page = _FakePage()
+    before = RPAPageState(url=page.url, title="Example")
+
+    result = asyncio.run(
+        _ensure_expected_effect(
+            page=page,
+            instruction="search and confirm the record is absent",
+            plan={
+                "action_type": "run_python",
+                "expected_effect": "mixed",
+                "terminal_contract": _required_terminal_contract("row_absent", kind="empty_result"),
+            },
+            result={
+                "success": False,
+                "error": "{'match_found': False}",
+                "output": {"match_found": False, "visible_rows": ["other row"]},
+            },
+            before=before,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["structured_failure_recovered"] is True
+    assert result["effect"]["terminal_evidence"] == "row_absent"
 
 
 @pytest.mark.asyncio
@@ -1185,7 +2014,7 @@ async def test_ensure_expected_effect_rejects_mixed_error_shaped_output_without_
     )
 
     assert result["success"] is False
-    assert "Expected navigation effect" in result["error"]
+    assert "visible error or validation output" in result["error"]
 
 
 def test_ensure_expected_effect_rejects_visible_error_output_even_when_url_changes():
@@ -1195,14 +2024,25 @@ def test_ensure_expected_effect_rejects_visible_error_output_even_when_url_chang
         _ensure_expected_effect(
             page=page,
             instruction="submit the form and create the record",
-            plan={"action_type": "run_python", "expected_effect": "mixed"},
-            result={"success": True, "output": {"body_text_excerpt": "Record not found\nPlease complete required fields"}},
+            plan={
+                "action_type": "run_python",
+                "expected_effect": "mixed",
+                "terminal_contract": _required_terminal_contract("feedback_visible", kind="record_created"),
+            },
+            result={
+                "success": True,
+                "output": {"body_text_excerpt": "Record not found\nPlease complete required fields"},
+                "browser_evidence": {
+                    "before": {"visible_dialog_count": 0, "feedback_texts": [], "validation_texts": []},
+                    "after": {"visible_dialog_count": 0, "feedback_texts": [], "validation_texts": ["Please complete required fields"]},
+                },
+            },
             before=RPAPageState(url="https://example.test/form", title="Form"),
         )
     )
 
     assert result["success"] is False
-    assert "visible error" in result["error"]
+    assert result["terminal_verification"]["reason"] == "validation_error_visible"
 
 
 def test_ensure_expected_effect_rejects_nonterminal_download_output():
@@ -1213,7 +2053,11 @@ def test_ensure_expected_effect_rejects_nonterminal_download_output():
         _ensure_expected_effect(
             page=page,
             instruction="generate the report and download it",
-            plan={"action_type": "run_python", "expected_effect": "mixed"},
+            plan={
+                "action_type": "run_python",
+                "expected_effect": "mixed",
+                "terminal_contract": _required_terminal_contract("download_created", kind="download_created"),
+            },
             result={"success": True, "output": {"task_state": "not_confirmed_complete", "downloaded": False}},
             before=before,
         )
@@ -1221,6 +2065,50 @@ def test_ensure_expected_effect_rejects_nonterminal_download_output():
 
     assert result["success"] is False
     assert "terminal success evidence" in result["error"]
+
+
+def test_ensure_expected_effect_accepts_structured_download_created_output():
+    page = _FakePage()
+    before = RPAPageState(url=page.url, title="Example")
+
+    result = asyncio.run(
+        _ensure_expected_effect(
+            page=page,
+            instruction="generate the report and download it",
+            plan={
+                "action_type": "run_python",
+                "expected_effect": "mixed",
+                "terminal_contract": _required_terminal_contract("download_created", kind="download_created"),
+            },
+            result={"success": True, "output": {"download_created": True, "download_suggested_filename": "report.csv"}},
+            before=before,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["effect"]["terminal_evidence"] == "download_created"
+
+
+def test_ensure_expected_effect_accepts_download_filename_output():
+    page = _FakePage()
+    before = RPAPageState(url=page.url, title="Example")
+
+    result = asyncio.run(
+        _ensure_expected_effect(
+            page=page,
+            instruction="generate the report and download it",
+            plan={
+                "action_type": "run_python",
+                "expected_effect": "mixed",
+                "terminal_contract": _required_terminal_contract("download_created", kind="download_created"),
+            },
+            result={"success": True, "output": {"downloaded_file": "report.csv"}},
+            before=before,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["effect"]["terminal_evidence"] == "download_created"
 
 
 @pytest.mark.asyncio
@@ -1355,6 +2243,153 @@ def test_normalize_generated_playwright_code_repairs_common_python_api_typo():
     )
 
 
+def test_normalize_generated_playwright_code_preserves_bare_text_click_strictness():
+    code = "await page.get_by_text('合同台账', exact=True).click()"
+
+    assert _normalize_generated_playwright_code(code) == code
+
+
+def test_normalize_generated_playwright_code_routes_fill_to_editable_descendant_helper():
+    code = "async def run(page, results):\n    search = page.get_by_test_id('filter')\n    await search.fill('ABC')"
+
+    normalized = _normalize_generated_playwright_code(code)
+
+    assert "async def _rpa_fill(" in normalized
+    assert "await _rpa_fill(search, 'ABC')" in normalized
+    assert "await search.fill('ABC')" not in normalized
+    assert "get_by_role(\"option\"" in normalized
+    assert "[role=combobox], [aria-haspopup=listbox]" in normalized
+    assert "_try_active_dialog_single_editable" in normalized
+
+
+def test_normalize_generated_playwright_code_falls_back_to_dialog_submit_action():
+    code = (
+        "async def run(page, results):\n"
+        "    dialog = page.get_by_role('dialog')\n"
+        "    submit_button = dialog.get_by_role('button', name='Open').first\n"
+        "    await submit_button.click()\n"
+    )
+
+    normalized = _normalize_generated_playwright_code(code)
+
+    assert "async def _rpa_click_dialog_primary_action(" in normalized
+    assert "await _rpa_click_dialog_primary_action(dialog, preferred_name='Open')" in normalized
+    assert "await submit_button.click()" not in normalized
+    assert "[data-testid*='submit']" in normalized
+    assert "for index in range(count - 1, -1, -1)" not in normalized
+
+
+def test_normalize_generated_playwright_code_does_not_rewrite_fill_helper_body():
+    code = (
+        "async def _rpa_fill(locator, value):\n"
+        "    await locator.fill(str(value))\n\n"
+        "async def run(page, results):\n"
+        "    search = page.get_by_test_id('filter')\n"
+        "    await search.fill('ABC')"
+    )
+
+    normalized = _normalize_generated_playwright_code(code)
+
+    assert "await locator.fill(str(value))" in normalized
+    assert "await _rpa_fill(locator" not in normalized
+    assert "await _rpa_fill(search, 'ABC')" in normalized
+
+
+def test_normalize_generated_playwright_code_rewrites_callable_role_name_filter():
+    code = (
+        "async def run(page, results):\n"
+        "    row = page.get_by_role('row', name=lambda n: 'REQ-001' in n)\n"
+        "    return await row.count()\n"
+    )
+
+    normalized = _normalize_generated_playwright_code(code)
+
+    assert "name=lambda" not in normalized
+    assert "page.get_by_role('row').filter(has_text='REQ-001')" in normalized
+
+
+def test_normalize_generated_playwright_code_moves_visible_option_to_locator_filter():
+    code = (
+        "async def run(page, results):\n"
+        "    button = page.get_by_role('button', name='审批', visible=True).first\n"
+        "    await button.click()\n"
+    )
+
+    normalized = _normalize_generated_playwright_code(code)
+
+    assert "get_by_role('button', name='审批').filter(visible=True).first" in normalized
+    assert "get_by_role('button', name='审批', visible=True)" not in normalized
+
+
+def test_normalize_generated_playwright_code_normalizes_download_contexts_without_recovery_wrapper():
+    code = (
+        "async def run(page, results):\n"
+        "    await page.get_by_test_id('generate-report').click()\n"
+        "    with page.expect_download(timeout=1000) as download_info:\n"
+        "        await page.get_by_test_id('download-report').click()\n"
+        "    download = await download_info.value\n"
+        "    return {'filename': download.suggested_filename}\n"
+    )
+
+    normalized = _normalize_generated_playwright_code(code)
+
+    assert "async with page.expect_download(timeout=1000) as download_info:" in normalized
+    assert "_rpa_try_visible_download" not in normalized
+    assert "except Exception as _rpa_download_error:" not in normalized
+
+
+def test_combine_run_python_attempts_preserves_failed_precondition_before_repair():
+    failed_plan = {
+        "action_type": "run_python",
+        "code": "async def run(page, results):\n    await page.get_by_role('button', name='Open').click()\n",
+    }
+    repair_plan = {
+        "action_type": "run_python",
+        "description": "submit visible dialog",
+        "code": "async def run(page, results):\n    await page.get_by_role('button', name='Submit').click()\n    return {'ok': True}\n",
+    }
+
+    combined = _combine_run_python_attempts([failed_plan], repair_plan)
+
+    assert combined is not None
+    assert "_RPA_PRECONDITION_CODES" in combined["code"]
+    assert "_RPA_REPAIR_CODE" in combined["code"]
+    assert "async def _rpa_run_isolated(code, page, results):" in combined["code"]
+    assert "results.setdefault('_rpa_precondition_errors'" in combined["code"]
+    assert "return await _rpa_run_isolated(_RPA_REPAIR_CODE, page, results)" in combined["code"]
+
+
+def test_combine_run_python_attempts_isolates_helper_names_between_attempts():
+    failed_plan = {
+        "action_type": "run_python",
+        "code": (
+            "def helper():\n"
+            "    return 'open'\n"
+            "async def run(page, results):\n"
+            "    results.setdefault('calls', []).append(helper())\n"
+        ),
+    }
+    repair_plan = {
+        "action_type": "run_python",
+        "code": (
+            "def helper():\n"
+            "    return 'submit'\n"
+            "async def run(page, results):\n"
+            "    results.setdefault('calls', []).append(helper())\n"
+            "    return {'ok': True}\n"
+        ),
+    }
+
+    combined = _combine_run_python_attempts([failed_plan], repair_plan)
+    namespace = {}
+    exec(combined["code"], namespace, namespace)
+    results = {}
+    output = asyncio.run(namespace["run"](None, results))
+
+    assert output == {"ok": True}
+    assert results["calls"] == ["open", "submit"]
+
+
 def test_recording_runtime_main_path_has_no_domain_specific_terms():
     source = Path(recording_runtime_agent.__file__).read_text(encoding="utf-8")
     domain_terms = [
@@ -1394,6 +2429,13 @@ def test_recording_failure_classifies_number_input_text_fill():
 
     assert analysis["type"] == "numeric_input_text_mismatch"
     assert "number input" in analysis["hint"]
+
+
+def test_recording_failure_classifies_locator_not_subscriptable():
+    analysis = _classify_recording_failure("TypeError: 'Locator' object is not subscriptable")
+
+    assert analysis["type"] == "locator_not_subscriptable"
+    assert "count()" in analysis["hint"]
 
 
 def test_runtime_agent_uses_planner_for_search_empty_result_semantics(monkeypatch):
@@ -1461,32 +2503,124 @@ async def test_ensure_expected_effect_accepts_run_python_fill_with_structured_ou
     assert result["effect"]["generic_evidence"] == "structured_output"
 
 
-@pytest.mark.asyncio
-async def test_recording_runtime_agent_repairs_once_after_failure():
-    calls = []
+def test_ensure_expected_effect_allows_error_words_in_extract_output():
+    async def run_check():
+        page = _FakePage()
+        before = RPAPageState(url=page.url, title="Example")
 
-    async def planner(payload):
-        calls.append(payload)
-        if "repair" not in payload:
+        return await _ensure_expected_effect(
+            page=page,
+            instruction="extract validation status fields",
+            plan={"action_type": "run_python", "expected_effect": "extract"},
+            result={
+                "success": True,
+                "output": {
+                    "status": "not found",
+                    "required_action": "manual review",
+                    "error_code": "none",
+                },
+            },
+            before=before,
+        )
+
+    result = asyncio.run(run_check())
+
+    assert result["success"] is True
+    assert result["output"]["status"] == "not found"
+
+
+def test_recording_runtime_agent_repairs_once_after_failure():
+    async def run_check():
+        calls = []
+
+        async def planner(payload):
+            calls.append(payload)
+            if "repair" not in payload:
+                return {
+                    "description": "Broken",
+                    "action_type": "run_python",
+                    "code": "async def run(page, results):\n    raise RuntimeError('boom')",
+                }
             return {
-                "description": "Broken",
+                "description": "Fixed",
                 "action_type": "run_python",
-                "code": "async def run(page, results):\n    raise RuntimeError('boom')",
+                "output_key": "fixed",
+                "code": "async def run(page, results):\n    return {'ok': True}",
             }
-        return {
-            "description": "Fixed",
-            "action_type": "run_python",
-            "output_key": "fixed",
-            "code": "async def run(page, results):\n    return {'ok': True}",
-        }
 
-    agent = RecordingRuntimeAgent(planner=planner)
-    result = await agent.run(page=_FakePage(), instruction="do it", runtime_results={})
+        agent = RecordingRuntimeAgent(planner=planner)
+        result = await agent.run(page=_FakePage(), instruction="do it", runtime_results={})
+        return calls, result
+
+    calls, result = asyncio.run(run_check())
 
     assert result.success is True
     assert len(calls) == 2
     assert result.trace.ai_execution.repair_attempted is True
     assert result.diagnostics[0].message == "boom"
+
+
+def test_recording_runtime_agent_can_recover_on_second_repair():
+    async def run_check():
+        calls = []
+
+        async def planner(payload):
+            calls.append(payload)
+            if "repair" not in payload:
+                return {
+                    "description": "Broken first attempt",
+                    "action_type": "run_python",
+                    "code": "async def run(page, results):\n    raise RuntimeError('first boom')",
+                }
+            if not payload["repair"].get("previous_failures"):
+                return {
+                    "description": "Broken repair",
+                    "action_type": "run_python",
+                    "code": "async def run(page, results):\n    raise RuntimeError('repair boom')",
+                }
+            return {
+                "description": "Second repair fixed",
+                "action_type": "run_python",
+                "output_key": "fixed",
+                "code": "async def run(page, results):\n    return {'ok': True}",
+            }
+
+        agent = RecordingRuntimeAgent(planner=planner)
+        result = await agent.run(page=_FakePage(), instruction="do it", runtime_results={})
+        return calls, result
+
+    calls, result = asyncio.run(run_check())
+
+    assert result.success is True
+    assert len(calls) == 3
+    assert [diagnostic.message for diagnostic in result.diagnostics] == ["first boom", "repair boom"]
+    assert result.output == {"ok": True}
+    assert "after repair" in result.message
+
+
+def test_recording_runtime_agent_fails_after_two_failed_repairs():
+    async def run_check():
+        calls = []
+
+        async def planner(payload):
+            calls.append(payload)
+            attempt = len(calls)
+            return {
+                "description": f"Broken attempt {attempt}",
+                "action_type": "run_python",
+                "code": f"async def run(page, results):\n    raise RuntimeError('boom {attempt}')",
+            }
+
+        agent = RecordingRuntimeAgent(planner=planner)
+        result = await agent.run(page=_FakePage(), instruction="do it", runtime_results={})
+        return calls, result
+
+    calls, result = asyncio.run(run_check())
+
+    assert result.success is False
+    assert len(calls) == 3
+    assert [diagnostic.message for diagnostic in result.diagnostics] == ["boom 1", "boom 2", "boom 3"]
+    assert "after two repairs" in result.message
 
 
 @pytest.mark.asyncio
@@ -1535,35 +2669,38 @@ async def test_recording_runtime_agent_repair_payload_has_traceback_and_omits_un
     assert result.diagnostics[0].message == repair_payload["error"]
 
 
-@pytest.mark.asyncio
-async def test_recording_runtime_agent_sends_advisory_failure_hint_to_repair_planner():
-    calls = []
+def test_recording_runtime_agent_sends_advisory_failure_hint_to_repair_planner():
+    async def run_check():
+        calls = []
 
-    async def planner(payload):
-        calls.append(payload)
-        if "repair" not in payload:
+        async def planner(payload):
+            calls.append(payload)
+            if "repair" not in payload:
+                return {
+                    "description": "Wait for brittle issue selector",
+                    "action_type": "run_python",
+                    "expected_effect": "extract",
+                    "code": (
+                        "async def run(page, results):\n"
+                        "    raise TimeoutError('Page.wait_for_selector: Timeout 15000ms exceeded waiting for locator(\"[data-testid=issue-list]\")')"
+                    ),
+                }
             return {
-                "description": "Wait for brittle issue selector",
+                "description": "Scan issue links",
                 "action_type": "run_python",
-                "expected_effect": "extract",
-                "code": (
-                    "async def run(page, results):\n"
-                    "    raise TimeoutError('Page.wait_for_selector: Timeout 15000ms exceeded waiting for locator(\"[data-testid=issue-list]\")')"
-                ),
+                "expected_effect": "none",
+                "output_key": "latest_issue",
+                "code": "async def run(page, results):\n    return {'latest_issue_title': 'Latest issue'}",
             }
-        return {
-            "description": "Scan issue links",
-            "action_type": "run_python",
-            "expected_effect": "none",
-            "output_key": "latest_issue",
-            "code": "async def run(page, results):\n    return {'latest_issue_title': 'Latest issue'}",
-        }
 
-    result = await RecordingRuntimeAgent(planner=planner).run(
-        page=_FakePage(),
-        instruction="find the latest issue title",
-        runtime_results={},
-    )
+        result = await RecordingRuntimeAgent(planner=planner).run(
+            page=_FakePage(),
+            instruction="find the latest issue title",
+            runtime_results={},
+        )
+        return calls, result
+
+    calls, result = asyncio.run(run_check())
 
     repair_payload = calls[1]["repair"]
     assert result.success is True
@@ -1572,7 +2709,80 @@ async def test_recording_runtime_agent_sends_advisory_failure_hint_to_repair_pla
     assert repair_payload["failure_analysis"]["type"] == "selector_timeout"
     assert "hint" in repair_payload["failure_analysis"]
     assert "confidence" not in repair_payload["failure_analysis"]
+    assert any(item["kind"] == "selector_retarget" for item in repair_payload["guidance"])
     assert result.diagnostics[0].raw["failure_analysis"]["type"] == "selector_timeout"
+
+
+def test_recording_runtime_agent_sends_terminal_guidance_to_repair_planner():
+    async def run_check():
+        calls = []
+
+        async def planner(payload):
+            calls.append(payload)
+            if "repair" not in payload:
+                return {
+                    "description": "Submit form",
+                    "action_type": "run_python",
+                    "expected_effect": "mixed",
+                    "terminal_contract": _required_terminal_contract("row_exists", kind="record_created"),
+                    "code": "async def run(page, results):\n    return {'action_performed': True, 'action_type': 'click'}",
+                }
+            return {
+                "description": "Submit form and verify terminal state",
+                "action_type": "run_python",
+                "expected_effect": "mixed",
+                "output_key": "created_record",
+                "terminal_contract": _required_terminal_contract("row_exists", kind="record_created"),
+                "code": (
+                    "async def run(page, results):\n"
+                    "    return {'created_record': {'id': 'REQ-1', 'status': 'Submitted'}, "
+                    "'terminal_evidence': {'type': 'row_exists', 'source': 'observed', 'observed': True}}"
+                ),
+            }
+
+        result = await RecordingRuntimeAgent(planner=planner).run(
+            page=_FakePage(),
+            instruction="submit the form and create the record",
+            runtime_results={},
+        )
+        return calls, result
+
+    calls, result = asyncio.run(run_check())
+
+    repair_payload = calls[1]["repair"]
+    assert result.success is True
+    assert "required terminal evidence" in repair_payload["error"]
+    assert any(item["kind"] == "terminal_effect" for item in repair_payload["guidance"])
+
+
+def test_runtime_ai_preserve_signal_is_ignored_for_deterministic_form_code():
+    signals = _merge_runtime_ai_signal(
+        {},
+        {
+            "preserve_runtime_ai": True,
+            "semantic_intent": "Use visible form controls and submit the form",
+            "code": (
+                "async def run(page, results):\n"
+                "    await page.get_by_label('Name').fill('Ada')\n"
+                "    await page.get_by_role('button', name='Submit').click()\n"
+            ),
+        },
+    )
+
+    assert "runtime_ai" not in signals
+
+
+def test_runtime_ai_preserve_signal_is_kept_for_best_matching_candidate_selection():
+    signals = _merge_runtime_ai_signal(
+        {},
+        {
+            "preserve_runtime_ai": True,
+            "semantic_intent": "select_best_matching_candidate",
+            "code": "async def run(page, results):\n    return {'selected': True}\n",
+        },
+    )
+
+    assert signals["runtime_ai"]["preserve"] is True
 
 
 def test_recording_runtime_agent_does_not_preserve_failed_browser_mutation_attempts():
@@ -2296,55 +3506,61 @@ async def test_recording_runtime_agent_accepts_empty_extract_when_plan_explicitl
     assert result.output == {"notifications": []}
 
 
-@pytest.mark.asyncio
-async def test_recording_runtime_agent_records_download_signal_from_ai_code():
-    async def planner(_payload):
-        return {
-            "description": "Download report",
-            "action_type": "run_python",
-            "expected_effect": "click",
-            "output_key": "download_report",
-            "code": (
-                "async def run(page, results):\n"
-                "    await page.trigger_download('report.xlsx')\n"
-                "    return {'action_performed': True}"
-            ),
-        }
+def test_recording_runtime_agent_records_download_signal_from_ai_code():
+    async def run_check():
+        async def planner(_payload):
+            return {
+                "description": "Download report",
+                "action_type": "run_python",
+                "expected_effect": "click",
+                "output_key": "download_report",
+                "code": (
+                    "async def run(page, results):\n"
+                    "    await page.trigger_download('report.xlsx')\n"
+                    "    return {'action_performed': True}"
+                ),
+            }
 
-    page = _FakePage()
-    result = await RecordingRuntimeAgent(planner=planner).run(
-        page=page,
-        instruction="download the report",
-        runtime_results={},
-    )
+        page = _FakePage()
+        result = await RecordingRuntimeAgent(planner=planner).run(
+            page=page,
+            instruction="download the report",
+            runtime_results={},
+        )
+        return result
+
+    result = asyncio.run(run_check())
 
     assert result.success is True
     assert result.trace.signals["download"]["filename"] == "report.xlsx"
     assert result.trace.signals["download"]["count"] == 1
 
 
-@pytest.mark.asyncio
-async def test_recording_runtime_agent_waits_briefly_for_click_triggered_download():
-    async def planner(_payload):
-        return {
-            "description": "Click table row column action",
-            "action_type": "run_python",
-            "expected_effect": "none",
-            "output_key": "table_row_action",
-            "code": (
-                "async def run(page, results):\n"
-                "    page.trigger_download_later('delayed-report.xlsx')\n"
-                "    await page.locator('tbody tr').nth(0).click()\n"
-                "    return {'action_performed': True}"
-            ),
-        }
+def test_recording_runtime_agent_waits_briefly_for_click_triggered_download():
+    async def run_check():
+        async def planner(_payload):
+            return {
+                "description": "Click table row column action",
+                "action_type": "run_python",
+                "expected_effect": "none",
+                "output_key": "table_row_action",
+                "code": (
+                    "async def run(page, results):\n"
+                    "    page.trigger_download_later('delayed-report.xlsx')\n"
+                    "    await page.locator('tbody tr').nth(0).click()\n"
+                    "    return {'action_performed': True}"
+                ),
+            }
 
-    page = _FakePage()
-    result = await RecordingRuntimeAgent(planner=planner).run(
-        page=page,
-        instruction="click the first file name in the export table",
-        runtime_results={},
-    )
+        page = _FakePage()
+        result = await RecordingRuntimeAgent(planner=planner).run(
+            page=page,
+            instruction="click the first file name in the export table",
+            runtime_results={},
+        )
+        return result
+
+    result = asyncio.run(run_check())
 
     assert result.success is True
     assert result.trace.signals["download"]["filename"] == "delayed-report.xlsx"
@@ -2498,6 +3714,572 @@ def test_extract_snapshot_enrichment_backfills_observed_label_from_detail_value(
     assert field["observed_label"] == "Compliance clause"
 
 
+def test_recover_failed_side_effect_requires_correlated_new_table_row_postcondition():
+    before_snapshot = {
+        "table_views": [
+            {
+                "columns": [{"header": "Record No"}, {"header": "Status"}],
+                "rows": [
+                    {
+                        "cells": [
+                            {"column_header": "Record No", "text": "REQ-001"},
+                            {"column_header": "Status", "text": "submitted"},
+                        ]
+                    }
+                ],
+            }
+        ]
+    }
+    after_snapshot = {
+        "table_views": [
+            {
+                "columns": [{"header": "Record No"}, {"header": "Status"}],
+                "rows": [
+                    {
+                        "cells": [
+                            {"column_header": "Record No", "text": "REQ-001"},
+                            {"column_header": "Status", "text": "submitted"},
+                        ]
+                    },
+                    {
+                        "cells": [
+                            {"column_header": "Record No", "text": "REQ-002"},
+                            {"column_header": "Status", "text": "pending"},
+                        ]
+                    },
+                ],
+            }
+        ]
+    }
+
+    recovered = recover_failed_side_effect_from_snapshot_diff(
+        plan={
+            "action_type": "run_python",
+            "expected_effect": "mixed",
+            "terminal_contract": _required_terminal_contract("row_exists", kind="record_created"),
+            "input_bindings": {"record_no": {"default": "REQ-002"}},
+        },
+        result={"success": False, "error": "selector timed out after the click"},
+        before_snapshot=before_snapshot,
+        after_snapshot=after_snapshot,
+    )
+
+    assert recovered is not None
+    recovered_plan, recovered_result = recovered
+    assert recovered_result["success"] is True
+    assert recovered_result["signals"]["recovered_attempt"]["ignore_errors"] is True
+    assert recovered_plan["postcondition"]["key"] == {"Record No": "REQ-002"}
+    assert recovered_plan["postcondition"]["expect"] == {"Status": "pending"}
+
+
+def test_recovered_side_effect_does_not_override_failed_instruction_completion():
+    snapshot_before = {"table_views": []}
+    snapshot_after = {
+        "table_views": [
+            {
+                "columns": [{"header": "Request No"}, {"header": "Status"}],
+                "rows": [
+                    {
+                        "cells": [
+                            {"column_header": "Request No", "text": "PR-001"},
+                            {"column_header": "Status", "text": "submitted"},
+                        ]
+                    }
+                ],
+            }
+        ]
+    }
+
+    recovered = asyncio.run(
+        RecordingRuntimeAgent(planner=lambda _payload: None)._accept_recovered_side_effect(
+            page=_FakePage(),
+            instruction="create request PR-001 and then generate order PO-001",
+            plan={
+                "action_type": "run_python",
+                "expected_effect": "mixed",
+                "terminal_contract": _required_terminal_contract("row_exists", kind="record_created"),
+                "input_bindings": {"request_no": {"default": "PR-001"}},
+            },
+            result={
+                "success": False,
+                "error": "Instruction completion verification failed",
+                "signals": {
+                    "instruction_completion": {
+                        "passed": False,
+                        "missing_requirements": ["generate order PO-001"],
+                    }
+                },
+            },
+            before=RPAPageState(url="https://example.test/request/new", title="Example"),
+            before_snapshot=snapshot_before,
+            after_snapshot=snapshot_after,
+            diagnostics=[],
+            repair_attempted=True,
+        )
+    )
+
+    assert recovered is None
+
+
+def test_recovered_side_effect_does_not_preserve_failed_preconditions_without_postcondition():
+    snapshot_before = {"table_views": []}
+    snapshot_after = {
+        "table_views": [
+            {
+                "columns": [{"header": "Order No"}, {"header": "Request No"}],
+                "rows": [
+                    {
+                        "cells": [
+                            {"column_header": "Order No", "text": "PO-001"},
+                            {"column_header": "Request No", "text": "PR-001"},
+                        ]
+                    }
+                ],
+            }
+        ]
+    }
+    precondition_plan = {
+        "action_type": "run_python",
+        "expected_effect": "mixed",
+        "code": "async def run(page, results):\n    await page.get_by_role('button', name='Create PR').click()\n    raise RuntimeError('PR submitted but navigation timed out')",
+    }
+    recovered_plan = {
+        "action_type": "run_python",
+        "expected_effect": "mixed",
+        "terminal_contract": _required_terminal_contract("row_exists", kind="record_created"),
+        "input_bindings": {"order_no": {"default": "PO-001"}, "request_no": {"default": "PR-001"}},
+        "postcondition": {
+            "kind": "table_row_exists",
+            "source": "observed",
+            "key": {"Order No": "PO-001"},
+            "expect": {"Request No": "PR-001"},
+        },
+        "code": "async def run(page, results):\n    await page.get_by_role('button', name='Create PO').click()\n    raise RuntimeError('terminal check timed out')",
+    }
+
+    recovered = asyncio.run(
+        RecordingRuntimeAgent(planner=lambda _payload: None)._accept_recovered_side_effect(
+            page=_FakePage(),
+            instruction="create request PR-001 and then generate order PO-001",
+            plan=recovered_plan,
+            result={"success": False, "error": "terminal check timed out"},
+            before=RPAPageState(url="https://example.test/request/new", title="Example"),
+            before_snapshot=snapshot_before,
+            after_snapshot=snapshot_after,
+            diagnostics=[],
+            repair_attempted=True,
+            precondition_plans=[precondition_plan],
+        )
+    )
+
+    assert recovered is not None
+    code = recovered.trace.ai_execution.code
+    assert "_RPA_PRECONDITION_CODES" not in code
+    assert "Create PR" not in code
+    assert "Create PO" in code
+
+
+def test_replayable_failed_preconditions_require_strong_fallback_postcondition():
+    precondition_plan = {
+        "action_type": "run_python",
+        "expected_effect": "mixed",
+        "code": "async def run(page, results):\n    await page.get_by_role('button', name='Create PR').click()\n    raise RuntimeError('PR submitted but navigation timed out')",
+    }
+    repair_plan = {
+        "action_type": "run_python",
+        "expected_effect": "mixed",
+        "code": "async def run(page, results):\n    await page.get_by_role('button', name='Create PO').click()\n    return {'ok': True}",
+    }
+    fallback_trace = RPAAcceptedTrace(
+        trace_type=RPATraceType.AI_OPERATION,
+        source="ai",
+        description="Create PO",
+        ai_execution=RPAAIExecution(code=repair_plan["code"]),
+        postcondition={
+            "kind": "table_row_exists",
+            "key": {"Order No": "PO-001"},
+            "expect": {"Request No": "PR-001"},
+        },
+    )
+
+    trace = asyncio.run(
+        RecordingRuntimeAgent(planner=lambda _payload: None)._trace_with_replayable_failed_preconditions(
+            page=_FakePage(),
+            instruction="create request PR-001 and then generate order PO-001",
+            failed_plans=[precondition_plan],
+            repair_plan=repair_plan,
+            repair_result={"success": True, "output": {"ok": True}},
+            before=RPAPageState(url="https://example.test/request/new", title="Example"),
+            repair_snapshot={},
+            fallback_trace=fallback_trace,
+        )
+    )
+
+    code = trace.ai_execution.code
+    assert "_RPA_PRECONDITION_CODES" in code
+    assert "Create PR" in code
+    assert "Create PO" in code
+    assert trace.postcondition == fallback_trace.postcondition
+
+
+def test_recover_failed_side_effect_rejects_uncorrelated_new_table_row():
+    recovered = recover_failed_side_effect_from_snapshot_diff(
+        plan={
+            "action_type": "run_python",
+            "expected_effect": "mixed",
+            "terminal_contract": _required_terminal_contract("row_exists", kind="record_created"),
+        },
+        result={"success": False, "error": "selector timed out after the click"},
+        before_snapshot={"table_views": []},
+        after_snapshot={
+            "table_views": [
+                {
+                    "columns": [{"header": "Record No"}, {"header": "Status"}],
+                    "rows": [
+                        {
+                            "cells": [
+                                {"column_header": "Record No", "text": "REQ-UNRELATED"},
+                                {"column_header": "Status", "text": "pending"},
+                            ]
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+
+    assert recovered is None
+
+
+def test_recover_failed_side_effect_accepts_correlated_disappeared_table_row():
+    recovered = recover_failed_side_effect_from_snapshot_diff(
+        plan={
+            "action_type": "run_python",
+            "expected_effect": "mixed",
+            "description": "Complete task TASK-001",
+            "input_bindings": {"task_id": {"default": "TASK-001"}},
+            "terminal_contract": _required_terminal_contract("row_absent", kind="record_removed"),
+        },
+        result={"success": False, "error": "TASK-001 disappeared before verification completed"},
+        before_snapshot={
+            "table_views": [
+                {
+                    "columns": [{"header": "Task ID"}, {"header": "Status"}, {"header": "Action"}],
+                    "rows": [
+                        {
+                            "cells": [
+                                {"column_header": "Task ID", "text": "TASK-001"},
+                                {"column_header": "Status", "text": "pending"},
+                                {"column_header": "Action", "text": "Approve"},
+                            ]
+                        }
+                    ],
+                }
+            ]
+        },
+        after_snapshot={
+            "table_views": [
+                {
+                    "columns": [{"header": "Task ID"}, {"header": "Status"}, {"header": "Action"}],
+                    "rows": [],
+                }
+            ]
+        },
+    )
+
+    assert recovered is not None
+    recovered_plan, recovered_result = recovered
+    assert recovered_plan["postcondition"]["kind"] == "table_row_absent"
+    assert recovered_plan["postcondition"]["key"] == {"Task ID": "TASK-001"}
+    assert recovered_plan["postcondition"]["expect"] == {"Status": "pending"}
+    assert recovered_result["effect"]["terminal_evidence"] == "row_absent"
+
+
+def test_recover_failed_side_effect_ignores_code_and_error_tokens_as_correlation_source():
+    recovered = recover_failed_side_effect_from_snapshot_diff(
+        plan={
+            "action_type": "run_python",
+            "expected_effect": "mixed",
+            "description": "Complete task TASK-001",
+            "code": "async def run(page, results):\n    await page.get_by_text('TASK-001').click()",
+            "terminal_contract": _required_terminal_contract("row_absent", kind="record_removed"),
+        },
+        result={"success": False, "error": "TASK-001 disappeared before verification completed"},
+        before_snapshot={
+            "table_views": [
+                {
+                    "columns": [{"header": "Task ID"}, {"header": "Status"}, {"header": "Action"}],
+                    "rows": [
+                        {
+                            "cells": [
+                                {"column_header": "Task ID", "text": "TASK-001"},
+                                {"column_header": "Status", "text": "pending"},
+                                {"column_header": "Action", "text": "Approve"},
+                            ]
+                        }
+                    ],
+                }
+            ]
+        },
+        after_snapshot={
+            "table_views": [
+                {
+                    "columns": [{"header": "Task ID"}, {"header": "Status"}, {"header": "Action"}],
+                    "rows": [],
+                }
+            ]
+        },
+    )
+
+    assert recovered is None
+
+
+def test_recover_failed_side_effect_rejects_disappeared_row_without_comparable_table():
+    recovered = recover_failed_side_effect_from_snapshot_diff(
+        plan={
+            "action_type": "run_python",
+            "expected_effect": "mixed",
+            "description": "Complete task TASK-001",
+            "terminal_contract": _required_terminal_contract("row_absent", kind="record_removed"),
+        },
+        result={"success": False, "error": "TASK-001 disappeared before verification completed"},
+        before_snapshot={
+            "table_views": [
+                {
+                    "columns": [{"header": "Task ID"}, {"header": "Status"}],
+                    "rows": [
+                        {
+                            "cells": [
+                                {"column_header": "Task ID", "text": "TASK-001"},
+                                {"column_header": "Status", "text": "pending"},
+                            ]
+                        }
+                    ],
+                }
+            ]
+        },
+        after_snapshot={"table_views": []},
+    )
+
+    assert recovered is None
+
+
+def test_snapshot_diff_terminal_postcondition_detects_correlated_updated_row():
+    recovery = recording_runtime_agent.snapshot_diff_terminal_postcondition(
+        plan={
+            "action_type": "run_python",
+            "expected_effect": "mixed",
+            "description": "Update supplier SUP-001 contact Alice 139-0000",
+            "terminal_contract": _required_terminal_contract("field_value_equals", kind="record_updated"),
+        },
+        result={"success": True, "output": {"supplier_id": "SUP-001", "contact": "Alice", "phone": "139-0000"}},
+        before_snapshot={
+            "table_views": [
+                {
+                    "columns": [{"header": "Supplier ID"}, {"header": "Contact"}, {"header": "Phone"}],
+                    "rows": [
+                        {
+                            "cells": [
+                                {"column_header": "Supplier ID", "text": "SUP-001"},
+                                {"column_header": "Contact", "text": ""},
+                                {"column_header": "Phone", "text": ""},
+                            ]
+                        }
+                    ],
+                }
+            ]
+        },
+        after_snapshot={
+            "table_views": [
+                {
+                    "columns": [{"header": "Supplier ID"}, {"header": "Contact"}, {"header": "Phone"}],
+                    "rows": [
+                        {
+                            "cells": [
+                                {"column_header": "Supplier ID", "text": "SUP-001"},
+                                {"column_header": "Contact", "text": "Alice"},
+                                {"column_header": "Phone", "text": "139-0000"},
+                            ]
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+
+    assert recovery["postcondition"]["kind"] == "table_row_exists"
+    assert recovery["postcondition"]["key"] == {"Supplier ID": "SUP-001"}
+    assert recovery["postcondition"]["expect"] == {"Contact": "Alice", "Phone": "139-0000"}
+
+
+def test_recover_failed_side_effect_uses_plan_bindings_when_start_page_has_no_comparable_table():
+    before_snapshot = {"table_views": []}
+    after_snapshot = {
+        "table_views": [
+            {
+                "columns": [{"header": "Record No"}, {"header": "Source"}, {"header": "Status"}],
+                "rows": [
+                    {
+                        "cells": [
+                            {"column_header": "Record No", "text": "REQ-001"},
+                            {"column_header": "Source", "text": "SRC-001"},
+                            {"column_header": "Status", "text": "approved"},
+                        ]
+                    },
+                    {
+                        "cells": [
+                            {"column_header": "Record No", "text": "REQ-NEW"},
+                            {"column_header": "Source", "text": "SRC-NEW"},
+                            {"column_header": "Status", "text": "pending"},
+                        ]
+                    },
+                ],
+            }
+        ]
+    }
+
+    recovered = recover_failed_side_effect_from_snapshot_diff(
+        plan={
+            "action_type": "run_python",
+            "expected_effect": "mixed",
+            "terminal_contract": _required_terminal_contract("row_exists", kind="record_created"),
+            "input_bindings": {
+                "record_no": {"default": "REQ-NEW"},
+                "source_no": {"default": "SRC-NEW"},
+            },
+        },
+        result={"success": False, "error": "final assertion used a display label not present in the table"},
+        before_snapshot=before_snapshot,
+        after_snapshot=after_snapshot,
+    )
+
+    assert recovered is not None
+    recovered_plan, recovered_result = recovered
+    assert recovered_result["success"] is True
+    assert recovered_plan["postcondition"]["key"] == {"Record No": "REQ-NEW"}
+    assert recovered_plan["postcondition"]["expect"] == {"Status": "pending"}
+
+
+def test_recover_failed_side_effect_does_not_use_action_only_row_as_postcondition():
+    recovered = recover_failed_side_effect_from_snapshot_diff(
+        plan={
+            "action_type": "run_python",
+            "expected_effect": "mixed",
+            "terminal_contract": _required_terminal_contract("row_exists", kind="record_created"),
+        },
+        result={"success": False, "error": "terminal state was not observed"},
+        before_snapshot={"table_views": []},
+        after_snapshot={
+            "table_views": [
+                {
+                    "columns": [{"header": "Action"}],
+                    "rows": [{"cells": [{"column_header": "Action", "text": "Delete"}]}],
+                }
+            ]
+        },
+    )
+
+    assert recovered is None
+
+
+def test_recover_failed_side_effect_ignores_entity_tokens_from_failure_facts():
+    recovered = recover_failed_side_effect_from_snapshot_diff(
+        plan={
+            "action_type": "run_python",
+            "expected_effect": "mixed",
+            "description": "Create the generated order PO-NEW-001 from PR-NEW-001",
+            "terminal_contract": _required_terminal_contract("row_exists", kind="record_created"),
+        },
+        result={"success": False, "error": "Created PO-NEW-001 for PR-NEW-001 but verification failed"},
+        before_snapshot={"table_views": []},
+        after_snapshot={
+            "table_views": [
+                {
+                    "columns": [{"header": "Order No"}, {"header": "Request No"}, {"header": "Status"}],
+                    "rows": [
+                        {
+                            "cells": [
+                                {"column_header": "Order No", "text": "PO-NEW-001"},
+                                {"column_header": "Request No", "text": "PR-NEW-001"},
+                                {"column_header": "Status", "text": "pending"},
+                            ]
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+
+    assert recovered is None
+
+
+def test_literal_postcondition_is_trusted_only_for_recovered_attempts():
+    snapshot = {
+        "table_views": [
+            {
+                "columns": [{"header": "Record No"}, {"header": "Status"}],
+                "rows": [
+                    {
+                        "cells": [
+                            {"column_header": "Record No", "text": "REQ-002"},
+                            {"column_header": "Status", "text": "pending"},
+                        ]
+                    }
+                ],
+            }
+        ]
+    }
+    postcondition = {
+        "kind": "table_row_exists",
+        "source": "observed",
+        "key": {"Record No": "REQ-002"},
+        "expect": {"Status": "pending"},
+    }
+
+    assert not recording_runtime_agent._validated_postcondition(postcondition, snapshot=snapshot)
+    assert recording_runtime_agent._validated_postcondition(
+        postcondition,
+        snapshot=snapshot,
+        allow_literal_key=True,
+    )
+
+
+def test_postcondition_prunes_expect_values_without_execution_evidence():
+    snapshot = {
+        "table_views": [
+            {
+                "columns": [{"header": "Record No"}, {"header": "Status"}, {"header": "Owner"}],
+                "rows": [
+                    {
+                        "cells": [
+                            {"column_header": "Record No", "text": "REQ-002"},
+                            {"column_header": "Status", "text": "pending"},
+                            {"column_header": "Owner", "text": "Alice"},
+                        ]
+                    }
+                ],
+            }
+        ]
+    }
+    postcondition = {
+        "kind": "table_row_exists",
+        "source": "observed",
+        "key": {"Record No": "REQ-002"},
+        "expect": {"Status": "pending", "Owner": "Alice"},
+    }
+
+    validated = recording_runtime_agent._validated_postcondition(
+        postcondition,
+        snapshot=snapshot,
+        allow_literal_key=True,
+        result={"success": True, "output": {"status": "pending", "observed_row_text": "REQ-002 pending Alice"}},
+    )
+
+    assert validated["key"] == {"Record No": "REQ-002"}
+    assert validated["expect"] == {"Status": "pending"}
+    assert validated["expect_pruned"] is True
+
+
 def test_extract_snapshot_enrichment_overrides_unobserved_label_from_detail_value():
     result = {
         "signals": {
@@ -2566,6 +4348,166 @@ def test_extract_snapshot_enrichment_resolves_label_value_mistake_from_detail_vi
     assert field["observed_label"] == "Contract number"
     assert field["value"] == "CT-001"
     assert enriched["output"]["contract_number"] == "CT-001"
+
+
+def test_extract_snapshot_enrichment_preserves_table_cell_value_that_matches_detail_label():
+    result = {
+        "output": {"status": "pending_approval"},
+        "signals": {
+            "extract_snapshot": {
+                "fields": [
+                    {
+                        "label": "status",
+                        "value": "pending_approval",
+                        "replay_required": True,
+                    }
+                ]
+            }
+        },
+    }
+    snapshot = {
+        "detail_views": [{"fields": [{"label": "pending_approval", "value": "¥188,000.00"}]}],
+        "table_views": [
+            {
+                "columns": [{"header": "Order"}, {"header": "Status"}],
+                "rows": [
+                    {
+                        "cells": [
+                            {"column_header": "Order", "column_index": 0, "text": "PO-001"},
+                            {"column_header": "Status", "column_index": 1, "text": "pending_approval"},
+                        ]
+                    }
+                ],
+            }
+        ],
+    }
+
+    enriched = recording_runtime_agent._enrich_extract_snapshot_result_with_replay_evidence(result, snapshot)
+
+    field = enriched["signals"]["extract_snapshot"]["fields"][0]
+    assert field["value"] == "pending_approval"
+    assert enriched["output"]["status"] == "pending_approval"
+
+
+def test_extract_snapshot_enrichment_adds_table_cell_evidence_from_row_anchor():
+    result = {
+        "output": {"order_no": "PO-001", "status": "pending_approval"},
+        "signals": {
+            "extract_snapshot": {
+                "fields": [
+                    {
+                        "label": "order_no",
+                        "value": "PO-001",
+                        "text_pattern": {"prefix": "Created:", "suffix": ""},
+                        "replay_required": True,
+                    },
+                    {
+                        "label": "status",
+                        "value": "pending_approval",
+                        "replay_required": True,
+                    },
+                ]
+            }
+        },
+    }
+    snapshot = {
+        "table_views": [
+            {
+                "columns": [{"header": "Order"}, {"header": "Status"}],
+                "rows": [
+                    {
+                        "cells": [
+                            {"column_header": "Order", "column_index": 0, "text": "PO-001"},
+                            {"column_header": "Status", "column_index": 1, "text": "pending_approval"},
+                        ]
+                    }
+                ],
+            }
+        ],
+    }
+
+    enriched = recording_runtime_agent._enrich_extract_snapshot_result_with_replay_evidence(result, snapshot)
+
+    status_field = enriched["signals"]["extract_snapshot"]["fields"][1]
+    assert status_field["table_cell"] == {
+        "table_headers": ["Order", "Status"],
+        "row_key": {"Order": "PO-001"},
+        "column_header": "Status",
+        "column_index": 1,
+    }
+
+
+def test_extract_snapshot_enrichment_adds_table_cell_from_multi_field_row_match_without_unique_text():
+    result = {
+        "output": {"supplier_id": "SUP-001", "contact_name": "Alice", "phone": "139-0000"},
+        "signals": {
+            "extract_snapshot": {
+                "fields": [
+                    {"label": "supplier_id", "value": "SUP-001", "replay_required": True},
+                    {"label": "contact_name", "value": "Alice", "replay_required": True},
+                    {"label": "phone", "value": "139-0000", "replay_required": True},
+                ]
+            }
+        },
+    }
+    snapshot = {
+        "table_views": [
+            {
+                "columns": [{"header": "Supplier ID"}, {"header": "Contact"}, {"header": "Phone"}],
+                "rows": [
+                    {
+                        "cells": [
+                            {"column_header": "Supplier ID", "column_index": 0, "text": "SUP-001"},
+                            {"column_header": "Contact", "column_index": 1, "text": "Alice"},
+                            {"column_header": "Phone", "column_index": 2, "text": "139-0000"},
+                        ]
+                    }
+                ],
+            }
+        ],
+    }
+
+    enriched = recording_runtime_agent._enrich_extract_snapshot_result_with_replay_evidence(result, snapshot)
+
+    fields = enriched["signals"]["extract_snapshot"]["fields"]
+    assert fields[1]["table_cell"] == {
+        "table_headers": ["Supplier ID", "Contact", "Phone"],
+        "row_key": {"Supplier ID": "SUP-001"},
+        "column_header": "Contact",
+        "column_index": 1,
+    }
+    assert fields[2]["table_cell"]["row_key"] == {"Supplier ID": "SUP-001"}
+
+
+def test_table_anchor_prefers_structurally_unique_value_over_identifier_header_marker():
+    snapshot = {
+        "table_views": [
+            {
+                "columns": [{"header": "Invoice number"}, {"header": "Team"}, {"header": "Status"}],
+                "rows": [
+                    {
+                        "cells": [
+                            {"column_header": "Invoice number", "column_index": 0, "text": "INV-001"},
+                            {"column_header": "Team", "column_index": 1, "text": "Blue Team"},
+                            {"column_header": "Status", "column_index": 2, "text": "Open"},
+                        ]
+                    },
+                    {
+                        "cells": [
+                            {"column_header": "Invoice number", "column_index": 0, "text": "INV-001"},
+                            {"column_header": "Team", "column_index": 1, "text": "Red Team"},
+                            {"column_header": "Status", "column_index": 2, "text": "Open"},
+                        ]
+                    },
+                ],
+            }
+        ]
+    }
+
+    match = recording_runtime_agent._best_table_row_match(snapshot, ["INV-001", "Blue Team"], min_score=2)
+
+    assert match["anchor_cell"]["column_header"] == "Team"
+    assert match["anchor_cell"]["text"] == "Blue Team"
 
 
 def test_parse_json_object_rejects_run_python_without_runner():

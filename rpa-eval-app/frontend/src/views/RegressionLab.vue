@@ -1,11 +1,22 @@
 <template>
   <div class="page">
     <h1 class="page-title">RPA Regression Lab</h1>
+    <div
+      v-if="statusMessage"
+      class="status-banner"
+      role="status"
+      aria-live="polite"
+      data-rpa-feedback
+      data-testid="regression-lab-status"
+    >
+      {{ statusMessage }}
+    </div>
 
     <section class="panel">
       <h2>Weak body click guard</h2>
       <p>Select all export rows, open the toolbar export menu, then choose Export all columns.</p>
       <table class="data-table" data-testid="weak-click-table">
+        <caption class="sr-only">Weak body click guard export rows</caption>
         <thead>
           <tr>
             <th><input data-testid="weak-click-select-all" type="checkbox" v-model="allSelected" /></th>
@@ -26,7 +37,7 @@
       <div class="toolbar">
         <button data-testid="weak-click-export-trigger" @click="exportMenuOpen = !exportMenuOpen">Export menu</button>
         <div v-if="exportMenuOpen" class="menu" data-testid="weak-click-export-menu">
-          <button data-testid="weak-click-export-all" @click="recordSimpleEvent('body_click_export_all', 'EXPORT-ALL-2026')">
+          <button data-testid="weak-click-export-all" @click="recordSimpleEvent('body_click_export_all', 'EXPORT-ALL-2026', 'Export completed')">
             Export all columns
           </button>
         </div>
@@ -49,6 +60,7 @@
             </thead>
           </table>
           <table class="data-table split-body" data-testid="split-grid-body">
+            <caption class="sr-only">Split header/body grid</caption>
             <tbody>
               <tr v-for="file in files" :key="file.file_id" class="grid-row">
                 <td>{{ file.file_id }}</td>
@@ -70,6 +82,7 @@
       <h2>Collection locator rewrite guard</h2>
       <p>Open the action link inside the second row of this scoped collection table.</p>
       <table class="data-table" data-testid="collection-rewrite-table">
+        <caption class="sr-only">Collection locator rewrite guard</caption>
         <thead>
           <tr><th>Row key</th><th>Name</th><th>Action</th></tr>
         </thead>
@@ -78,7 +91,7 @@
             <td>{{ row.key }}</td>
             <td>{{ row.name }}</td>
             <td>
-              <button :data-testid="`random-action-${row.random}`" @click="recordSimpleEvent('collection_row_action', row.key)">
+              <button :data-testid="`random-action-${row.random}`" @click="recordSimpleEvent('collection_row_action', row.key, 'Row action completed')">
                 Open row action
               </button>
             </td>
@@ -87,17 +100,24 @@
       </table>
     </section>
 
-    <section class="panel">
-      <h2>Legitimate empty extraction</h2>
+    <section class="panel" aria-labelledby="empty-audit-heading" data-testid="empty-audit-region">
+      <h2 id="empty-audit-heading">Legitimate empty extraction</h2>
       <p>Filter audit records by failed status and report that the result list is empty.</p>
       <div class="toolbar">
         <button data-testid="empty-audit-filter" @click="filterFailedAudits">Show failed records</button>
         <span data-testid="empty-audit-count">Rows: {{ auditRows.length }}</span>
       </div>
-      <div v-if="auditFiltered && auditRows.length === 0" data-testid="empty-audit-state" class="empty-state">
+      <div
+        v-if="auditFiltered && auditRows.length === 0"
+        data-testid="empty-audit-state"
+        class="empty-state"
+        role="status"
+        aria-live="polite"
+      >
         No failed audit records
       </div>
-      <table v-else class="data-table">
+      <table v-else class="data-table" data-testid="empty-audit-table">
+        <caption class="sr-only">Audit records filtered by status</caption>
         <tbody>
           <tr v-for="row in auditRows" :key="row.record_id"><td>{{ row.record_id }}</td><td>{{ row.status }}</td><td>{{ row.summary }}</td></tr>
         </tbody>
@@ -129,6 +149,7 @@
         <button data-testid="parameter-contract-search" @click="searchContracts">Search contracts</button>
       </div>
       <table class="data-table" data-testid="parameter-contract-results">
+        <caption class="sr-only">Parameterized contract target</caption>
         <tbody>
           <tr v-for="contract in filteredContracts" :key="contract.number">
             <td>{{ contract.number }}</td>
@@ -186,6 +207,7 @@ const filteredContracts = ref([
   { number: 'CT-2026-RPA-ALT-001', title: 'RPA regression alternate contract' }
 ])
 const modalOpen = ref(false)
+const statusMessage = ref('')
 
 const exportRows = [
   { id: 'EXPORT-ROW-001', file: 'all-columns-source.csv', status: 'ready' },
@@ -211,19 +233,24 @@ const modalForm = reactive({
   contact_email: ''
 })
 
-async function recordSimpleEvent(eventKey: string, entityId: string) {
+async function recordSimpleEvent(eventKey: string, entityId: string, userMessage = 'Action completed') {
   await apiClient.post(`/lab/events/${eventKey}`, { entity_id: entityId, status: 'completed' })
+  setStatus(userMessage)
 }
 
 async function openSplitFile(fileId: string) {
   await apiClient.post(`/lab/split-grid/open/${fileId}`)
+  setStatus('File opened')
 }
 
 async function filterFailedAudits() {
   const { data } = await apiClient.get('/lab/empty-audit-records', { params: { status: 'failed' } })
   auditRows.value = data
   auditFiltered.value = true
-  await recordSimpleEvent('empty_audit_filtered', 'AUDIT-FAILED-EMPTY')
+  await recordSimpleEvent('empty_audit_filtered', 'AUDIT-FAILED-EMPTY', 'Audit filter applied')
+  if (data.length === 0) {
+    setStatus('No failed records found')
+  }
 }
 
 function searchContracts() {
@@ -236,15 +263,18 @@ function searchContracts() {
 
 async function submitDataflow() {
   await apiClient.post('/lab/dataflow-submit', dataflowForm)
+  setStatus('Form submitted')
 }
 
 async function openParameterizedContract(contractNumber: string) {
   await apiClient.post('/lab/parameterized-contract/open', { contract_number: contractNumber })
+  setStatus('Contract opened')
 }
 
 async function saveModalSupplier() {
   await apiClient.post('/lab/modal-supplier/save', modalForm)
   modalOpen.value = false
+  setStatus('Supplier saved')
 }
 
 function openPopupReport() {
@@ -257,9 +287,35 @@ onMounted(async () => {
   const audit = await apiClient.get('/lab/empty-audit-records')
   auditRows.value = audit.data
 })
+
+function setStatus(message: string) {
+  statusMessage.value = message
+}
 </script>
 
 <style scoped>
+.status-banner {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border: 1px solid #67c23a;
+  border-radius: 6px;
+  color: #2f7d32;
+  background: #f0f9eb;
+  font-size: 14px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .panel {
   margin-bottom: 18px;
   padding: 16px;

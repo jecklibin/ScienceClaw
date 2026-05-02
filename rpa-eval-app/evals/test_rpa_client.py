@@ -93,6 +93,31 @@ class RpaClawClientTests(unittest.TestCase):
 
         self.assertEqual(requests[0][0].full_url, "http://rpaclaw/api/v1/rpa/session/session-1/test")
         self.assertEqual(requests[0][1], 123)
+        self.assertEqual(json.loads(requests[0][0].data.decode("utf-8")), {"params": {}})
+
+    def test_test_script_sends_optional_setup_navigation(self):
+        requests = []
+
+        def fake_urlopen(req, timeout):
+            requests.append((req, timeout))
+            return FakeResponse({"status": "success", "result": {"success": True}})
+
+        with patch("rpa_client.request.urlopen", fake_urlopen):
+            client = RpaClawClient("http://rpaclaw")
+            client.test_script(
+                "session-1",
+                {"q": "abc"},
+                timeout_s=123,
+                setup_navigation=["http://eval/eval-auth.html?token=t", "http://eval/start"],
+            )
+
+        self.assertEqual(
+            json.loads(requests[0][0].data.decode("utf-8")),
+            {
+                "params": {"q": "abc"},
+                "setup_navigation": ["http://eval/eval-auth.html?token=t", "http://eval/start"],
+            },
+        )
 
     def test_run_instruction_times_out_and_stops_session(self):
         client = RpaClawClient("http://rpaclaw")

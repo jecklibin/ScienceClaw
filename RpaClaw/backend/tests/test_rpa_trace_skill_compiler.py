@@ -113,6 +113,110 @@ def test_compiler_allows_recovered_attempt_only_with_compiled_postcondition():
     assert "raise RuntimeError('terminal state not observed')" in body
 
 
+def test_compiler_allows_idempotent_replay_with_compiled_postcondition():
+    script = TraceSkillCompiler().generate_script(
+        [
+            RPAAcceptedTrace(
+                trace_type=RPATraceType.AI_OPERATION,
+                source="ai",
+                description="Complete existing task",
+                user_instruction="complete task TASK-001",
+                ai_execution=RPAAIExecution(
+                    language="python",
+                    code="async def run(page, results):\n    raise RuntimeError('task row not found')",
+                ),
+                signals={"idempotent_postcondition_replay": {"ignore_precondition_errors": True}},
+                postcondition={
+                    "kind": "table_row_absent",
+                    "table_headers": ["Task ID"],
+                    "key": {"Task ID": "TASK-001"},
+                },
+            )
+        ],
+        is_local=True,
+    )
+
+    body = _execute_body(script)
+    assert "_recovered_attempt_errors" in body
+    assert "verify table row absence postcondition" in body
+
+
+def test_embedded_ai_code_preserves_bare_text_click_strictness():
+    script = TraceSkillCompiler().generate_script(
+        [
+            RPAAcceptedTrace(
+                trace_type=RPATraceType.AI_OPERATION,
+                source="ai",
+                description="Open section",
+                user_instruction="open the section",
+                ai_execution=RPAAIExecution(
+                    language="python",
+                    code="async def run(page, results):\n    await page.get_by_text('合同台账', exact=True).click()\n    return {'action_performed': True}",
+                ),
+            )
+        ],
+        is_local=True,
+    )
+
+    body = _execute_body(script)
+    assert "page.get_by_text('合同台账', exact=True).click()" in body
+    assert "page.get_by_text('合同台账', exact=True).first.click()" not in body
+
+
+def test_snapshot_table_cell_evidence_compiles_to_structural_row_extract():
+    script = TraceSkillCompiler().generate_script(
+        [
+            RPAAcceptedTrace(
+                trace_type=RPATraceType.AI_OPERATION,
+                source="ai",
+                description="Extract generated order status",
+                user_instruction="extract generated order status",
+                output_key="order",
+                output={"order_no": "PO-001", "status": "pending_approval"},
+                ai_execution=RPAAIExecution(language="snapshot", code="", output={"status": "pending_approval"}),
+                signals={
+                    "extract_snapshot": {
+                        "fields": [
+                            {
+                                "label": "order_no",
+                                "value": "PO-001",
+                                "text_pattern": {"prefix": "Created:", "suffix": ""},
+                                "table_cell": {
+                                    "table_headers": ["Order", "Status"],
+                                    "row_key": {"Order": "PO-001"},
+                                    "column_header": "Order",
+                                    "column_index": 0,
+                                },
+                                "replay_required": True,
+                            },
+                            {
+                                "label": "status",
+                                "value": "pending_approval",
+                                "table_cell": {
+                                    "table_headers": ["Order", "Status"],
+                                    "row_key": {"Order": "PO-001"},
+                                    "column_header": "Status",
+                                    "column_index": 1,
+                                },
+                                "replay_required": True,
+                            },
+                        ]
+                    }
+                },
+            )
+        ],
+        is_local=True,
+    )
+
+    body = _execute_body(script)
+    assert "_execute_runtime_ai_instruction(" not in body
+    assert "_extract_table_cell_value(current_page" in body
+    assert "'row_key': {'Order': 'PO-001'}" in body
+    assert "_extract_text_pattern_value(" not in body
+    assert "async def _find_table_row_by_headers(" in script
+    assert "async def _extract_table_cell_value(" in script
+
+
 def test_snapshot_unique_text_only_fields_fall_back_to_runtime_ai():
     script = TraceSkillCompiler().generate_script(
         [
@@ -785,6 +889,7 @@ def test_compiler_preserves_highest_star_selection_as_runtime_ai():
                 user_instruction="open the project with the highest star count",
                 output_key="selected_project",
                 output={"url": "https://github.com/recorded/repo"},
+                signals={"runtime_ai": {"preserve": True, "reason": "semantic_candidate_selection"}},
                 ai_execution=RPAAIExecution(
                     language="python",
                     code="async def run(page, results):\n    return {'url': 'https://github.com/recorded/repo'}",
@@ -799,6 +904,34 @@ def test_compiler_preserves_highest_star_selection_as_runtime_ai():
     assert "max_stars" not in script
     assert "_abs_github_url" not in script
     assert "https://github.com/recorded/repo" not in _execute_body(script)
+
+
+def test_compiler_does_not_preserve_structural_top_row_click_as_runtime_ai():
+    script = TraceSkillCompiler().generate_script(
+        [
+            RPAAcceptedTrace(
+                trace_id="trace-top-row",
+                trace_type=RPATraceType.AI_OPERATION,
+                source="ai",
+                user_instruction="click the top row",
+                output_key="selected_row",
+                output={"clicked": True},
+                ai_execution=RPAAIExecution(
+                    language="python",
+                    code=(
+                        "async def run(page, results):\n"
+                        "    await page.locator('tbody tr').first.click()\n"
+                        "    return {'clicked': True}"
+                    ),
+                ),
+            )
+        ],
+        is_local=True,
+    )
+
+    body = _execute_body(script)
+    assert "_execute_runtime_ai_instruction(" not in body
+    assert "page.locator('tbody tr').first.click()" in body
 
 
 def test_compiler_preserves_pr_record_extraction_as_python_playwright():
@@ -1310,7 +1443,8 @@ def test_standalone_export_table_download_trace_merges_as_export_task():
     body = _execute_body(script)
 
     assert "_download_from_export_task(" in body
-    assert "            _result = await run(current_page, _results)" not in body
+    assert "    _result = await run(current_page, _results)" in body
+    assert body.index("    _result = await run(current_page, _results)") < body.index("    _download_payload = await _download_from_export_task(")
     assert "async with current_page.expect_download() as _dl_info:" not in body
 
 
@@ -1590,6 +1724,7 @@ def test_semantic_project_selection_compiles_to_runtime_ai_not_recorded_click():
             description="Open the most Python-related trending project",
             output_key="selected_project",
             output={"url": "https://github.com/openai/openai-agents-python"},
+            signals={"runtime_ai": {"preserve": True, "reason": "semantic_candidate_selection"}},
             ai_execution=RPAAIExecution(
                 code=(
                     "async def run(page, results):\n"
@@ -1952,7 +2087,7 @@ def test_embedded_ai_code_rewrites_declared_input_binding_literal_to_kwargs_defa
     assert "kwargs.get('invoice_number', 'INV-001')" in body
     assert ".fill('INV-001')" not in body
     assert "name='Invoice number'" in body
-    assert "name='INV-001'" in body
+    assert "name=kwargs.get('invoice_number', 'INV-001')" in body
 
 
 def test_embedded_ai_code_does_not_corrupt_prefixed_string_literals():
@@ -1988,7 +2123,7 @@ def test_embedded_ai_code_does_not_corrupt_prefixed_string_literals():
     assert ".fill(kwargs.get('invoice_number', 'INV-001'))" in body
 
 
-def test_embedded_ai_code_preserves_ui_search_literals_while_parameterizing_interaction_values():
+def test_embedded_ai_code_parameterizes_dynamic_values_inside_text_locators():
     trace = RPAAcceptedTrace(
         trace_type=RPATraceType.AI_OPERATION,
         source="ai",
@@ -2014,10 +2149,39 @@ def test_embedded_ai_code_preserves_ui_search_literals_while_parameterizing_inte
     script = TraceSkillCompiler().generate_script([trace], is_local=True)
     body = _execute_body(script)
 
-    assert "page.get_by_text('INV-001')" in body
-    assert "filter(has_text='INV-001')" in body
+    assert "page.get_by_text(kwargs.get('invoice_number', 'INV-001'))" in body
+    assert "filter(has_text=kwargs.get('invoice_number', 'INV-001'))" in body
     assert ".fill(kwargs.get('invoice_number', 'INV-001'))" in body
     assert "return {'invoice_number': kwargs.get('invoice_number', 'INV-001')}" in body
+
+
+def test_embedded_ai_code_preserves_stable_ui_labels_while_parameterizing_dynamic_values():
+    trace = RPAAcceptedTrace(
+        trace_type=RPATraceType.AI_OPERATION,
+        source="ai",
+        description="Search invoice row",
+        input_bindings={
+            "invoice_number": {
+                "source": "user_param",
+                "default": "INV-001",
+                "classification": "user_param",
+            }
+        },
+        ai_execution=RPAAIExecution(
+            code=(
+                "async def run(page, results):\n"
+                "    await page.get_by_label('Invoice number').fill('INV-001')\n"
+                "    await page.get_by_placeholder('Search invoices').fill('INV-001')\n"
+            ),
+        ),
+    )
+
+    script = TraceSkillCompiler().generate_script([trace], is_local=True)
+    body = _execute_body(script)
+
+    assert "get_by_label('Invoice number')" in body
+    assert "get_by_placeholder('Search invoices')" in body
+    assert ".fill(kwargs.get('invoice_number', 'INV-001'))" in body
 
 
 def test_table_row_postcondition_includes_generic_header_scoped_helper():
@@ -2053,6 +2217,13 @@ def test_table_row_postcondition_includes_generic_header_scoped_helper():
     assert "async def _find_table_row_by_headers(" in script
     assert "table_headers" in script
     assert "key_values" in script
+    assert "role=grid" in script
+    assert "role=columnheader" in script
+    assert "row_sets.append(page.locator('tbody tr, [role=row]'))" not in script
+    assert "split_body_rows = table.locator('xpath=following-sibling::table[1]//tbody/tr')" in script
+    assert "same_split_root = await table.evaluate" in script
+    assert "ancestor::*[.//table[.//tbody/tr]" not in script
+    assert "row_text" not in script
     assert (
         "await _find_table_row_by_headers(current_page, ['Invoice', 'Project', 'Status'], "
         "{'Invoice': kwargs.get('invoice_number', 'INV-001'), 'Project': 'Project Alpha', 'Status': 'Submitted'})"
@@ -2061,6 +2232,75 @@ def test_table_row_postcondition_includes_generic_header_scoped_helper():
     assert "InvoiceApp" not in script
     assert "taskExportGridTable" not in script
     assert "github" not in script.lower()
+
+
+def test_export_task_signal_respects_code_that_already_handles_download():
+    trace = RPAAcceptedTrace(
+        trace_id="ai-export-download",
+        trace_type=RPATraceType.AI_OPERATION,
+        source="ai",
+        user_instruction="download the generated report",
+        description="Download generated report",
+        output_key="report_download",
+        signals={
+            "download": {
+                "filename": "report.xlsx",
+                "trigger_mode": "export_task",
+            }
+        },
+        ai_execution=RPAAIExecution(
+            language="python",
+            code=(
+                "async def run(page, results):\n"
+                "    async with page.expect_download() as dl_info:\n"
+                "        await page.get_by_role('link', name='Download').click()\n"
+                "    dl = await dl_info.value\n"
+                "    await dl.save_as('report.xlsx')\n"
+                "    return {'downloaded': True}"
+            ),
+        ),
+    )
+
+    script = TraceSkillCompiler().generate_script([trace], is_local=True)
+    body = _execute_body(script)
+
+    assert "_download_from_export_task(" not in body
+    assert "async with page.expect_download() as dl_info:" in body
+    assert "_results['report_download'] = _result" in body
+
+
+def test_table_row_absence_postcondition_compiles_to_negative_check():
+    trace = RPAAcceptedTrace(
+        trace_type=RPATraceType.AI_OPERATION,
+        source="ai",
+        description="Verify task removed from current worklist",
+        input_bindings={
+            "task_id": {
+                "source": "user_param",
+                "default": "TASK-001",
+                "classification": "user_param",
+            }
+        },
+        postcondition={
+            "kind": "table_row_absent",
+            "table_headers": ["Task ID", "Status"],
+            "key": {"Task ID": "{{task_id}}"},
+        },
+        ai_execution=RPAAIExecution(
+            code=(
+                "async def run(page, results):\n"
+                "    return {'submitted': True}"
+            ),
+        ),
+    )
+
+    script = TraceSkillCompiler().generate_script([trace], is_local=True)
+    body = _execute_body(script)
+
+    assert "async def _find_table_row_by_headers(" in script
+    assert "verify table row absence postcondition" in body
+    assert "timeout_ms=1500" in body
+    assert "Table row matching postcondition was still present" in body
 
 
 def test_embedded_ai_code_rewrites_double_quoted_random_like_locator_to_stable_candidate():
@@ -2131,6 +2371,43 @@ def test_embedded_ai_code_rewrites_random_like_data_testid_locator_to_stable_rol
     assert '[data-testid="menu-btn-a1b2c3d4"]' not in body
 
 
+def test_embedded_ai_code_does_not_rewrite_fill_locator_to_non_editable_role():
+    trace = RPAAcceptedTrace(
+        trace_type=RPATraceType.AI_OPERATION,
+        source="ai",
+        description="Search by filter",
+        user_instruction="search for a record number",
+        output_key="search_result",
+        output={"empty_state": "No matching results"},
+        ai_execution=RPAAIExecution(
+            language="python",
+            code=(
+                "async def run(page, results):\n"
+                "    search = page.locator('[data-testid=\"contract-number-filter\"]')\n"
+                "    await search.fill('CT-2026-RPA-NOT-FOUND')\n"
+                "    return {'empty_state': 'No matching results'}\n"
+            ),
+        ),
+        locator_stability=RPALocatorStabilityMetadata(
+            primary_locator={"method": "css", "value": '[data-testid="contract-number-filter"]'},
+            unstable_signals=[{"attribute": "data-testid", "value": "contract-number-filter"}],
+            alternate_locators=[
+                RPALocatorStabilityCandidate(
+                    locator={"method": "role", "role": "menuitem", "name": "Dashboard"},
+                    source="snapshot_actionable_node",
+                    confidence="high",
+                )
+            ],
+        ),
+    )
+
+    script = TraceSkillCompiler().generate_script([trace], is_local=True)
+    body = _execute_body(script)
+
+    assert "page.locator('[data-testid=\"contract-number-filter\"]')" in body
+    assert "get_by_role('menuitem'" not in body
+
+
 def test_embedded_ai_code_preserves_random_like_locator_when_multiple_candidates_exist():
     trace = RPAAcceptedTrace(
         trace_type=RPATraceType.AI_OPERATION,
@@ -2199,6 +2476,39 @@ def test_embedded_ai_code_preserves_collection_locator_when_nth_is_applied_to_va
     assert "page.locator('#taskExportGridTable tbody.igrid-data tr.grid-row')" in body
     assert "_rows.nth(0)" in body
     assert "get_by_role('link', name='W3主页')" not in body
+
+
+def test_embedded_ai_code_preserves_structural_table_row_locator():
+    trace = RPAAcceptedTrace(
+        trace_type=RPATraceType.AI_OPERATION,
+        source="ai",
+        description="Open row detail",
+        locator_stability=RPALocatorStabilityMetadata(
+            primary_locator={"method": "css", "value": ".el-table__body-wrapper tbody tr"},
+            unstable_signals=[{"attribute": "class", "value": "el-table__body-wrapper"}],
+            stable_self_signals={"role": "menuitem", "name": "Home"},
+            alternate_locators=[
+                RPALocatorStabilityCandidate(
+                    locator={"method": "role", "role": "menuitem", "name": "Home"},
+                    source="snapshot_actionable_node",
+                    confidence="high",
+                )
+            ],
+        ),
+        ai_execution=RPAAIExecution(
+            code=(
+                "async def run(page, results):\n"
+                "    row = page.locator('.el-table__body-wrapper tbody tr').filter(has_text='INV-001')\n"
+                "    await row.get_by_role('button', name='Open').click()\n"
+            ),
+        ),
+    )
+
+    script = TraceSkillCompiler().generate_script([trace], is_local=True)
+    body = _execute_body(script)
+
+    assert "page.locator('.el-table__body-wrapper tbody tr').filter(has_text='INV-001')" in body
+    assert "get_by_role('menuitem', name='Home')" not in body
 
 
 def test_embedded_ai_code_preserves_non_random_locator_even_when_stable_candidate_exists():

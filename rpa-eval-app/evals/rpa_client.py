@@ -186,11 +186,15 @@ class RpaClawClient:
         params: dict[str, Any] | None = None,
         *,
         timeout_s: float | None = None,
+        setup_navigation: list[str] | None = None,
     ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"params": params or {}}
+        if setup_navigation is not None:
+            payload["setup_navigation"] = list(setup_navigation)
         return self._json_request(
             "POST",
             f"/api/v1/rpa/session/{session_id}/test",
-            {"params": params or {}},
+            payload,
             timeout_s=timeout_s,
         )
 

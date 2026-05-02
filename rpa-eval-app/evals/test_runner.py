@@ -181,6 +181,9 @@ class RunnerAssertionTests(unittest.TestCase):
         }
         eval_client = FakeRunnerEvalClient()
         rpa_client = FakeRunnerRpaClient()
+        action_log = []
+        eval_client.actions = action_log
+        rpa_client.actions = action_log
 
         result = run_case(case, args, eval_client, rpa_client)
 
@@ -189,7 +192,28 @@ class RunnerAssertionTests(unittest.TestCase):
         self.assertEqual("passed", result["phase_results"]["compile"]["status"])
         self.assertEqual("passed", result["phase_results"]["replay"]["status"])
         self.assertEqual([("session-1", {})], rpa_client.generates)
-        self.assertEqual([("session-1", {})], rpa_client.tests)
+        self.assertEqual(
+            [
+                (
+                    "session-1",
+                    {},
+                    [
+                        "http://localhost:5175/eval-auth.html?token=token",
+                        "http://localhost:5175/contracts",
+                    ],
+                )
+            ],
+            rpa_client.tests,
+        )
+        self.assertEqual(
+            [
+                "reset:rpa-eval-reset",
+                "login:buyer",
+                "generate:session-1",
+                "test:session-1",
+            ],
+            action_log[-4:],
+        )
 
     def test_recording_aborted_is_record_phase_failure(self):
         args = type(
@@ -357,6 +381,80 @@ class RunnerAssertionTests(unittest.TestCase):
             {"output_text": "searched_contract_number CT-2026-RPA-NOT-FOUND no_match True conclusion 没有匹配结果"},
         )
 
+    def test_regression_lab_visible_status_does_not_expose_internal_event_keys(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "frontend"
+            / "src"
+            / "views"
+            / "RegressionLab.vue"
+        ).read_text(encoding="utf-8") + (
+            Path(__file__).resolve().parents[1]
+            / "frontend"
+            / "src"
+            / "views"
+            / "PopupReport.vue"
+        ).read_text(encoding="utf-8")
+
+        for internal_key in (
+            "body_click_export_all completed",
+            "collection_row_action completed",
+            "split_grid_file_opened completed",
+            "empty_audit_filtered completed",
+            "dataflow_form_submitted",
+            "parameterized_contract_opened",
+            "modal_supplier_saved",
+            "popup_report_downloaded",
+        ):
+            self.assertNotIn(internal_key, source)
+
+    def test_empty_result_accepts_structured_zero_count_without_phrase(self):
+        assert_expected_telemetry(
+            {
+                "empty_result": {"query": "CT-2026-RPA-NOT-FOUND", "should_open_record": False},
+                "output_text": [["没有匹配结果", "未找到匹配结果"]],
+            },
+            {
+                "output_text": (
+                    "search_value\nCT-2026-RPA-NOT-FOUND\n"
+                    "row_count\n0\nempty_result_confirmed\nTrue"
+                )
+            },
+        )
+
+    def test_empty_result_accepts_matched_rows_zero(self):
+        assert_expected_telemetry(
+            {"empty_result": {"query": "CT-2026-RPA-NOT-FOUND", "should_open_record": False}},
+            {
+                "output_text": (
+                    'SKILL_DATA:{"no_match_result":{"filled_value":"CT-2026-RPA-NOT-FOUND",'
+                    '"matched_rows":0,"conclusion":"no matching result"}}'
+                )
+            },
+        )
+
+    def test_empty_result_accepts_flattened_matched_rows_zero(self):
+        assert_expected_telemetry(
+            {"empty_result": {"query": "CT-2026-RPA-NOT-FOUND", "should_open_record": False}},
+            {
+                "output_text": (
+                    "filled_value\nCT-2026-RPA-NOT-FOUND\n"
+                    "matched_rows\n0\nconclusion\nno matching result"
+                )
+            },
+        )
+
+    def test_empty_result_accepts_empty_state_visibility_signal(self):
+        assert_expected_telemetry(
+            {"empty_result": {"query": "CT-2026-RPA-NOT-FOUND", "should_open_record": False}},
+            {
+                "output_text": (
+                    "searched_contract_number\nCT-2026-RPA-NOT-FOUND\n"
+                    "matched_rows\nempty_state_visible\nTrue\nconclusion\nno_match_confirmed"
+                )
+            },
+        )
+
     def test_output_text_accepts_alternative_phrasings(self):
         assert_expected_telemetry(
             {"output_text": [["没有匹配结果", "未找到匹配结果"]]},
@@ -492,10 +590,15 @@ class FakeEvalClient:
 
 
 class FakeRunnerEvalClient:
+    def __init__(self):
+        self.actions = []
+
     def reset(self, reset_token):
+        self.actions.append(f"reset:{reset_token}")
         self.reset_token = reset_token
 
     def login(self, username, password):
+        self.actions.append(f"login:{username}")
         self.login_args = (username, password)
         return EvalAppUserSession(username=username, token="token", user={"username": username})
 
@@ -510,6 +613,7 @@ class FakeRunnerRpaClient:
         self.chat_events = [{"event": "agent_done", "data": {"message": "ok"}}]
         self.generated_script = "async def execute_skill(page):\n    return {}\n"
         self.test_response = {"status": "success", "result": {"success": True, "data": {}}, "logs": []}
+        self.actions = []
 
     def start_session(self, case_id):
         self.case_id = case_id
@@ -527,11 +631,13 @@ class FakeRunnerRpaClient:
         return {}
 
     def generate_script(self, session_id, params=None):
+        self.actions.append(f"generate:{session_id}")
         self.generates.append((session_id, params or {}))
         return {"status": "success", "script": self.generated_script}
 
-    def test_script(self, session_id, params=None, timeout_s=None):
-        self.tests.append((session_id, params or {}))
+    def test_script(self, session_id, params=None, timeout_s=None, setup_navigation=None):
+        self.actions.append(f"test:{session_id}")
+        self.tests.append((session_id, params or {}, list(setup_navigation or [])))
         return self.test_response
 
     def stop_session(self, session_id, *, ignore_errors=False):

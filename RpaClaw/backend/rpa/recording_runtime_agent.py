@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 from datetime import datetime, timezone
 import inspect
 import json
@@ -8,16 +9,43 @@ import linecache
 import logging
 import os
 import re
+import time
 import traceback
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
 from .assistant_runtime import build_page_snapshot
 from .frame_selectors import build_frame_path
+from .recording_effects import (
+    _ensure_expected_effect,
+    _expected_effect,
+    _merge_runtime_ai_signal,
+    _normalize_expected_effect,
+    _should_drain_download_events,
+)
+from .recording_contracts import normalize_terminal_contract
+from .recording_repair import (
+    _classify_recording_failure,
+    _known_failure_analysis,
+    _repair_guidance_for_failure,
+)
+from .recording_terminal_recovery import (
+    recover_failed_side_effect_from_snapshot_diff,
+    snapshot_diff_terminal_postcondition,
+)
+from .recording_verifier import capture_browser_evidence
+from .playwright_code_normalizer import (
+    stabilize_dialog_button_actions,
+    stabilize_bare_text_clicks,
+    stabilize_callable_locator_filters,
+    stabilize_download_contexts,
+    stabilize_fill_targets,
+    stabilize_unsupported_locator_options,
+)
 from .snapshot_compression import compact_recording_snapshot
 from .trace_models import (
     RPAAcceptedTrace,
@@ -38,6 +66,46 @@ _RANDOM_LIKE_ATTR_RE = re.compile(r"(?i)(?:[a-z]+[-_])?[a-z0-9]{6,}[a-z][a-z0-9]
 _DOWNLOAD_EVENT_DRAIN_TIMEOUT_S = 0.5
 
 
+def _env_positive_float(name: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+_RECORDING_LLM_TIMEOUT_S = _env_positive_float("RPA_RECORDING_LLM_TIMEOUT_SECONDS", 45.0)
+
+
+async def _ainvoke_model_with_recording_timeout(model: Any, messages: List[Any]) -> Any:
+    try:
+        return await asyncio.wait_for(model.ainvoke(messages), timeout=_RECORDING_LLM_TIMEOUT_S)
+    except asyncio.TimeoutError as exc:
+        raise TimeoutError(f"recording LLM call exceeded {_RECORDING_LLM_TIMEOUT_S:g}s") from exc
+
+
+_SEMANTIC_TERMINAL_JUDGE_PROMPT = """You are a strict verifier for one RPA recording step.
+Return JSON only:
+{"passed": false, "evidence": [{"type": "url_changed|download_created|toast_visible|feedback_visible|row_exists|row_absent|row_status_changed|field_value_equals|postcondition|empty_result", "source": "snapshot|browser|download|page", "summary": "short observed fact"}], "reason": "short reason"}
+Rules:
+- Pass only when the current page facts or browser/download signals explicitly show the terminal_contract is satisfied.
+- Do not infer success from the intended code, a bare click/fill, or output fields such as action_performed.
+- If the page still shows validation/error text, or evidence is ambiguous, return passed=false.
+"""
+
+_INSTRUCTION_COMPLETION_JUDGE_PROMPT = """You are a strict completion verifier for one RPA recording command.
+Return JSON only:
+{"passed": false, "missing_requirements": ["short unmet requirement"], "reason": "short reason"}
+Rules:
+- Compare the full instruction with the executed plan, output, before page, current page, and current snapshot.
+- Pass only when every explicit action or data extraction requested by the instruction is complete.
+- Do not require future SOP steps that are not in the instruction.
+- If the plan only read or extracted data but the instruction also required a later browser action, state change, submission, download, or navigation, return passed=false.
+- Use observed page facts and structured output only; do not infer completion from intended code or domain assumptions.
+- Keep missing_requirements concise and structural, not business-specific.
+"""
+
+
 RECORDING_RUNTIME_SYSTEM_PROMPT = """You operate exactly one RPA recording command.
 Return JSON only.
 Schema:
@@ -55,8 +123,9 @@ Schema:
   "input_bindings": {"param_name": {"source": "user_param|previous_result|literal", "default": "recorded sample value", "classification": "user_param|dynamic|literal"}},
   "output_bindings": {"field_name": {"path": "output.path"}},
   "postcondition": {"kind": "table_row_exists", "source": "observed", "table_headers": ["<observed column>"], "key": {"<observed id column>": "{{param_name}}"}, "expect": {"<observed status column>": "<observed terminal value>"}},
+  "terminal_contract": {"required": false, "kind": "none|state_change|record_created|record_updated|record_removed|download_created|dialog_dismissed|empty_result", "success_evidence": [{"type": "url_changed|download_created|toast_visible|feedback_visible|row_exists|row_absent|row_status_changed|field_value_equals|postcondition|empty_result"}], "allow_semantic_judge": false},
   "preserve_runtime_ai": false,
-  "semantic_intent": "optional reason when runtime AI must re-evaluate current page candidates"
+  "semantic_intent": "none|semantic_candidate_selection"
 }
 Rules:
 - Complete only the current user command, not the full SOP.
@@ -64,16 +133,18 @@ Rules:
 - expected_effect describes the browser-visible outcome required by the user's current command.
 - Use expected_effect="navigate" when the user asks to open, go to, enter, visit, or navigate to a target.
 - Use expected_effect="extract" when the user only asks to find, collect, summarize, or return data without opening it.
-- Set preserve_runtime_ai=true when the command requires semantic judgment over current page candidates at replay time, such as selecting the most relevant, best matching, recommended, highest risk, or most suitable item.
+- Set preserve_runtime_ai=true only when replay must re-evaluate current page candidates semantically. When set, semantic_intent must be "semantic_candidate_selection".
 - Do not set preserve_runtime_ai for a simple deterministic click/fill/goto where the recorded locator or value is the intended reusable behavior.
 - If the user asks to filter/search and open a specific record, do not stop after the record is merely visible in a list/table. Click the row-local link/action or stable record locator, then confirm a detail page, detail panel, selected row expansion, or URL/detail-view change.
 - If the requested data is already visible in snapshot.detail_views, prefer action_type="extract_snapshot" and expected_effect="extract" even when the instruction mentions opening or entering a detail page.
 - When snapshot.modal_dialogs is non-empty, the active dialog is the current interaction scope. Continue inside that dialog instead of clicking background page controls to reopen it.
+- When a prior click opens a dialog, do not assume the dialog's terminal button has the same label as the opener. Scope to the visible dialog and prefer dialog-local action/test-id/type evidence before a generic button label.
 - If code is returned, it must define async def run(page, results).
 - Use action_type="extract_snapshot" only when the requested extract-only data is already present in snapshot.detail_views fields.
 - For extract_snapshot, return the relevant observed detail fields in the plan itself, including the detail view frame_path when present; do not generate Python code and do not reference `snapshot` inside `run()`.
 - Use input_bindings for values that should vary at replay time. Keep literal UI labels, headers, button names, and fixed workflow labels out of input_bindings.
 - Use postcondition only as a candidate replayable structural check that was observed from the current page or returned output; include source="observed". It must be anchored to input_bindings such as "{{param_name}}" and to real table/detail headers visible in snapshot evidence. Do not encode guessed status values, examples, or business-specific recovery rules.
+- Use terminal_contract when the command must leave a durable browser-visible terminal state, create/update/remove a record, create a download, dismiss a dialog, or prove an expected empty result. success_evidence must name evidence types, not business-specific words. Bare action acknowledgements are not terminal evidence.
 - Use output_bindings only to describe returned output paths; generated Python still returns the current step output normally.
 - `snapshot` is planner-only evidence. Generated Python can access only `page` and `results`.
 - 结果返回规则：
@@ -88,6 +159,7 @@ Rules:
   - 最终 `_results[output_key] = _result` 由 skill 编译阶段自动生成，录制阶段代码不要实现这件事。
 - Use Python Playwright async APIs.
 - Prefer Playwright locators and page.locator/query_selector_all over page.evaluate.
+- Playwright Python Locator is lazy and not list-like. Do not slice or directly iterate a Locator; use `count()` with `nth(index)`, `first`, `all_inner_texts()`, or a short read-only DOM query when needed.
 - Avoid page.evaluate unless the snippet is short, read-only, and necessary.
 - Do not include shell, filesystem, network requests outside the current browser page, or infinite loops.
 - For search-engine tasks, if the user's goal is to search/open results, prefer navigating to the results URL with an encoded query. If the user explicitly asks to fill a search box, first target visible, enabled, editable input candidates instead of filling hidden DOM matches.
@@ -97,6 +169,7 @@ Rules:
 - For extract-only commands, prefer user-facing pages and restore the most recent user-facing page after any temporary helper navigation.
 - For extract-only commands, prefer snapshot.expanded_regions and snapshot.sampled_regions before broad DOM scans.
 - When transferring data from one page to another, prefer structured snapshot.detail_views fields as the source of truth. Do not parse the whole body text with broad regular expressions when structured label/value fields are available.
+- When a later form value must come from data read earlier in the command, store that source value in a local variable and reuse it for the fill. Do not substitute current user/menu/role text, guessed defaults, or UNKNOWN/placeholder values; if the source value is missing, raise before submitting the form.
 - Use the region title, heading, or catalogue summary as context when it matches the requested area.
 - If an expanded region is a label_value_group and the user asks for field names or values, keep extraction focused on that region or supporting locator evidence instead of scanning every table.
 - Avoid treating tables as the default fallback for field extraction when a more relevant label_value_group is present.
@@ -134,6 +207,7 @@ Rules:
 - If a click failed because another element or dialog intercepts pointer events, assume the target dialog is already open. Continue inside the visible dialog/overlay/current focused form instead of clicking the background trigger again.
 - For state-changing or artifact-producing commands, prefer short bounded waits for a business-visible terminal condition such as a success message, row appearing in a list, status changing out of processing/pending, final URL leaving the edit page, or a download event, then return the observed state.
 - For state-changing or artifact-producing commands, return observed state after the action, not just intended constants or an acknowledgement. Re-read the visible row/detail/form, success message, status text, generated file name, or download event before reporting success.
+- For dialog/modal submissions, terminal evidence may be a success message, changed status, row removal from a pending list, or the dialog closing with no visible validation error.
 - If a required terminal condition is not reached (for example not complete, not ready, no download, validation failed, or saved values do not match the intended values), raise RuntimeError with the observed state instead of returning success.
 - Status values may be localized labels or raw enum tokens. Treat exact visible enum/status tokens from the page as authoritative terminal evidence; do not require translated synonyms that are not visible.
 - After saving an edit form, list rows may only show summary columns. If some saved fields are not visible in the list, reopen the row detail/edit view or inspect the visible dialog before failing; do not require hidden fields to appear in a summary row.
@@ -146,8 +220,10 @@ Rules:
 - Do not click unnamed increment/decrement controls repeatedly for numeric fields. Prefer filling the numeric input directly after selecting/clearing it, or read the current value and set the exact target value.
 - For input[type=number] or role=spinbutton, fill only numeric strings. If the intended value is not numeric, the target is a different field; re-select by row header, label, placeholder, aria name, or nearby text before filling.
 - Avoid broad positional form filling. When a form or editable table has labels, placeholders, aria names, data attributes, column headers, or row-local controls, map values to those semantic anchors first and use raw input order only as a last resort.
+- Component libraries may put data-testid on wrapper elements. Before filling a test-id locator, ensure the target is an editable input/textarea/select/contenteditable element; otherwise fill the wrapper-local editable descendant.
 - In dialogs and forms, scope field locators to the dialog/form container and prefer stable data-testid/role/placeholder locators. Avoid bare page.get_by_label(...) when the same label can match the dialog title or multiple controls.
 - For empty-result filter/search tasks, absence of the searched value in rows is not enough. Verify zero data rows, a visible empty-state message, or row count reduction to zero after the filter; if unrelated rows remain visible, raise RuntimeError with the observed rows.
+- Do not use extract_snapshot to return table column headers as data values unless the user asked for table schema. For table row data, use table_views row/cell evidence or executable Playwright code that extracts from a row anchored by a stable row key.
 - Do not pass Python lambda or other callables as Playwright locator name/has_text filters; Playwright Python expects strings, regex patterns, or supported options.
 """
 
@@ -164,6 +240,7 @@ class RecordingAgentResult(BaseModel):
 
 Planner = Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]
 Executor = Callable[[Any, Dict[str, Any], Dict[str, Any]], Awaitable[Dict[str, Any]]]
+CompletionVerifier = Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]
 
 
 class RecordingRuntimeAgent:
@@ -171,10 +248,14 @@ class RecordingRuntimeAgent:
         self,
         planner: Optional[Planner] = None,
         executor: Optional[Executor] = None,
+        completion_verifier: Optional[CompletionVerifier] = None,
         model_config: Optional[Dict[str, Any]] = None,
     ):
+        self._uses_default_planner = planner is None
         self.planner = planner or self._default_planner
         self.executor = executor or self._default_executor
+        self.completion_verifier = completion_verifier
+        self._instruction_completion_check_enabled = completion_verifier is not None or self._uses_default_planner
         self.model_config = model_config
 
     async def run(
@@ -206,11 +287,7 @@ class RecordingRuntimeAgent:
             debug_context=debug_context,
         )
 
-        first_plan = _build_table_ordinal_overlay_plan(instruction, snapshot)
-        if not first_plan:
-            first_plan = _build_ordinal_overlay_plan(instruction, snapshot)
-        if not first_plan:
-            first_plan = _build_detail_extract_plan(instruction, snapshot)
+        first_plan = _build_read_only_preplanned_plan(instruction, snapshot)
         if not first_plan:
             first_plan, first_result = await self._plan_and_execute(
                 page=page,
@@ -218,10 +295,18 @@ class RecordingRuntimeAgent:
                 runtime_results=runtime_results,
                 instruction=instruction,
                 before=before,
+                before_snapshot=snapshot,
             )
         else:
             first_result = await self.executor(page, first_plan, runtime_results)
             first_result = await _ensure_expected_effect(
+                page=page,
+                instruction=instruction,
+                plan=first_plan,
+                result=first_result,
+                before=before,
+            )
+            first_result = await self._verify_instruction_completion_if_needed(
                 page=page,
                 instruction=instruction,
                 plan=first_plan,
@@ -259,6 +344,19 @@ class RecordingRuntimeAgent:
         failed_page = await _page_state(page)
         failed_snapshot = await _safe_page_snapshot(page)
         compact_failed_snapshot = _compact_snapshot(failed_snapshot, instruction)
+        recovered = await self._accept_recovered_side_effect(
+            page=page,
+            instruction=instruction,
+            plan=first_plan,
+            result=first_result,
+            before=before,
+            before_snapshot=snapshot,
+            after_snapshot=failed_snapshot,
+            diagnostics=[],
+            repair_attempted=False,
+        )
+        if recovered:
+            return recovered
         first_error = str(first_result.get("error") or "recording command failed")
         first_error_type = str(first_result.get("error_type") or "").strip()
         first_traceback = str(first_result.get("traceback") or "").strip()
@@ -309,12 +407,19 @@ class RecordingRuntimeAgent:
             )
         ]
 
+        repair_guidance = _repair_guidance_for_failure(
+            error=first_error,
+            instruction=instruction,
+            failure_analysis=first_known_failure_analysis,
+        )
         repair_context = {
             "error": first_error,
             "failed_plan": first_plan,
             "page_after_failure": failed_page.model_dump(mode="json"),
             "snapshot_after_failure": compact_failed_snapshot,
         }
+        if repair_guidance:
+            repair_context["guidance"] = repair_guidance
         if first_error_type:
             repair_context["error_type"] = first_error_type
         if first_traceback:
@@ -331,6 +436,7 @@ class RecordingRuntimeAgent:
             runtime_results=runtime_results,
             instruction=instruction,
             before=before,
+            before_snapshot=failed_snapshot,
         )
         _write_recording_attempt_debug(
             "repair_attempt",
@@ -351,6 +457,16 @@ class RecordingRuntimeAgent:
                 repair_attempted=True,
                 snapshot=failed_snapshot,
             )
+            trace = await self._trace_with_replayable_failed_preconditions(
+                page=page,
+                instruction=instruction,
+                failed_plans=[first_plan],
+                repair_plan=repair_plan,
+                repair_result=repair_result,
+                before=before,
+                repair_snapshot=failed_snapshot,
+                fallback_trace=trace,
+            )
             return RecordingAgentResult(
                 success=True,
                 trace=trace,
@@ -366,6 +482,23 @@ class RecordingRuntimeAgent:
         repair_traceback = str(repair_result.get("traceback") or "").strip()
         repair_failure_analysis = _classify_recording_failure(repair_error)
         repair_known_failure_analysis = _known_failure_analysis(repair_error)
+        repair_failed_page = await _page_state(page)
+        repair_failed_snapshot = await _safe_page_snapshot(page)
+        compact_repair_failed_snapshot = _compact_snapshot(repair_failed_snapshot, instruction)
+        recovered = await self._accept_recovered_side_effect(
+            page=page,
+            instruction=instruction,
+            plan=repair_plan,
+            result=repair_result,
+            before=before,
+            before_snapshot=failed_snapshot,
+            after_snapshot=repair_failed_snapshot,
+            diagnostics=diagnostics,
+            repair_attempted=True,
+            precondition_plans=[first_plan],
+        )
+        if recovered:
+            return recovered
         logger.warning(
             "[RPA] recording command repair failed type=%s error=%s",
             repair_failure_analysis.get("type", "unknown"),
@@ -374,6 +507,8 @@ class RecordingRuntimeAgent:
         repair_diagnostic_raw = {
             "plan": _safe_jsonable(repair_plan),
             "result": _safe_jsonable(repair_result),
+            "page_after_failure": repair_failed_page.model_dump(mode="json"),
+            "snapshot_after_failure": _safe_jsonable(compact_repair_failed_snapshot),
         }
         if repair_error_type:
             repair_diagnostic_raw["error_type"] = repair_error_type
@@ -388,16 +523,21 @@ class RecordingRuntimeAgent:
                 raw=repair_diagnostic_raw,
             )
         )
-        second_failed_page = await _page_state(page)
-        second_failed_snapshot = await _safe_page_snapshot(page)
-        compact_second_failed_snapshot = _compact_snapshot(second_failed_snapshot, instruction)
+        second_repair_guidance = _repair_guidance_for_failure(
+            error=repair_error,
+            instruction=instruction,
+            failure_analysis=repair_known_failure_analysis,
+            previous_failures=[diagnostic.message for diagnostic in diagnostics],
+        )
         second_repair_context = {
             "error": repair_error,
             "failed_plan": repair_plan,
-            "page_after_failure": second_failed_page.model_dump(mode="json"),
-            "snapshot_after_failure": compact_second_failed_snapshot,
+            "page_after_failure": repair_failed_page.model_dump(mode="json"),
+            "snapshot_after_failure": compact_repair_failed_snapshot,
             "previous_failures": [diagnostic.message for diagnostic in diagnostics],
         }
+        if second_repair_guidance:
+            second_repair_context["guidance"] = second_repair_guidance
         if repair_error_type:
             second_repair_context["error_type"] = repair_error_type
         if repair_traceback:
@@ -414,11 +554,12 @@ class RecordingRuntimeAgent:
             runtime_results=runtime_results,
             instruction=instruction,
             before=before,
+            before_snapshot=repair_failed_snapshot,
         )
         _write_recording_attempt_debug(
             "second_repair_attempt",
             instruction=instruction,
-            page_state=second_failed_page.model_dump(mode="json"),
+            page_state=repair_failed_page.model_dump(mode="json"),
             plan=second_repair_plan,
             execution_result=second_repair_result,
             failure_analysis=None if second_repair_result.get("success") else _known_failure_analysis(second_repair_result.get("error")),
@@ -432,7 +573,17 @@ class RecordingRuntimeAgent:
                 second_repair_result,
                 before,
                 repair_attempted=True,
-                snapshot=second_failed_snapshot,
+                snapshot=repair_failed_snapshot,
+            )
+            trace = await self._trace_with_replayable_failed_preconditions(
+                page=page,
+                instruction=instruction,
+                failed_plans=[first_plan, repair_plan],
+                repair_plan=second_repair_plan,
+                repair_result=second_repair_result,
+                before=before,
+                repair_snapshot=repair_failed_snapshot,
+                fallback_trace=trace,
             )
             return RecordingAgentResult(
                 success=True,
@@ -448,9 +599,28 @@ class RecordingRuntimeAgent:
         second_repair_error_type = str(second_repair_result.get("error_type") or "").strip()
         second_repair_traceback = str(second_repair_result.get("traceback") or "").strip()
         second_repair_known_failure_analysis = _known_failure_analysis(second_repair_error)
+        second_repair_failed_page = await _page_state(page)
+        second_repair_failed_snapshot = await _safe_page_snapshot(page)
+        compact_second_repair_failed_snapshot = _compact_snapshot(second_repair_failed_snapshot, instruction)
+        recovered = await self._accept_recovered_side_effect(
+            page=page,
+            instruction=instruction,
+            plan=second_repair_plan,
+            result=second_repair_result,
+            before=before,
+            before_snapshot=repair_failed_snapshot,
+            after_snapshot=second_repair_failed_snapshot,
+            diagnostics=diagnostics,
+            repair_attempted=True,
+            precondition_plans=[first_plan, repair_plan],
+        )
+        if recovered:
+            return recovered
         second_repair_diagnostic_raw = {
             "plan": _safe_jsonable(second_repair_plan),
             "result": _safe_jsonable(second_repair_result),
+            "page_after_failure": second_repair_failed_page.model_dump(mode="json"),
+            "snapshot_after_failure": _safe_jsonable(compact_second_repair_failed_snapshot),
         }
         if second_repair_error_type:
             second_repair_diagnostic_raw["error_type"] = second_repair_error_type
@@ -479,9 +649,13 @@ class RecordingRuntimeAgent:
         runtime_results: Dict[str, Any],
         instruction: str,
         before: RPAPageState,
+        before_snapshot: Optional[Dict[str, Any]] = None,
     ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        timing_ms: Dict[str, float] = {}
         try:
+            started_at = time.perf_counter()
             plan = await self.planner(payload)
+            timing_ms["planner"] = round((time.perf_counter() - started_at) * 1000, 1)
         except Exception as exc:
             plan = {
                 "description": "Planner output could not be executed",
@@ -494,8 +668,13 @@ class RecordingRuntimeAgent:
                 "error_type": type(exc).__name__,
                 "traceback": _format_exception_for_repair(exc),
                 "output": "",
+                "timing_ms": timing_ms,
             }
-        result = await self.executor(page, plan, runtime_results)
+        started_at = time.perf_counter()
+        executor_result = await self.executor(page, plan, runtime_results)
+        result = executor_result
+        timing_ms["executor"] = round((time.perf_counter() - started_at) * 1000, 1)
+        started_at = time.perf_counter()
         result = await _ensure_expected_effect(
             page=page,
             instruction=instruction,
@@ -503,6 +682,44 @@ class RecordingRuntimeAgent:
             result=result,
             before=before,
         )
+        timing_ms["effect_verifier"] = round((time.perf_counter() - started_at) * 1000, 1)
+        if _is_terminal_contract_failure_result(result) and executor_result.get("success") and before_snapshot:
+            recovered = await self._recover_successful_side_effect_from_snapshot_diff(
+                page=page,
+                plan=plan,
+                executor_result=executor_result,
+                verifier_result=result,
+                before_snapshot=before_snapshot,
+            )
+            if recovered:
+                result = recovered
+        if _should_try_semantic_terminal_judge(plan, result):
+            try:
+                started_at = time.perf_counter()
+                judgement = await self._semantic_terminal_judge(
+                    page=page,
+                    instruction=instruction,
+                    plan=plan,
+                    result=result,
+                )
+                timing_ms["semantic_terminal_judge"] = round((time.perf_counter() - started_at) * 1000, 1)
+                if judgement.get("passed"):
+                    result = _attach_semantic_terminal_judgement(result, judgement)
+            except Exception as exc:
+                result = {
+                    **result,
+                    "semantic_terminal_judge_error": f"{type(exc).__name__}: {exc}",
+                }
+        started_at = time.perf_counter()
+        result = await self._verify_instruction_completion_if_needed(
+            page=page,
+            instruction=instruction,
+            plan=plan,
+            result=result,
+            before=before,
+        )
+        timing_ms["completion_verifier"] = round((time.perf_counter() - started_at) * 1000, 1)
+        result = {**result, "timing_ms": {**timing_ms, **dict(result.get("timing_ms") or {})}}
         return plan, result
 
     async def _accepted_trace(
@@ -522,6 +739,9 @@ class RecordingRuntimeAgent:
         output_key = _normalize_result_key(plan.get("output_key"))
         locator_stability = _build_locator_stability_metadata(plan, snapshot or {})
         signals = _merge_runtime_ai_signal(dict(result.get("signals") or {}), plan)
+        terminal_contract = normalize_terminal_contract(plan)
+        if terminal_contract.get("required"):
+            signals["terminal_contract"] = terminal_contract
         input_bindings = _dict_field(plan.get("input_bindings"))
         output_bindings = _dict_field(plan.get("output_bindings"))
         postcondition = await _trusted_replay_postcondition(
@@ -530,6 +750,28 @@ class RecordingRuntimeAgent:
             result=result,
             input_bindings=input_bindings,
         )
+        if not postcondition and snapshot and result.get("success") and _plan_has_browser_side_effect(plan):
+            after_snapshot = await _safe_page_snapshot(page)
+            inferred_terminal = snapshot_diff_terminal_postcondition(
+                plan=plan,
+                result=result,
+                before_snapshot=snapshot,
+                after_snapshot=after_snapshot,
+            )
+            if inferred_terminal:
+                postcondition = _validated_postcondition(
+                    inferred_terminal.get("postcondition"),
+                    snapshot=after_snapshot,
+                    input_bindings=input_bindings,
+                    allow_literal_key=True,
+                    result=result,
+                )
+                if postcondition:
+                    signals["idempotent_postcondition_replay"] = {
+                        "ignore_precondition_errors": True,
+                        "reason": "snapshot diff produced a replayable terminal postcondition",
+                    }
+                    signals["terminal_evidence"] = inferred_terminal.get("evidence") or []
         return RPAAcceptedTrace(
             trace_type=RPATraceType.AI_OPERATION,
             source="ai",
@@ -553,18 +795,302 @@ class RecordingRuntimeAgent:
             postcondition=postcondition,
         )
 
+    async def _accept_recovered_side_effect(
+        self,
+        *,
+        page: Any,
+        instruction: str,
+        plan: Dict[str, Any],
+        result: Dict[str, Any],
+        before: RPAPageState,
+        before_snapshot: Dict[str, Any],
+        after_snapshot: Dict[str, Any],
+        diagnostics: List[RPATraceDiagnostic],
+        repair_attempted: bool,
+        precondition_plans: Optional[List[Dict[str, Any]]] = None,
+    ) -> Optional[RecordingAgentResult]:
+        if _has_failed_instruction_completion(result):
+            return None
+        recovered_side_effect = recover_failed_side_effect_from_snapshot_diff(
+            plan=plan,
+            result=result,
+            before_snapshot=before_snapshot,
+            after_snapshot=after_snapshot,
+        )
+        if not recovered_side_effect:
+            return None
+        recovered_plan, recovered_result = recovered_side_effect
+        trace = await self._accepted_trace(
+            page,
+            instruction,
+            recovered_plan,
+            recovered_result,
+            before,
+            repair_attempted=repair_attempted,
+            snapshot=after_snapshot,
+        )
+        if precondition_plans:
+            trace = await self._trace_with_replayable_failed_preconditions(
+                page=page,
+                instruction=instruction,
+                failed_plans=precondition_plans,
+                repair_plan=recovered_plan,
+                repair_result=recovered_result,
+                before=before,
+                repair_snapshot=after_snapshot,
+                fallback_trace=trace,
+            )
+        return RecordingAgentResult(
+            success=True,
+            trace=trace,
+            traces=[trace],
+            diagnostics=diagnostics,
+            output_key=trace.output_key,
+            output=trace.output,
+            message="Recording command completed with verified terminal evidence after a failed attempt.",
+        )
+
+    async def _recover_successful_side_effect_from_snapshot_diff(
+        self,
+        *,
+        page: Any,
+        plan: Dict[str, Any],
+        executor_result: Dict[str, Any],
+        verifier_result: Dict[str, Any],
+        before_snapshot: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        after_snapshot = await _safe_page_snapshot(page)
+        recovery = snapshot_diff_terminal_postcondition(
+            plan=plan,
+            result=executor_result,
+            before_snapshot=before_snapshot,
+            after_snapshot=after_snapshot,
+        )
+        if not recovery:
+            return {}
+        postcondition = recovery.get("postcondition")
+        evidence = list(recovery.get("evidence") or [])
+        if not isinstance(postcondition, dict) or not evidence:
+            return {}
+        plan["postcondition"] = postcondition
+        signals = dict(executor_result.get("signals") or {})
+        signals["terminal_evidence"] = evidence
+        effect = dict(executor_result.get("effect") or {})
+        effect.setdefault("type", str(plan.get("expected_effect") or "mixed"))
+        effect["terminal_evidence"] = str(evidence[0].get("type") or "postcondition")
+        effect["terminal_evidence_items"] = evidence
+        effect["snapshot_diff_terminal_recovered"] = True
+        return {
+            **executor_result,
+            "success": True,
+            "error": None,
+            "signals": signals,
+            "effect": effect,
+            "terminal_verification": {
+                **dict(verifier_result.get("terminal_verification") or {}),
+                "passed": True,
+                "evidence": evidence,
+                "recovered_from_snapshot_diff": True,
+            },
+        }
+
+    async def _trace_with_replayable_failed_preconditions(
+        self,
+        *,
+        page: Any,
+        instruction: str,
+        failed_plans: List[Dict[str, Any]],
+        repair_plan: Dict[str, Any],
+        repair_result: Dict[str, Any],
+        before: RPAPageState,
+        repair_snapshot: Dict[str, Any],
+        fallback_trace: RPAAcceptedTrace,
+    ) -> RPAAcceptedTrace:
+        combined_plan = _combine_run_python_attempts(
+            [plan for plan in failed_plans if _plan_has_browser_side_effect(plan)],
+            repair_plan,
+        )
+        if not combined_plan:
+            return fallback_trace
+        combined_trace = await self._accepted_trace(
+            page,
+            instruction,
+            combined_plan,
+            repair_result,
+            before,
+            repair_attempted=True,
+            snapshot=repair_snapshot,
+        )
+        if combined_trace.postcondition:
+            return combined_trace
+        if fallback_trace.postcondition:
+            merged_signals = dict(combined_trace.signals or {})
+            merged_signals.update(dict(fallback_trace.signals or {}))
+            return combined_trace.model_copy(
+                update={
+                    "signals": merged_signals,
+                    "postcondition": fallback_trace.postcondition,
+                    "output": fallback_trace.output,
+                }
+            )
+        return fallback_trace
+
     async def _default_planner(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         from backend.deepagent.engine import get_llm_model
         from langchain_core.messages import HumanMessage, SystemMessage
 
         model = get_llm_model(config=self.model_config, streaming=False)
-        response = await model.ainvoke(
+        response = await _ainvoke_model_with_recording_timeout(
+            model,
             [
                 SystemMessage(content=RECORDING_RUNTIME_SYSTEM_PROMPT),
                 HumanMessage(content=json.dumps(payload, ensure_ascii=False, default=str)),
-            ]
+            ],
         )
         return _parse_json_object(_extract_text(response))
+
+    async def _semantic_terminal_judge(
+        self,
+        *,
+        page: Any,
+        instruction: str,
+        plan: Dict[str, Any],
+        result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        from backend.deepagent.engine import get_llm_model
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        snapshot = _compact_snapshot(await _safe_page_snapshot(page), instruction)
+        payload = {
+            "instruction": instruction,
+            "terminal_contract": normalize_terminal_contract(plan),
+            "terminal_verification": _safe_jsonable(result.get("terminal_verification")),
+            "browser_evidence": _safe_jsonable(result.get("browser_evidence")),
+            "snapshot": snapshot,
+        }
+        model = get_llm_model(config=self.model_config, streaming=False)
+        response = await _ainvoke_model_with_recording_timeout(
+            model,
+            [
+                SystemMessage(content=_SEMANTIC_TERMINAL_JUDGE_PROMPT),
+                HumanMessage(content=json.dumps(payload, ensure_ascii=False, default=str)),
+            ],
+        )
+        return _normalize_semantic_terminal_judgement(_parse_raw_json_object(_extract_text(response)), plan)
+
+    async def _verify_instruction_completion_if_needed(
+        self,
+        *,
+        page: Any,
+        instruction: str,
+        plan: Dict[str, Any],
+        result: Dict[str, Any],
+        before: RPAPageState,
+    ) -> Dict[str, Any]:
+        if not self._instruction_completion_check_enabled:
+            return result
+        if not _should_verify_instruction_completion(plan, result, instruction):
+            return result
+        if (
+            str(plan.get("action_type") or "").strip() == "extract_snapshot"
+            and not _is_deterministic_preplanned_extract(plan, result)
+        ):
+            current = await _page_state(page)
+            if _page_url_changed(before.url, current.url):
+                return {
+                    **result,
+                    "success": False,
+                    "error": "Instruction completion verification failed: snapshot extraction cannot replay prior browser state changes.",
+                    "instruction_completion": {
+                        "passed": False,
+                        "missing_requirements": ["replayable browser action trace"],
+                        "reason": "extract_snapshot plans do not contain the browser actions that changed the page",
+                    },
+                }
+        if self.completion_verifier is None and _is_deterministic_preplanned_extract(plan, result):
+            signals = dict(result.get("signals") or {})
+            signals["instruction_completion"] = {
+                "passed": True,
+                "missing_requirements": [],
+                "reason": "deterministic read-only snapshot extraction",
+                "source": "structural_preplan",
+            }
+            return {**result, "signals": signals}
+        try:
+            judgement = await self._instruction_completion_judge(
+                page=page,
+                instruction=instruction,
+                plan=plan,
+                result=result,
+                before=before,
+            )
+        except Exception as exc:
+            verifier_error = f"{type(exc).__name__}: {exc}"
+            signals = dict(result.get("signals") or {})
+            signals["instruction_completion_verifier_error"] = verifier_error
+            if result.get("success") and _has_strong_terminal_completion_evidence(plan, result):
+                return {
+                    **result,
+                    "signals": signals,
+                    "instruction_completion_verifier_error": verifier_error,
+                }
+            return {
+                **result,
+                "success": False,
+                "error": f"Instruction completion verification failed: {verifier_error}",
+                "signals": signals,
+                "instruction_completion_verifier_error": verifier_error,
+            }
+        signals = dict(result.get("signals") or {})
+        signals["instruction_completion"] = judgement
+        if judgement.get("passed"):
+            return {**result, "signals": signals}
+        missing = judgement.get("missing_requirements") or []
+        reason = str(judgement.get("reason") or "instruction was not fully completed").strip()
+        if missing:
+            reason = f"{reason}; missing: {', '.join(str(item) for item in missing[:5])}"
+        return {
+            **result,
+            "success": False,
+            "error": f"Instruction completion verification failed: {reason}",
+            "signals": signals,
+            "instruction_completion": judgement,
+        }
+
+    async def _instruction_completion_judge(
+        self,
+        *,
+        page: Any,
+        instruction: str,
+        plan: Dict[str, Any],
+        result: Dict[str, Any],
+        before: RPAPageState,
+    ) -> Dict[str, Any]:
+        verifier = self.completion_verifier or self._default_instruction_completion_judge
+        payload = {
+            "instruction": instruction,
+            "before_page": before.model_dump(mode="json"),
+            "current_page": (await _page_state(page)).model_dump(mode="json"),
+            "plan": _completion_plan_summary(plan),
+            "result": _completion_result_summary(result),
+            "missing_instruction_identifiers": _missing_instruction_identifier_tokens(instruction, result),
+            "snapshot": _compact_snapshot(await _safe_page_snapshot(page), instruction),
+        }
+        return _normalize_instruction_completion_judgement(await verifier(payload))
+
+    async def _default_instruction_completion_judge(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        from backend.deepagent.engine import get_llm_model
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        model = get_llm_model(config=self.model_config, streaming=False)
+        response = await _ainvoke_model_with_recording_timeout(
+            model,
+            [
+                SystemMessage(content=_INSTRUCTION_COMPLETION_JUDGE_PROMPT),
+                HumanMessage(content=json.dumps(payload, ensure_ascii=False, default=str)),
+            ],
+        )
+        return _parse_raw_json_object(_extract_text(response))
 
     async def _default_executor(self, page: Any, plan: Dict[str, Any], runtime_results: Dict[str, Any]) -> Dict[str, Any]:
         action_type = str(plan.get("action_type") or "run_python").strip()
@@ -585,23 +1111,36 @@ class RecordingRuntimeAgent:
                 selector = str(plan.get("selector") or "")
                 if not selector:
                     return {"success": False, "error": "click plan missing selector", "output": ""}
+                browser_before = await capture_browser_evidence(page)
                 await page.locator(selector).first.click()
-                return {"success": True, "output": "clicked", "effect": {"type": "click", "action_performed": True}}
+                await _settle_after_browser_action(page)
+                browser_after = await capture_browser_evidence(page)
+                return {
+                    "success": True,
+                    "output": "clicked",
+                    "effect": {"type": "click", "action_performed": True},
+                    "browser_evidence": {"before": browser_before, "after": browser_after},
+                }
 
             if action_type == "fill":
                 selector = str(plan.get("selector") or "")
                 value = plan.get("value", "")
                 if not selector:
                     return {"success": False, "error": "fill plan missing selector", "output": ""}
+                browser_before = await capture_browser_evidence(page)
                 await page.locator(selector).first.fill(str(value))
+                await _settle_after_browser_action(page)
+                browser_after = await capture_browser_evidence(page)
                 return {
                     "success": True,
                     "output": value,
                     "effect": {"type": "fill", "action_performed": True},
+                    "browser_evidence": {"before": browser_before, "after": browser_after},
                 }
 
             if action_type == "extract_snapshot":
-                return _execute_extract_snapshot_plan(plan)
+                snapshot = await _safe_page_snapshot(page)
+                return _execute_extract_snapshot_plan(plan, snapshot=snapshot)
 
             code = str(plan.get("code") or "")
             code = _normalize_generated_playwright_code(code)
@@ -653,6 +1192,8 @@ class RecordingRuntimeAgent:
                 except Exception:
                     download_handler_attached = False
 
+            browser_before = await capture_browser_evidence(page)
+            browser_after: Dict[str, Any] = {}
             try:
                 output = runner(page, runtime_results)
                 if inspect.isawaitable(output):
@@ -667,6 +1208,8 @@ class RecordingRuntimeAgent:
                             )
                         except asyncio.TimeoutError:
                             pass
+                await _settle_after_browser_action(page)
+                browser_after = await capture_browser_evidence(page)
             finally:
                 if download_handler_attached:
                     remover = getattr(page, "remove_listener", None) or getattr(page, "off", None)
@@ -682,6 +1225,8 @@ class RecordingRuntimeAgent:
                         pass
 
             response = {"success": True, "error": None, "output": output}
+            if browser_before or browser_after:
+                response["browser_evidence"] = {"before": browser_before, "after": browser_after}
             if navigation_history:
                 response["navigation_history"] = navigation_history
             if download_events:
@@ -693,17 +1238,18 @@ class RecordingRuntimeAgent:
                 response["effect"] = {"type": "download", "action_performed": True}
             return response
         except Exception as exc:
+            structured_output = _structured_exception_output(exc)
             return {
                 "success": False,
                 "error": str(exc),
                 "error_type": type(exc).__name__,
                 "traceback": _format_exception_for_repair(exc),
-                "output": "",
+                "output": structured_output if structured_output is not None else "",
             }
 
 
-def _execute_extract_snapshot_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
-    fields = _snapshot_plan_fields(plan)
+def _execute_extract_snapshot_plan(plan: Dict[str, Any], snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    fields = _resolve_snapshot_plan_fields(plan, snapshot or {})
     if not fields:
         return {"success": False, "error": "extract_snapshot plan missing fields", "output": ""}
 
@@ -765,6 +1311,24 @@ def _execute_extract_snapshot_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _structured_exception_output(exc: Exception) -> Any:
+    if not getattr(exc, "args", None):
+        return None
+    payload = exc.args[0]
+    if isinstance(payload, (dict, list)):
+        return payload
+    if not isinstance(payload, str):
+        return None
+    text = payload.strip()
+    if not text.startswith(("{", "[")):
+        return None
+    try:
+        parsed = ast.literal_eval(text)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, (dict, list)) else None
+
+
 def _enrich_extract_snapshot_result_with_replay_evidence(
     result: Dict[str, Any],
     snapshot: Dict[str, Any],
@@ -780,6 +1344,7 @@ def _enrich_extract_snapshot_result_with_replay_evidence(
         for field in fields
         if isinstance(field, dict)
     ]
+    enriched_fields = _enrich_extract_snapshot_fields_with_table_cell_evidence(enriched_fields, snapshot)
     enriched_signal = dict(extract_signal)
     enriched_signal["fields"] = enriched_fields
     enriched_signals = dict(signals)
@@ -804,7 +1369,7 @@ def _enrich_extract_snapshot_field_with_replay_evidence(
     raw_value = str(field.get("value") or "").strip()
     if raw_value:
         observed_field = _observed_detail_field_for_label(snapshot, raw_value)
-        if observed_field:
+        if observed_field and not _value_visible_in_table_cell(snapshot, raw_value):
             field["value"] = str(observed_field.get("value") or "").strip()
             field["observed_label"] = str(observed_field.get("label") or "").strip()
     value_info = _snapshot_field_value_info(field)
@@ -852,6 +1417,171 @@ def _snapshot_field_has_replay_evidence(field: Dict[str, Any]) -> bool:
         return True
     if isinstance(field.get("text_pattern"), dict) and field["text_pattern"]:
         return True
+    if isinstance(field.get("table_cell"), dict) and field["table_cell"]:
+        return True
+    return False
+
+
+def _enrich_extract_snapshot_fields_with_table_cell_evidence(
+    fields: List[Dict[str, Any]],
+    snapshot: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    anchors = [
+        _normalize_visible_text(field.get("value"))
+        for field in fields
+        if _snapshot_field_has_replay_evidence(field) and _normalize_visible_text(field.get("value"))
+    ]
+    min_score = 1
+    if not anchors:
+        anchors = [
+            _normalize_visible_text(field.get("value"))
+            for field in fields
+            if _normalize_visible_text(field.get("value"))
+        ]
+        min_score = 2
+    if not anchors:
+        return fields
+
+    table_match = _best_table_row_match(snapshot, anchors, min_score=min_score)
+    if not table_match:
+        return fields
+
+    headers = table_match["headers"]
+    row_cells = table_match["cells"]
+    anchor_cell = table_match["anchor_cell"]
+    row_key = {
+        str(anchor_cell.get("column_header") or "").strip(): str(anchor_cell.get("text") or "").strip()
+    }
+    if not next(iter(row_key.keys()), "") or not next(iter(row_key.values()), ""):
+        return fields
+
+    enriched: List[Dict[str, Any]] = []
+    for field in fields:
+        item = dict(field)
+        if not isinstance(item.get("table_cell"), dict) or not item["table_cell"]:
+            target = _normalize_visible_text(item.get("value"))
+            cell = _first_row_cell_with_text(row_cells, target)
+            if cell and str(cell.get("column_header") or "").strip():
+                item["table_cell"] = {
+                    "table_headers": headers,
+                    "row_key": row_key,
+                    "column_header": str(cell.get("column_header") or "").strip(),
+                    "column_index": cell.get("column_index"),
+                }
+        enriched.append(item)
+    return enriched
+
+
+def _best_table_row_match(snapshot: Dict[str, Any], anchors: List[str], *, min_score: int = 1) -> Dict[str, Any]:
+    anchor_set = {_normalize_visible_text(item) for item in anchors if _normalize_visible_text(item)}
+    best: Dict[str, Any] = {}
+    best_score = 0
+    for table in list(snapshot.get("table_views") or []):
+        if not isinstance(table, dict):
+            continue
+        headers = [
+            _normalize_visible_text(column.get("header"))
+            for column in list(table.get("columns") or [])
+            if isinstance(column, dict) and _normalize_visible_text(column.get("header"))
+        ]
+        if not headers:
+            continue
+        for row in list(table.get("rows") or []):
+            if not isinstance(row, dict):
+                continue
+            cells = [cell for cell in list(row.get("cells") or []) if isinstance(cell, dict)]
+            matched_cells = [
+                cell
+                for cell in cells
+                if _normalize_visible_text(cell.get("text")) in anchor_set
+                and _normalize_visible_text(cell.get("column_header"))
+            ]
+            matched_values = {_normalize_visible_text(cell.get("text")) for cell in matched_cells}
+            score = len(matched_values)
+            if score >= min_score and score > best_score:
+                best_score = score
+                best = {
+                    "headers": headers,
+                    "cells": cells,
+                    "anchor_cell": _select_table_anchor_cell(matched_cells, table_rows=list(table.get("rows") or [])),
+                }
+    return best
+
+
+def _select_table_anchor_cell(
+    cells: List[Dict[str, Any]],
+    *,
+    table_rows: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    scored = []
+    for order, cell in enumerate(cells):
+        text = _normalize_visible_text(cell.get("text"))
+        if not text:
+            continue
+        column_index = cell.get("column_index")
+        column_header = _normalize_visible_text(cell.get("column_header"))
+        score = 0
+        if _table_cell_value_is_column_unique(table_rows or [], column_index, text):
+            score += 80
+        if column_header:
+            score += 20
+        if cell.get("column_id"):
+            score += 20
+        if isinstance(column_index, int) and column_index == 0:
+            score += 5
+        if cell.get("controls") or cell.get("actions"):
+            score -= 30
+        if len(text) > 80:
+            score -= 20
+        scored.append((score, -order, cell))
+    if not scored:
+        return cells[0] if cells else {}
+    return max(scored, key=lambda item: (item[0], item[1]))[2]
+
+
+def _table_cell_value_is_column_unique(rows: List[Dict[str, Any]], column_index: Any, text: str) -> bool:
+    if not isinstance(column_index, int):
+        return False
+    target = _normalize_visible_text(text)
+    if not target:
+        return False
+    occurrences = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for cell in list(row.get("cells") or []):
+            if not isinstance(cell, dict) or cell.get("column_index") != column_index:
+                continue
+            if _normalize_visible_text(cell.get("text")) == target:
+                occurrences += 1
+                if occurrences > 1:
+                    return False
+    return occurrences == 1
+
+
+def _first_row_cell_with_text(cells: List[Dict[str, Any]], text: str) -> Dict[str, Any]:
+    target = _normalize_visible_text(text)
+    if not target:
+        return {}
+    for cell in cells:
+        if _normalize_visible_text(cell.get("text")) == target:
+            return cell
+    return {}
+
+
+def _value_visible_in_table_cell(snapshot: Dict[str, Any], value: str) -> bool:
+    target = _normalize_visible_text(value)
+    if not target:
+        return False
+    for table in list(snapshot.get("table_views") or []):
+        if not isinstance(table, dict):
+            continue
+        for row in list(table.get("rows") or []):
+            if not isinstance(row, dict):
+                continue
+            for cell in list(row.get("cells") or []):
+                if isinstance(cell, dict) and _normalize_visible_text(cell.get("text")) == target:
+                    return True
     return False
 
 
@@ -993,6 +1723,61 @@ def _snapshot_plan_fields(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
     if isinstance(extraction, dict) and isinstance(extraction.get("fields"), dict):
         return _snapshot_field_map_to_list(extraction["fields"])
     return []
+
+
+def _resolve_snapshot_plan_fields(plan: Dict[str, Any], snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
+    fields = _snapshot_plan_fields(plan)
+    if not snapshot:
+        return fields
+    return [_resolve_snapshot_plan_field_from_observed_detail(field, snapshot) for field in fields]
+
+
+def _resolve_snapshot_plan_field_from_observed_detail(
+    field: Dict[str, Any],
+    snapshot: Dict[str, Any],
+) -> Dict[str, Any]:
+    value_info = _snapshot_field_value_info(field)
+    if value_info["value"]:
+        return field
+
+    candidates = [
+        value_info["observed_label"],
+        str(field.get("observed_label") or "").strip(),
+        str(field.get("label") or "").strip(),
+    ]
+    observed = {}
+    for label in candidates:
+        if not label:
+            continue
+        observed = _observed_detail_field_for_label(snapshot, label)
+        if observed:
+            break
+    if not observed:
+        return field
+
+    resolved = dict(field)
+    observed_info = _snapshot_field_value_info(observed)
+    if observed_info["value"]:
+        resolved["value"] = observed_info["value"]
+    if observed_info["observed_label"] and not str(resolved.get("observed_label") or "").strip():
+        resolved["observed_label"] = observed_info["observed_label"]
+    for key in (
+        "field_locator",
+        "label_locator",
+        "value_locator",
+        "locator_hints",
+        "data_prop",
+        "value_kind",
+        "required",
+        "visible",
+        "adapter",
+        "framework_hint",
+        "value_selector",
+        "value_selectors",
+    ):
+        if key not in resolved and key in observed:
+            resolved[key] = observed[key]
+    return resolved
 
 
 def _snapshot_field_map_to_list(fields: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1141,6 +1926,294 @@ def _parse_json_object(text: str) -> Dict[str, Any]:
     raise ValueError("Recording planner must return a JSON object")
 
 
+def _parse_raw_json_object(text: str) -> Dict[str, Any]:
+    raw = str(text or "").strip()
+    decoder = json.JSONDecoder()
+    last_error: Optional[Exception] = None
+    for candidate in _json_object_candidates(raw):
+        for start in (index for index, char in enumerate(candidate) if char == "{"):
+            try:
+                parsed, _end = decoder.raw_decode(candidate[start:])
+            except json.JSONDecodeError as exc:
+                last_error = exc
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+    if last_error:
+        raise last_error
+    raise ValueError("Expected a JSON object")
+
+
+def _should_try_semantic_terminal_judge(plan: Dict[str, Any], result: Dict[str, Any]) -> bool:
+    if result.get("success"):
+        return False
+    contract = normalize_terminal_contract(plan)
+    if not contract.get("required") or not contract.get("allow_semantic_judge"):
+        return False
+    verification = result.get("terminal_verification")
+    if not isinstance(verification, dict):
+        return False
+    return verification.get("reason") != "validation_error_visible"
+
+
+def _should_verify_instruction_completion(plan: Dict[str, Any], result: Dict[str, Any], instruction: str = "") -> bool:
+    if not result.get("success"):
+        return False
+    if str(plan.get("action_type") or "").strip() == "extract_snapshot":
+        return True
+    if _missing_instruction_identifier_tokens(instruction, result):
+        return True
+    if _result_has_typed_terminal_evidence(result):
+        return not _has_strong_terminal_completion_evidence(plan, result)
+    expected = _normalize_expected_effect(plan.get("expected_effect"))
+    if expected in {"click", "fill", "mixed"} and _output_is_action_only(result.get("output")):
+        return True
+    return False
+
+
+def _plan_has_browser_side_effect(plan: Dict[str, Any]) -> bool:
+    expected = _normalize_expected_effect(plan.get("expected_effect"))
+    if expected in {"navigate", "click", "fill", "mixed"}:
+        return True
+    action_type = str(plan.get("action_type") or "").strip()
+    return action_type in {"goto", "click", "fill", "run_python"}
+
+
+_ENTITY_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_])(?=[A-Za-z0-9_-]*[A-Za-z])(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9][A-Za-z0-9_-]{3,}(?![A-Za-z0-9_])")
+
+
+def _missing_instruction_identifier_tokens(instruction: str, result: Dict[str, Any]) -> List[str]:
+    tokens = _instruction_identifier_tokens(instruction)
+    if len(tokens) < 2:
+        return []
+    observed = _normalize_visible_text(
+        json.dumps(
+            {
+                "output": _safe_jsonable(result.get("output")),
+                "effect": _safe_jsonable(result.get("effect")),
+                "signals": _safe_jsonable(result.get("signals")),
+                "terminal_verification": _safe_jsonable(result.get("terminal_verification")),
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+    ).lower()
+    return [token for token in tokens if token.lower() not in observed]
+
+
+def _instruction_identifier_tokens(instruction: str) -> List[str]:
+    tokens: List[str] = []
+    for match in _ENTITY_TOKEN_RE.finditer(str(instruction or "")):
+        token = match.group(0).strip()
+        if token and token not in tokens:
+            tokens.append(token)
+    return tokens[:12]
+
+
+def _result_has_typed_terminal_evidence(result: Dict[str, Any]) -> bool:
+    effect = result.get("effect")
+    if isinstance(effect, dict) and (effect.get("terminal_evidence") or effect.get("terminal_evidence_items")):
+        return True
+    signals = result.get("signals")
+    if isinstance(signals, dict) and (
+        signals.get("download")
+        or signals.get("terminal_evidence")
+        or signals.get("extract_snapshot")
+    ):
+        return True
+    verification = result.get("terminal_verification")
+    return isinstance(verification, dict) and bool(verification.get("passed"))
+
+
+def _has_strong_terminal_completion_evidence(plan: Dict[str, Any], result: Dict[str, Any]) -> bool:
+    verification = result.get("terminal_verification")
+    if isinstance(verification, dict) and verification.get("passed"):
+        return True
+    signals = result.get("signals")
+    if isinstance(signals, dict) and signals.get("download"):
+        return True
+    if str(plan.get("action_type") or "").strip() == "extract_snapshot" and _is_deterministic_preplanned_extract(plan, result):
+        return True
+    contract = normalize_terminal_contract(plan)
+    if contract.get("required"):
+        return False
+    return False
+
+
+def _page_url_changed(before_url: str, after_url: str) -> bool:
+    return _stable_page_url(before_url) != _stable_page_url(after_url)
+
+
+def _stable_page_url(url: str) -> str:
+    parsed = urlparse(str(url or ""))
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip("/")
+
+
+def _output_is_action_only(output: Any) -> bool:
+    if not isinstance(output, dict):
+        return False
+    if not _normalize_bool(output.get("action_performed")):
+        return False
+    evidence_keys = {
+        "url",
+        "href",
+        "download_filename",
+        "download_triggered",
+        "created",
+        "submitted",
+        "submission_confirmed",
+        "saved",
+        "updated",
+        "deleted",
+        "confirmed",
+        "confirmation",
+        "visible_confirmation_text",
+        "status",
+        "state",
+        "row",
+        "record",
+        "records",
+        "data",
+        "value",
+        "values",
+        "result",
+        "results",
+    }
+    return not any(key in output for key in evidence_keys)
+
+
+def _is_deterministic_preplanned_extract(plan: Dict[str, Any], result: Dict[str, Any]) -> bool:
+    if str(plan.get("action_type") or "").strip() != "extract_snapshot":
+        return False
+    if str(plan.get("preplanned_source") or "").strip() not in {"detail_snapshot", "table_snapshot", "ordinal_snapshot"}:
+        return False
+    signal = (result.get("signals") or {}).get("extract_snapshot") if isinstance(result.get("signals"), dict) else {}
+    fields = signal.get("fields") if isinstance(signal, dict) else []
+    return bool(fields)
+
+
+def _completion_plan_summary(plan: Dict[str, Any]) -> Dict[str, Any]:
+    summary = {
+        "description": str(plan.get("description") or "")[:500],
+        "action_type": str(plan.get("action_type") or ""),
+        "expected_effect": str(plan.get("expected_effect") or ""),
+        "output_key": str(plan.get("output_key") or ""),
+        "source": str(plan.get("source") or ""),
+        "section_title": str(plan.get("section_title") or ""),
+        "fields": _safe_jsonable(plan.get("fields") or [])[:30]
+        if isinstance(_safe_jsonable(plan.get("fields") or []), list)
+        else [],
+    }
+    code = str(plan.get("code") or "").strip()
+    if code:
+        summary["code_excerpt"] = code[:1200]
+    return summary
+
+
+def _completion_result_summary(result: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "success": bool(result.get("success")),
+        "output": _safe_jsonable(result.get("output")),
+        "effect": _safe_jsonable(result.get("effect")),
+        "signals": _safe_jsonable(result.get("signals")),
+        "error": str(result.get("error") or "")[:500],
+    }
+
+
+def _normalize_instruction_completion_judgement(value: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return {
+            "passed": False,
+            "missing_requirements": ["verifier_output_not_object"],
+            "reason": "Completion verifier did not return a JSON object.",
+        }
+    missing = value.get("missing_requirements")
+    if isinstance(missing, str):
+        missing_items = [missing]
+    elif isinstance(missing, list):
+        missing_items = [str(item).strip()[:200] for item in missing if str(item).strip()]
+    else:
+        missing_items = []
+    passed = _normalize_bool(value.get("passed"))
+    if passed:
+        missing_items = []
+    return {
+        "passed": passed,
+        "missing_requirements": missing_items[:8],
+        "reason": str(value.get("reason") or "").strip()[:500],
+    }
+
+
+def _has_failed_instruction_completion(result: Dict[str, Any]) -> bool:
+    signals = result.get("signals") if isinstance(result.get("signals"), dict) else {}
+    judgement = signals.get("instruction_completion") or result.get("instruction_completion")
+    return isinstance(judgement, dict) and judgement.get("passed") is False
+
+
+def _attach_semantic_terminal_judgement(result: Dict[str, Any], judgement: Dict[str, Any]) -> Dict[str, Any]:
+    effect = dict(result.get("effect") or {})
+    evidence = judgement.get("evidence") if isinstance(judgement.get("evidence"), list) else []
+    first_type = str(evidence[0].get("type") if evidence else "semantic_terminal_judge")
+    effect["terminal_evidence"] = first_type
+    effect["terminal_evidence_items"] = evidence
+    signals = dict(result.get("signals") or {})
+    signals["semantic_terminal_judge"] = {
+        "passed": True,
+        "evidence": evidence,
+        "reason": str(judgement.get("reason") or "").strip(),
+    }
+    return {**result, "effect": effect, "signals": signals}
+
+
+def _normalize_semantic_terminal_judgement(value: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"passed": False, "evidence": [], "reason": "judge_output_not_object"}
+    contract = normalize_terminal_contract(plan)
+    desired_types = {
+        str(item.get("type") or "").strip().lower()
+        for item in contract.get("success_evidence") or []
+        if str(item.get("type") or "").strip()
+    }
+    allowed_types = desired_types or {
+        "url_changed",
+        "download_created",
+        "toast_visible",
+        "feedback_visible",
+        "row_exists",
+        "row_absent",
+        "row_status_changed",
+        "field_value_equals",
+        "postcondition",
+        "empty_result",
+    }
+    evidence = []
+    raw_evidence = value.get("evidence")
+    if isinstance(raw_evidence, dict):
+        raw_evidence = [raw_evidence]
+    if isinstance(raw_evidence, list):
+        for item in raw_evidence:
+            if not isinstance(item, dict):
+                continue
+            evidence_type = str(item.get("type") or "").strip().lower()
+            if evidence_type not in allowed_types:
+                continue
+            source = str(item.get("source") or "").strip().lower()
+            if source not in {"snapshot", "browser", "download", "page"}:
+                continue
+            evidence.append(
+                {
+                    "type": evidence_type,
+                    "source": source,
+                    "summary": str(item.get("summary") or item.get("text") or "").strip()[:300],
+                }
+            )
+    return {
+        "passed": _normalize_bool(value.get("passed")) and bool(evidence),
+        "evidence": evidence,
+        "reason": str(value.get("reason") or "").strip()[:300],
+    }
+
+
 def _normalize_planner_object(parsed: Dict[str, Any]) -> Dict[str, Any]:
     parsed = dict(parsed)
     parsed.setdefault("action_type", "run_python")
@@ -1149,6 +2222,7 @@ def _normalize_planner_object(parsed: Dict[str, Any]) -> Dict[str, Any]:
     parsed["input_bindings"] = _dict_field(parsed.get("input_bindings"))
     parsed["output_bindings"] = _dict_field(parsed.get("output_bindings"))
     parsed["postcondition"] = _dict_field(parsed.get("postcondition"))
+    parsed["terminal_contract"] = normalize_terminal_contract(parsed)
     if parsed.get("action_type") == "run_python" and "async def run(page, results)" not in str(parsed.get("code") or ""):
         raise ValueError("Recording planner must return Python code defining async def run(page, results)")
     return parsed
@@ -1171,6 +2245,7 @@ def _looks_like_planner_object(parsed: Dict[str, Any]) -> bool:
         "input_bindings",
         "output_bindings",
         "postcondition",
+        "terminal_contract",
     }
     return any(key in parsed for key in planner_keys)
 
@@ -1189,10 +2264,18 @@ async def _trusted_replay_postcondition(
     candidate = _postcondition_candidate(plan, result)
     if not candidate:
         return {}
-    if not _postcondition_has_parameterized_key(candidate, input_bindings):
+    signals = result.get("signals") if isinstance(result.get("signals"), dict) else {}
+    allow_literal_key = bool(signals.get("recovered_attempt"))
+    if not _postcondition_has_replay_key(candidate, input_bindings, allow_literal_key=allow_literal_key):
         return {}
     snapshot = await _safe_page_snapshot(page)
-    return _validated_postcondition(candidate, snapshot=snapshot, input_bindings=input_bindings)
+    return _validated_postcondition(
+        candidate,
+        snapshot=snapshot,
+        input_bindings=input_bindings,
+        allow_literal_key=allow_literal_key,
+        result=result,
+    )
 
 
 def _postcondition_candidate(plan: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
@@ -1209,6 +2292,8 @@ def _validated_postcondition(
     *,
     snapshot: Optional[Dict[str, Any]] = None,
     input_bindings: Optional[Dict[str, Any]] = None,
+    allow_literal_key: bool = False,
+    result: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     postcondition = _dict_field(value)
     if not postcondition:
@@ -1217,26 +2302,119 @@ def _validated_postcondition(
     observed = _normalize_bool(postcondition.get("observed"))
     if source not in {"observed", "snapshot", "structured_snapshot", "page"} and not observed:
         return {}
-    if str(postcondition.get("kind") or "").strip() != "table_row_exists":
+    kind = str(postcondition.get("kind") or "").strip()
+    if kind not in {"table_row_exists", "table_row_absent"}:
         return {}
     input_bindings = input_bindings or {}
-    if not _postcondition_has_parameterized_key(postcondition, input_bindings):
+    if not _postcondition_has_replay_key(postcondition, input_bindings, allow_literal_key=allow_literal_key):
         return {}
-    if snapshot is not None and not _snapshot_contains_postcondition_row(snapshot, postcondition, input_bindings):
-        return {}
+    postcondition = _postcondition_with_supported_expect_values(postcondition, result, input_bindings)
+    if snapshot is not None:
+        row_exists = _snapshot_contains_postcondition_row(snapshot, postcondition, input_bindings)
+        if kind == "table_row_exists" and not row_exists:
+            return {}
+        if kind == "table_row_absent" and row_exists:
+            return {}
     return postcondition
+
+
+def _postcondition_with_supported_expect_values(
+    postcondition: Dict[str, Any],
+    result: Optional[Dict[str, Any]],
+    input_bindings: Dict[str, Any],
+) -> Dict[str, Any]:
+    expected = _dict_field(postcondition.get("expect"))
+    if not expected:
+        return postcondition
+    supported: Dict[str, Any] = {}
+    supported_values = _postcondition_supported_result_values(result)
+    for header, raw_value in expected.items():
+        label = _normalize_visible_text(header)
+        if not label:
+            continue
+        ref = _postcondition_ref_name(raw_value)
+        if ref and ref.split(".", 1)[0] in input_bindings:
+            supported[header] = raw_value
+            continue
+        value = _normalize_visible_text(raw_value)
+        if value and value.lower() in supported_values:
+            supported[header] = raw_value
+    if len(supported) == len(expected):
+        return postcondition
+    pruned = dict(postcondition)
+    if supported:
+        pruned["expect"] = supported
+    else:
+        pruned.pop("expect", None)
+    pruned["expect_pruned"] = True
+    return pruned
+
+
+_UNSTRUCTURED_RESULT_TEXT_KEYS = {
+    "text",
+    "visible_text",
+    "page_text",
+    "body_text",
+    "row_text",
+    "observed_row_text",
+    "message",
+    "error",
+    "traceback",
+}
+
+
+def _postcondition_supported_result_values(result: Optional[Dict[str, Any]]) -> set[str]:
+    if not isinstance(result, dict):
+        return set()
+    payload = {
+        "output": _safe_jsonable(result.get("output")),
+        "effect": _safe_jsonable(result.get("effect")),
+        "signals": _safe_jsonable(result.get("signals")),
+        "terminal_verification": _safe_jsonable(result.get("terminal_verification")),
+    }
+    values: set[str] = set()
+    _collect_structured_postcondition_values(payload, values)
+    return values
+
+
+def _collect_structured_postcondition_values(value: Any, values: set[str], parent_key: str = "") -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_text = str(key or "").strip().lower()
+            if key_text in _UNSTRUCTURED_RESULT_TEXT_KEYS:
+                continue
+            _collect_structured_postcondition_values(item, values, key_text)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _collect_structured_postcondition_values(item, values, parent_key)
+        return
+    text = _normalize_visible_text(value)
+    if text and len(text) <= 120:
+        values.add(text.lower())
 
 
 _POSTCONDITION_REF_RE = re.compile(r"^\{\{\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*)\s*\}\}$")
 
 
 def _postcondition_has_parameterized_key(postcondition: Dict[str, Any], input_bindings: Dict[str, Any]) -> bool:
+    return _postcondition_has_replay_key(postcondition, input_bindings, allow_literal_key=False)
+
+
+def _postcondition_has_replay_key(
+    postcondition: Dict[str, Any],
+    input_bindings: Dict[str, Any],
+    *,
+    allow_literal_key: bool,
+) -> bool:
     key = postcondition.get("key")
     if not isinstance(key, dict) or not key:
         return False
     for raw_value in key.values():
         ref = _postcondition_ref_name(raw_value)
         if ref and ref.split(".", 1)[0] in input_bindings:
+            return True
+        if allow_literal_key and _normalize_visible_text(raw_value):
             return True
     return False
 
@@ -1432,8 +2610,6 @@ def _instruction_is_detail_extract_only(instruction: str) -> bool:
             "query",
             "navigate",
             "go to",
-            "order",
-            "request",
             "新建",
             "创建",
             "提交",
@@ -1470,8 +2646,29 @@ def _instruction_is_detail_extract_only(instruction: str) -> bool:
     )
 
 
+def _build_read_only_preplanned_plan(instruction: str, snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Use deterministic snapshot plans only for read-only extraction."""
+    for builder in (
+        _build_table_ordinal_overlay_plan,
+        _build_ordinal_overlay_plan,
+        _build_detail_extract_plan,
+    ):
+        plan = builder(instruction, snapshot)
+        if plan and _normalize_expected_effect(plan.get("expected_effect")) == "extract":
+            plan = dict(plan)
+            plan.setdefault("preplanned_source", "ordinal_snapshot" if builder is not _build_detail_extract_plan else "detail_snapshot")
+            return plan
+    return None
+
+
 def _normalize_generated_playwright_code(code: str) -> str:
     normalized = str(code or "").replace(".get_by_testid(", ".get_by_test_id(")
+    normalized = stabilize_callable_locator_filters(normalized)
+    normalized = stabilize_unsupported_locator_options(normalized)
+    normalized = stabilize_bare_text_clicks(normalized)
+    normalized = stabilize_fill_targets(normalized)
+    normalized = stabilize_dialog_button_actions(normalized)
+    normalized = stabilize_download_contexts(normalized)
     normalized = re.sub(
         r"\.filter\(\s*has_attribute\s*=\s*(['\"]).*?\1\s*,\s*has_text\s*=",
         ".filter(has_text=",
@@ -1488,6 +2685,66 @@ def _normalize_generated_playwright_code(code: str) -> str:
         normalized,
     )
     return normalized
+
+
+def _combine_run_python_attempts(
+    failed_plans: List[Dict[str, Any]],
+    repair_plan: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    repair_code = str(repair_plan.get("code") or "").strip()
+    if not _has_run_function(repair_code):
+        return None
+    precondition_codes: List[str] = []
+    precondition_calls: List[str] = []
+    for plan in failed_plans:
+        if str(plan.get("action_type") or "").strip() != "run_python":
+            continue
+        code = str(plan.get("code") or "").strip()
+        if not _has_run_function(code):
+            continue
+        precondition_codes.append(code)
+        precondition_calls.extend(
+            [
+                "    try:",
+                f"        await _rpa_run_isolated(_RPA_PRECONDITION_CODES[{len(precondition_codes) - 1}], page, results)",
+                "    except Exception as _rpa_precondition_error:",
+                "        results.setdefault('_rpa_precondition_errors', []).append(str(_rpa_precondition_error))",
+            ]
+        )
+    if not precondition_calls:
+        return None
+    combined_code = "\n\n".join(
+        [
+            f"_RPA_PRECONDITION_CODES = {precondition_codes!r}",
+            f"_RPA_REPAIR_CODE = {repair_code!r}",
+            "",
+            "async def _rpa_run_isolated(code, page, results):",
+            "    namespace = {}",
+            "    exec(compile(code, '<rpa_combined_attempt>', 'exec'), namespace, namespace)",
+            "    runner = namespace.get('run')",
+            "    if not callable(runner):",
+            "        raise RuntimeError('Combined RPA attempt is missing async run(page, results)')",
+            "    return await runner(page, results)",
+            "",
+            "async def run(page, results):",
+            *precondition_calls,
+            "    return await _rpa_run_isolated(_RPA_REPAIR_CODE, page, results)",
+            "",
+        ]
+    )
+    return {
+        **repair_plan,
+        "description": str(repair_plan.get("description") or "Repaired browser action with replayable preconditions"),
+        "code": combined_code,
+    }
+
+
+def _has_run_function(code: str) -> bool:
+    return bool(re.search(r"(?m)^\s*async\s+def\s+run\s*\(\s*page\s*,\s*results\s*\)\s*:", str(code or "")))
+
+def _is_terminal_contract_failure_result(result: Dict[str, Any]) -> bool:
+    terminal = result.get("terminal_verification")
+    return isinstance(terminal, dict) and terminal.get("required") is True and terminal.get("passed") is False
 
 
 def _build_table_ordinal_overlay_plan(instruction: str, snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1540,7 +2797,7 @@ def _build_table_ordinal_overlay_plan(instruction: str, snapshot: Dict[str, Any]
         return {
             "description": "Click table row column action",
             "action_type": "run_python",
-            "expected_effect": "none",
+            "expected_effect": "click",
             "output_key": "table_row_action",
             "code": code,
             "table_ordinal_overlay": True,
@@ -2069,7 +3326,7 @@ def _ordinal_click_plan(selector: str, index: int, *, description: str) -> Dict[
     return {
         "description": description,
         "action_type": "run_python",
-        "expected_effect": "none",
+        "expected_effect": "click",
         "output_key": "ordinal_item_action",
         "code": code,
         "ordinal_overlay": True,
@@ -2122,144 +3379,6 @@ def _looks_like_secondary_action_label(label: str) -> bool:
     return any(token in text for token in ("download", "下载", "star", "fork", "signed in"))
 
 
-def _classify_recording_failure(error: Any) -> Dict[str, str]:
-    text = str(error or "").strip()
-    normalized = text.lower()
-    if not normalized:
-        return {"type": "unknown"}
-
-    if "input[type=number]" in normalized or "role=\"spinbutton\"" in normalized or "role='spinbutton'" in normalized:
-        return {
-            "type": "numeric_input_text_mismatch",
-            "hint": (
-                "A number input or spinbutton was treated as the wrong field or was filled with non-numeric text. "
-                "In repair, map each value to labels, column headers, row-local controls, aria names, placeholders, "
-                "or nearby text before filling; only numeric strings should be filled into number inputs."
-            ),
-        }
-
-    if "intercepts pointer events" in normalized or "subtree intercepts pointer" in normalized:
-        return {
-            "type": "active_overlay_intercepted_click",
-            "hint": (
-                "A visible overlay or dialog intercepted the click. In repair, do not click the same background "
-                "trigger again; scope actions to the visible dialog, overlay, focused form, or its buttons."
-            ),
-        }
-
-    if (
-        ("locator.fill" in normalized or "locator.click" in normalized or "fill action" in normalized or "click action" in normalized)
-        and (
-            "element is not visible" in normalized
-            or "not visible" in normalized
-            or "not editable" in normalized
-            or "not enabled" in normalized
-            or "visible, enabled and editable" in normalized
-        )
-    ):
-        return {
-            "type": "element_not_visible_or_not_editable",
-            "hint": (
-                "The locator matched or was attempted, but Playwright could not act on a visible/enabled/editable "
-                "element. In repair, inspect the page after failure and choose a truly visible interactive candidate; "
-                "for search goals, consider a direct encoded results URL unless the user explicitly needs UI typing."
-            ),
-        }
-
-    if "strict mode violation" in normalized:
-        return {
-            "type": "strict_locator_violation",
-            "hint": (
-                "The attempted locator matched multiple elements. In repair, prefer a more scoped Playwright "
-                "locator, role/name combination, or DOM scan that selects the intended element from candidates."
-            ),
-        }
-
-    if (
-        ("wait_for_selector" in normalized or "locator" in normalized)
-        and "timeout" in normalized
-        and ("waiting for" in normalized or "to be visible" in normalized)
-    ):
-        if "intercepts pointer events" in normalized or "subtree intercepts pointer" in normalized:
-            return {
-                "type": "active_overlay_intercepted_click",
-                "hint": (
-                    "A visible overlay or dialog intercepted the click. In repair, do not click the same background "
-                    "trigger again; scope actions to the visible dialog, overlay, focused form, or its buttons."
-                ),
-            }
-        return {
-            "type": "selector_timeout",
-            "hint": (
-                "The previous attempt timed out waiting for a specific selector. In repair, re-check the current "
-                "page state first and consider resilient extraction through candidate link/row scanning instead "
-                "of only replacing one brittle selector with another."
-            ),
-        }
-
-    if "element is not an <input>" in normalized or "does not have a role allowing" in normalized:
-        return {
-            "type": "non_editable_fill_target",
-            "hint": (
-                "The fill target was not editable. In repair, first locate visible editable controls by role, tag, "
-                "placeholder, label, or proximity, and keep submit/search buttons for clicking only."
-            ),
-        }
-
-    if "function' object has no attribute 'replace" in normalized or 'function" object has no attribute "replace' in normalized:
-        return {
-            "type": "invalid_callable_locator_filter",
-            "hint": (
-                "The generated Playwright Python passed a callable where Playwright expects a string or regex. "
-                "In repair, replace callable locator filters with explicit locator chains, text filters, or loops."
-            ),
-        }
-
-    output_looks_empty = "output" in normalized and "empty" in normalized
-    if "returned no meaningful output" in normalized or "empty record" in normalized or output_looks_empty:
-        return {
-            "type": "empty_extract_output",
-            "hint": (
-                "The browser action ran but produced empty data. In repair, verify the page is the expected page, "
-                "then broaden extraction candidates or add field-level validation before accepting the result."
-            ),
-        }
-
-    if "net::" in normalized or "err_connection" in normalized or ("page.goto" in normalized and "timeout" in normalized):
-        return {
-            "type": "navigation_timeout_or_network",
-            "hint": (
-                "The failure happened during navigation or page loading. In repair, keep the raw network error in "
-                "mind, avoid assuming selector failure, and use the current browser state if navigation partially succeeded."
-            ),
-        }
-
-    if "syntaxerror" in normalized or "indentationerror" in normalized or "nameerror" in normalized:
-        return {
-            "type": "syntax_or_runtime_code_error",
-            "hint": (
-                "The generated Python failed before completing the browser task. In repair, fix the code shape first "
-                "while preserving the original user goal and current page context."
-            ),
-        }
-
-    if "expected navigation effect" in normalized or "url did not change" in normalized:
-        return {
-            "type": "wrong_page_or_no_goal_progress",
-            "hint": (
-                "The code did not produce the browser-visible effect requested by the user. In repair, distinguish "
-                "between extraction-only and action/navigation goals, then provide observable evidence for the intended effect."
-            ),
-        }
-
-    return {"type": "unknown"}
-
-
-def _known_failure_analysis(error: Any) -> Optional[Dict[str, str]]:
-    analysis = _classify_recording_failure(error)
-    return analysis if analysis.get("type") != "unknown" else None
-
-
 def _cache_generated_code_for_traceback(code: str) -> None:
     lines = [line if line.endswith("\n") else f"{line}\n" for line in code.splitlines()]
     linecache.cache[_GENERATED_CODE_FILENAME] = (len(code), None, lines, _GENERATED_CODE_FILENAME)
@@ -2283,357 +3402,31 @@ def _normalize_result_key(value: Any) -> Optional[str]:
     return text[:64]
 
 
+async def _settle_after_browser_action(page: Any, timeout_ms: int = 200) -> None:
+    wait_for_timeout = getattr(page, "wait_for_timeout", None)
+    if not callable(wait_for_timeout):
+        await asyncio.sleep(timeout_ms / 1000)
+        return
+    try:
+        result = wait_for_timeout(timeout_ms)
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        await asyncio.sleep(timeout_ms / 1000)
+
+
 async def _page_state(page: Any) -> RPAPageState:
     title = ""
     title_fn = getattr(page, "title", None)
     if callable(title_fn):
-        value = title_fn()
-        if inspect.isawaitable(value):
-            value = await value
-        title = str(value or "")
+        try:
+            value = title_fn()
+            if inspect.isawaitable(value):
+                value = await value
+            title = str(value or "")
+        except Exception:
+            title = ""
     return RPAPageState(url=str(getattr(page, "url", "") or ""), title=title)
-
-
-async def _ensure_expected_effect(
-    *,
-    page: Any,
-    instruction: str,
-    plan: Dict[str, Any],
-    result: Dict[str, Any],
-    before: RPAPageState,
-) -> Dict[str, Any]:
-    if not result.get("success"):
-        return result
-
-    if not _normalize_bool(plan.get("allow_empty_output")) and _looks_like_unsuccessful_output(result.get("output")):
-        return {
-            **result,
-            "success": False,
-            "error": "Generated command returned visible error or validation output instead of terminal success evidence.",
-        }
-
-    expected_effect = _expected_effect(plan, instruction)
-    if expected_effect in {"none", "extract"}:
-        result = await _restore_extract_surface_if_needed(page=page, before=before, result=result)
-        return result
-
-    if expected_effect in {"navigate", "mixed"}:
-        after = await _page_state(page)
-        if _url_changed(before.url, after.url):
-            effect = dict(result.get("effect") or {})
-            effect.update({"type": "navigate", "url": after.url, "observed_url_change": True})
-            return {**result, "effect": effect}
-
-        if expected_effect == "mixed":
-            generic_evidence = _generic_effect_evidence(result)
-            if generic_evidence:
-                if _instruction_requires_terminal_write(instruction) and _is_low_information_effect_output(result.get("output")):
-                    return {
-                        **result,
-                        "success": False,
-                        "error": "Generated command stopped at an intermediate state without terminal write/save evidence.",
-                    }
-                effect = dict(result.get("effect") or {})
-                effect.setdefault("type", "mixed")
-                effect["generic_evidence"] = generic_evidence
-                return {**result, "effect": effect}
-
-        target_url = _extract_target_url(result.get("output"), base_url=before.url) or _extract_target_url(
-            plan,
-            base_url=before.url,
-        )
-        if target_url:
-            await page.goto(target_url, wait_until="domcontentloaded")
-            wait_for_load_state = getattr(page, "wait_for_load_state", None)
-            if callable(wait_for_load_state):
-                wait_result = wait_for_load_state("domcontentloaded")
-                if inspect.isawaitable(wait_result):
-                    await wait_result
-            after = await _page_state(page)
-            if _url_changed(before.url, after.url):
-                effect = dict(result.get("effect") or {})
-                effect.update(
-                    {
-                        "type": "navigate",
-                        "url": after.url,
-                        "auto_completed": True,
-                        "source": "output_url",
-                    }
-                )
-                return {**result, "effect": effect}
-
-        return {
-            **result,
-            "success": False,
-            "error": "Expected navigation effect, but the page URL did not change and no target URL was available.",
-        }
-
-    if expected_effect in {"click", "fill"}:
-        effect = result.get("effect")
-        if isinstance(effect, dict) and effect.get("action_performed"):
-            return result
-        output = result.get("output")
-        if isinstance(output, dict) and output.get("action_performed"):
-            output_action_type = str(output.get("action_type") or output.get("type") or "").strip().lower()
-            has_fill_value = expected_effect != "fill" or "filled_value" in output or "value" in output
-            if has_fill_value and (not output_action_type or output_action_type == expected_effect):
-                effect = dict(effect or {})
-                effect.update(
-                    {
-                        "type": expected_effect,
-                        "action_performed": True,
-                        "source": "output_evidence",
-                    }
-                )
-                return {**result, "effect": effect}
-        action_type = str(plan.get("action_type") or "").strip().lower()
-        if action_type == expected_effect:
-            return {**result, "effect": {"type": expected_effect, "action_performed": True}}
-        if expected_effect == "click" and action_type == "run_python":
-            after = await _page_state(page)
-            if _url_changed(before.url, after.url):
-                effect = dict(result.get("effect") or {})
-                effect.update(
-                    {
-                        "type": "click",
-                        "action_performed": True,
-                        "observed_url_change": True,
-                        "url": after.url,
-                    }
-                )
-                return {**result, "effect": effect}
-        if action_type == "run_python" and _run_python_code_contains_effect(plan, expected_effect):
-            generic_evidence = _generic_effect_evidence(result)
-            if generic_evidence:
-                effect = dict(result.get("effect") or {})
-                effect.setdefault("type", expected_effect)
-                effect["action_performed"] = True
-                effect["generic_evidence"] = generic_evidence
-                return {**result, "effect": effect}
-        return {
-            **result,
-            "success": False,
-            "error": f"Expected {expected_effect} effect, but no browser action evidence was produced.",
-        }
-
-    return result
-
-
-def _run_python_code_contains_effect(plan: Dict[str, Any], expected_effect: str) -> bool:
-    code = str(plan.get("code") or "")
-    if expected_effect == "click":
-        return any(token in code for token in (".click(", ".press(", ".check(", ".uncheck(", ".select_option("))
-    if expected_effect == "fill":
-        return any(token in code for token in (".fill(", ".type(", ".press_sequentially(", ".select_option("))
-    return False
-
-
-def _generic_effect_evidence(result: Dict[str, Any]) -> str:
-    effect = result.get("effect")
-    if isinstance(effect, dict) and _normalize_bool(effect.get("action_performed")):
-        return "action_performed"
-
-    signals = result.get("signals")
-    if isinstance(signals, dict) and signals.get("download"):
-        return "download"
-    if isinstance(signals, dict) and signals.get("extract_snapshot"):
-        return "extract_snapshot"
-
-    if _has_non_empty_structured_output(result.get("output")):
-        return "structured_output"
-
-    return ""
-
-
-def _instruction_requires_terminal_write(instruction: str) -> bool:
-    text = str(instruction or "").lower()
-    return _contains_any(
-        text,
-        (
-            "save",
-            "submit",
-            "update",
-            "create",
-            "fill",
-            "保存",
-            "提交",
-            "更新",
-            "创建",
-            "新建",
-            "填写",
-            "填入",
-            "补全",
-        ),
-    )
-
-
-def _is_low_information_effect_output(value: Any) -> bool:
-    meaningful = [
-        text
-        for text in flatten_strings_for_effect(value)
-        if text and not re.fullmatch(r"[-+]?\d+(?:\.\d+)?", text)
-    ]
-    if not meaningful:
-        return True
-    return all(
-        re.fullmatch(r"(?:row_)?count(?:_after_\w+)?|clicked|opened|visible|found|true|false", text.lower())
-        for text in meaningful
-    )
-
-
-def flatten_strings_for_effect(value: Any) -> List[str]:
-    if isinstance(value, str):
-        text = _normalize_visible_text(value)
-        return [text] if text else []
-    if isinstance(value, dict):
-        strings: List[str] = []
-        for key, item in value.items():
-            strings.extend(flatten_strings_for_effect(key))
-            strings.extend(flatten_strings_for_effect(item))
-        return strings
-    if isinstance(value, (list, tuple, set)):
-        strings: List[str] = []
-        for item in value:
-            strings.extend(flatten_strings_for_effect(item))
-        return strings
-    if isinstance(value, bool):
-        return [str(value)]
-    if isinstance(value, (int, float)):
-        return [str(value)]
-    return []
-
-
-def _has_non_empty_structured_output(value: Any) -> bool:
-    if _looks_like_unsuccessful_output(value):
-        return False
-    if isinstance(value, dict):
-        return bool(value)
-    if isinstance(value, (list, tuple, set)):
-        return bool(value)
-    return False
-
-
-def _looks_like_unsuccessful_output(value: Any) -> bool:
-    if not isinstance(value, dict):
-        return False
-    keys = {str(key).strip().lower() for key in value.keys()}
-    if keys & {"error", "errors", "exception", "traceback"}:
-        return True
-    if _contains_nonterminal_value(value):
-        return True
-    return _contains_visible_error_text(value)
-
-
-def _contains_nonterminal_value(value: Any) -> bool:
-    if isinstance(value, bool):
-        return False
-    if isinstance(value, str):
-        text = re.sub(r"[\s_-]+", " ", value).strip().lower()
-        if not text:
-            return False
-        return bool(
-            re.search(
-                r"\b(?:not confirmed|not complete|not completed|incomplete|not ready|"
-                r"not downloaded|not triggered|not saved|not submitted|unconfirmed)\b",
-                text,
-            )
-        )
-    if isinstance(value, dict):
-        for key, item in value.items():
-            key_text = str(key or "").strip().lower()
-            if (
-                isinstance(item, bool)
-                and item is False
-                and any(token in key_text for token in ("download", "trigger", "match", "success", "complete", "saved", "submitted"))
-            ):
-                return True
-            if _contains_nonterminal_value(item):
-                return True
-        return False
-    if isinstance(value, (list, tuple, set)):
-        return any(_contains_nonterminal_value(item) for item in value)
-    return False
-
-
-def _contains_visible_error_text(value: Any) -> bool:
-    if isinstance(value, str):
-        text = re.sub(r"\s+", " ", value).strip().lower()
-        if not text:
-            return False
-        return bool(
-            re.search(
-                r"\b(?:not found|no such|missing|required|invalid|validation failed|"
-                r"failed|failure|error|exception|unable to|cannot|could not|"
-                r"permission denied|unauthorized|forbidden)\b",
-                text,
-            )
-        )
-    if isinstance(value, dict):
-        return any(_contains_visible_error_text(item) for item in value.values())
-    if isinstance(value, (list, tuple, set)):
-        return any(_contains_visible_error_text(item) for item in value)
-    return False
-
-
-def _expected_effect(plan: Dict[str, Any], instruction: str) -> str:
-    action_type = str(plan.get("action_type") or "").strip().lower()
-    if action_type == "extract_snapshot":
-        return "extract"
-
-    explicit = _normalize_expected_effect(plan.get("expected_effect") or plan.get("effect"))
-    if explicit != "extract":
-        return explicit
-
-    if action_type == "goto":
-        return "navigate"
-    if action_type in {"click", "fill"}:
-        return action_type
-
-    text = str(instruction or "").strip().lower()
-    if _contains_any(text, ("打开", "进入", "跳转", "访问", "open", "go to", "goto", "navigate", "visit")):
-        return "navigate"
-    if _contains_any(text, ("点击", "click", "press")):
-        return "click"
-    if _contains_any(text, ("填写", "填入", "输入", "fill", "type into", "enter ")):
-        return "fill"
-    return explicit
-
-
-def _normalize_expected_effect(value: Any) -> str:
-    normalized = str(value or "").strip().lower()
-    return normalized if normalized in {"extract", "navigate", "click", "fill", "mixed", "none"} else "extract"
-
-
-def _should_drain_download_events(plan: Dict[str, Any], code: str) -> bool:
-    action_type = str(plan.get("action_type") or "").strip().lower()
-    if action_type in {"click", "press"}:
-        return True
-    if action_type != "run_python":
-        return False
-    return any(
-        token in code
-        for token in (
-            ".click(",
-            ".press(",
-            ".check(",
-            ".uncheck(",
-            ".select_option(",
-            ".set_input_files(",
-        )
-    )
-
-
-def _merge_runtime_ai_signal(signals: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
-    if not _normalize_bool(plan.get("preserve_runtime_ai")):
-        return signals
-    runtime_ai = signals.get("runtime_ai") if isinstance(signals.get("runtime_ai"), dict) else {}
-    reason = str(plan.get("semantic_intent") or runtime_ai.get("reason") or "semantic_candidate_selection").strip()
-    signals["runtime_ai"] = {
-        **runtime_ai,
-        "preserve": True,
-        "reason": reason or "semantic_candidate_selection",
-    }
-    return signals
 
 
 def _normalize_bool(value: Any) -> bool:
@@ -2646,101 +3439,6 @@ def _normalize_bool(value: Any) -> bool:
 
 def _contains_any(text: str, patterns: tuple[str, ...]) -> bool:
     return any(pattern in text for pattern in patterns)
-
-
-async def _restore_extract_surface_if_needed(
-    *,
-    page: Any,
-    before: RPAPageState,
-    result: Dict[str, Any],
-) -> Dict[str, Any]:
-    after = await _page_state(page)
-    if not before.url or not _url_changed(before.url, after.url):
-        return result
-    if not _is_machine_endpoint_url(after.url, before_url=before.url):
-        return result
-
-    restore_url = _last_user_facing_url(result.get("navigation_history"), before_url=before.url) or before.url
-    await page.goto(restore_url, wait_until="domcontentloaded")
-    await _wait_for_load_state(page, "domcontentloaded")
-    restored = await _page_state(page)
-    effect = dict(result.get("effect") or {})
-    effect.update(
-        {
-            "type": "extract",
-            "restored_after_transient_endpoint": True,
-            "transient_url": after.url,
-            "url": restored.url,
-        }
-    )
-    return {**result, "effect": effect}
-
-
-async def _wait_for_load_state(page: Any, state: str) -> None:
-    wait_for_load_state = getattr(page, "wait_for_load_state", None)
-    if not callable(wait_for_load_state):
-        return
-    wait_result = wait_for_load_state(state)
-    if inspect.isawaitable(wait_result):
-        await wait_result
-
-
-def _url_changed(before_url: str, after_url: str) -> bool:
-    before = str(before_url or "").rstrip("/")
-    after = str(after_url or "").rstrip("/")
-    return bool(after) and before != after
-
-
-def _is_machine_endpoint_url(url: str, *, before_url: str = "") -> bool:
-    parsed = urlparse(str(url or ""))
-    if not parsed.scheme or not parsed.netloc:
-        return False
-    host = parsed.netloc.lower()
-    path = parsed.path.lower()
-    if host.startswith("api.") or ".api." in host:
-        return True
-    if "/api/" in path or path.startswith("/api/"):
-        return True
-    if path.endswith((".json", ".xml")):
-        return True
-
-    before_host = urlparse(str(before_url or "")).netloc.lower()
-    return bool(before_host and host != before_host and host.startswith(("raw.", "gist.")))
-
-
-def _last_user_facing_url(history: Any, *, before_url: str = "") -> str:
-    if not isinstance(history, list):
-        return ""
-    for item in reversed(history):
-        url = str(item or "").strip()
-        if url and not _is_machine_endpoint_url(url, before_url=before_url):
-            return url
-    return ""
-
-
-def _extract_target_url(value: Any, *, base_url: str = "") -> str:
-    if isinstance(value, str):
-        return _normalize_target_url(value, base_url=base_url)
-    if isinstance(value, dict):
-        for key in ("target_url", "url", "href", "repo_url", "value"):
-            target_url = _extract_target_url(value.get(key), base_url=base_url)
-            if target_url:
-                return target_url
-        output_url = _extract_target_url(value.get("output"), base_url=base_url)
-        if output_url:
-            return output_url
-    return ""
-
-
-def _normalize_target_url(value: str, *, base_url: str = "") -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    if text.startswith(("http://", "https://")):
-        return text
-    if text.startswith("/") and base_url:
-        return urljoin(base_url, text)
-    return ""
 
 
 def _extract_primary_locator_from_code(code: str) -> Dict[str, Any]:

@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from typing import Dict, Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 import websockets
 from websockets.exceptions import ConnectionClosed
@@ -49,7 +49,8 @@ class StartSessionRequest(BaseModel):
 
 
 class GenerateRequest(BaseModel):
-    params: Dict[str, Any] = {}
+    params: Dict[str, Any] = Field(default_factory=dict)
+    setup_navigation: list[str] = Field(default_factory=list)
 
 
 class DeleteTimelineItemRequest(BaseModel):
@@ -749,6 +750,7 @@ async def test_script(
             session_manager=rpa_manager,
             kwargs=test_kwargs,
             downloads_dir=downloads_dir,
+            setup_navigation=request.setup_navigation,
             pw_loop_runner=pw_loop_runner,
         )
     else:
@@ -768,6 +770,7 @@ async def test_script(
             session_manager=rpa_manager,
             kwargs=docker_kwargs,
             downloads_dir=downloads_dir,
+            setup_navigation=request.setup_navigation,
         )
 
     # Extract failed step candidates for locator retry
