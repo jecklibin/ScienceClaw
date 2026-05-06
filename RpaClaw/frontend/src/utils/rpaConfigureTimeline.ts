@@ -17,12 +17,15 @@ export interface RpaConfigureStep {
   configurable?: boolean;
   stepId?: string;
   traceId?: string;
+  diagnosticId?: string;
 }
 
 export interface RpaRecordingDiagnosticItem {
   id: string;
   stepId: string;
   stepIndex: number | null;
+  traceId?: string;
+  diagnosticId?: string;
   action: string;
   description: string;
   failureReason: string;
@@ -34,6 +37,27 @@ export interface RpaRecordingDiagnosticItem {
   url?: string;
   source: 'record';
   configurable: boolean;
+}
+
+export interface RpaTimelineProjectionItem {
+  id: string;
+  kind: 'trace' | 'diagnostic';
+  trace_id?: string | null;
+  diagnostic_id?: string | null;
+  source?: string;
+  trace_type?: string | null;
+  action: string;
+  title: string;
+  summary: string;
+  url?: string;
+  frame_path?: string[];
+  locator?: any;
+  locator_candidates?: any[];
+  validation?: { status?: string; details?: string };
+  editable?: boolean;
+  deletable?: boolean;
+  raw_trace?: any;
+  raw_diagnostic?: any;
 }
 
 const TRACE_LABELS: Record<string, string> = {
@@ -82,6 +106,10 @@ const normalizeCandidates = (candidates: any[], fallbackKind: string) => (
 
 const normalizeTraceCandidates = (trace: any) => (
   normalizeCandidates(trace?.locator_candidates, formatRpaTraceType(trace?.trace_type))
+);
+
+export const hasRpaTimelineProjection = (session: any): boolean => (
+  Array.isArray(session?.timeline)
 );
 
 const buildAcceptedActionCandidates = (action: any) => {
@@ -188,7 +216,35 @@ const mergeRecordedActionsAndTraces = (session: any): RpaConfigureStep[] => {
   return merged;
 };
 
+export const mapRpaTimelineProjection = (session: any): RpaConfigureStep[] => {
+  const timeline = Array.isArray(session?.timeline) ? session.timeline : [];
+  return timeline.map((item: RpaTimelineProjectionItem, index: number) => ({
+    id: item.id || `timeline-${index}`,
+    traceId: item.trace_id || undefined,
+    diagnosticId: item.diagnostic_id || undefined,
+    action: item.action || 'trace',
+    target: item.locator || null,
+    frame_path: Array.isArray(item.frame_path) ? item.frame_path : [],
+    locator_candidates: normalizeCandidates(item.locator_candidates || [], item.action || 'trace'),
+    validation: item.validation || {
+      status: item.kind === 'diagnostic' ? 'broken' : 'ok',
+      details: item.trace_type || item.kind,
+    },
+    value: item.raw_trace?.value,
+    description: item.title || item.summary || item.action,
+    label: item.summary || item.action,
+    sensitive: false,
+    url: item.url || '',
+    source: item.source === 'ai' ? 'ai' : 'record',
+    configurable: !!item.editable,
+  }));
+};
+
 export const mapRpaConfigureDisplaySteps = (session: any): RpaConfigureStep[] => {
+  if (hasRpaTimelineProjection(session)) {
+    return mapRpaTimelineProjection(session);
+  }
+
   const recordedActions = Array.isArray(session?.recorded_actions) ? session.recorded_actions : [];
   if (recordedActions.length > 0) {
     return mergeRecordedActionsAndTraces(session);
@@ -207,6 +263,33 @@ export const getLegacyRpaSteps = (session: any): RpaConfigureStep[] => (
 );
 
 export const getManualRecordingDiagnostics = (session: any): RpaRecordingDiagnosticItem[] => {
+  if (hasRpaTimelineProjection(session)) {
+    return (session.timeline as RpaTimelineProjectionItem[])
+      .filter((item) => item.kind === 'diagnostic')
+      .map((item, index) => {
+        const action = item.action || 'diagnostic';
+        const details = item.validation?.details || item.summary || item.trace_type || 'trace diagnostic';
+        return {
+          id: item.diagnostic_id || item.id || `diagnostic-${index}`,
+          stepId: '',
+          stepIndex: null,
+          traceId: item.trace_id || undefined,
+          diagnosticId: item.diagnostic_id || undefined,
+          action,
+          description: item.title || item.summary || `${action} requires repair`,
+          failureReason: details,
+          locator_candidates: normalizeCandidates(item.locator_candidates || [], action),
+          validation: {
+            status: item.validation?.status || 'broken',
+            details: formatDiagnosticReason(details),
+          },
+          url: item.url || '',
+          source: 'record',
+          configurable: Boolean(item.trace_id && item.locator_candidates?.length),
+        };
+      });
+  }
+
   const diagnostics = Array.isArray(session?.recording_diagnostics) ? session.recording_diagnostics : [];
   const legacySteps = getLegacyRpaSteps(session);
   const stepIndexes = new Map<string, number>();

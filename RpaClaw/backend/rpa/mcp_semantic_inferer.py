@@ -10,7 +10,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from backend.config import settings
 from backend.deepagent.engine import get_llm_model
-from backend.storage import get_repository
+from backend.models import resolve_default_model_config
 
 
 _SENSITIVE_PARAM_RE = re.compile(
@@ -76,35 +76,15 @@ class RpaMcpSemanticInferer:
             return self._model_client, "injected"
         if not settings.rpa_mcp_semantic_inference:
             return None, ""
+        model_config = await self._resolve_configured_model(user_id)
+        if model_config:
+            return get_llm_model(config=model_config, max_tokens_override=2000, streaming=False), str(model_config.get("model_name") or "")
         if settings.model_ds_api_key:
             return get_llm_model(config=None, max_tokens_override=2000, streaming=False), settings.model_ds_name
-        model_config = await self._resolve_configured_model(user_id)
-        if not model_config:
-            return None, ""
-        return get_llm_model(config=model_config, max_tokens_override=2000, streaming=False), str(model_config.get("model_name") or "")
+        return None, ""
 
     async def _resolve_configured_model(self, user_id: str) -> dict[str, Any] | None:
-        filter_doc: dict[str, Any] = {
-            "is_active": True,
-            "api_key": {"$nin": ["", None]},
-        }
-        if user_id:
-            filter_doc["$or"] = [{"is_system": True}, {"user_id": user_id}]
-        docs = await get_repository("models").find_many(
-            filter_doc,
-            sort=[("created_at", -1)],
-            limit=1,
-        )
-        doc = docs[0] if docs else None
-        if not doc:
-            return None
-        return {
-            "provider": doc.get("provider") or "",
-            "model_name": doc.get("model_name") or "",
-            "base_url": doc.get("base_url"),
-            "api_key": doc.get("api_key"),
-            "context_window": doc.get("context_window"),
-        }
+        return await resolve_default_model_config(user_id or None)
 
     def _messages(self, requested_name: str, requested_description: str, context: dict[str, Any], fallback_params: dict[str, Any]) -> list[Any]:
         return [

@@ -1,6 +1,6 @@
 import { apiClient, ApiResponse, createSSEConnection, SSECallbacks } from './client';
 import type { FileInfo } from './file';
-import { ListSessionItem, SessionStatus, GetSessionResponse, SkillItem, ExternalSkillItem, ExternalToolItem } from '../types/response';
+import type { ListSessionItem, GetSessionResponse, ExternalSkillItem, ExternalToolItem } from '../types/response';
 
 // Re-export or alias if needed for backward compatibility, 
 // but prefer using types from response.ts to ensure consistency.
@@ -145,6 +145,23 @@ export interface RecordedSkillDetail {
 
 export async function getSkillDetail(skillName: string): Promise<RecordedSkillDetail> {
   const response = await apiClient.get<ApiResponse<RecordedSkillDetail>>(`/sessions/skills/${encodeURIComponent(skillName)}/detail`);
+  return response.data.data;
+}
+
+export interface UpdateSkillOverviewPayload {
+  name: string;
+  description: string;
+  params: Record<string, unknown>;
+}
+
+export async function updateSkillOverview(
+  skillName: string,
+  payload: UpdateSkillOverviewPayload,
+): Promise<{skill_name: string, renamed: boolean}> {
+  const response = await apiClient.put<ApiResponse<{skill_name: string, renamed: boolean}>>(
+    `/sessions/skills/${encodeURIComponent(skillName)}/overview`,
+    payload,
+  );
   return response.data.data;
 }
 

@@ -77,10 +77,30 @@ class RPATab(BaseModel):
     status: str = "open"
 
 
+class RPASkillConfigParam(BaseModel):
+    original_value: str = ""
+    default_value: Optional[str] = None
+    enabled: bool = True
+    sensitive: bool = False
+    credential_id: str = ""
+    type: str = "string"
+    description: str = ""
+    required: bool = False
+
+
+class RPASkillConfigDraft(BaseModel):
+    skill_name: str = ""
+    description: str = ""
+    params: Dict[str, RPASkillConfigParam] = Field(default_factory=dict)
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+
 class RPASession(BaseModel):
     id: str
     user_id: str
     start_time: datetime = Field(default_factory=datetime.now)
+    last_activity_at: datetime = Field(default_factory=datetime.now)
+    stopped_at: Optional[datetime] = None
     status: str = "recording"  # recording, stopped, testing, saved
     steps: List[RPAStep] = Field(default_factory=list)
     recorded_actions: List[ManualRecordedAction] = Field(default_factory=list)
@@ -88,6 +108,8 @@ class RPASession(BaseModel):
     traces: List[RPAAcceptedTrace] = Field(default_factory=list)
     trace_diagnostics: List[RPATraceDiagnostic] = Field(default_factory=list)
     runtime_results: RPARuntimeResults = Field(default_factory=RPARuntimeResults)
+    skill_config_draft: Optional[RPASkillConfigDraft] = None
+    llm_model_config: Optional[Dict[str, Any]] = None
     pending_download_events: List[Dict[str, Any]] = Field(default_factory=list)
     sandbox_session_id: str
     paused: bool = False  # pause event recording during AI execution
@@ -121,6 +143,65 @@ class RPASessionManager:
         self._pending_hover_candidates: Dict[str, List[Dict[str, Any]]] = {}
         self._pending_event_counts: Dict[str, int] = {}
         self._pending_event_idle: Dict[str, asyncio.Event] = {}
+
+    def touch_session(self, session_id: str) -> None:
+        session = self.sessions.get(session_id)
+        if session:
+            session.last_activity_at = datetime.now()
+
+    def update_skill_config_draft(
+        self,
+        session_id: str,
+        draft: RPASkillConfigDraft,
+    ) -> RPASkillConfigDraft:
+        session = self.sessions.get(session_id)
+        if not session:
+            raise ValueError(f"Session {session_id} not found")
+        draft.updated_at = datetime.now()
+        session.skill_config_draft = draft
+        self.touch_session(session_id)
+        return draft
+
+    async def cleanup_expired_sessions(self, max_idle_seconds: int) -> List[str]:
+        now = datetime.now()
+        removed: List[str] = []
+        for session_id, session in list(self.sessions.items()):
+            if session.status == "saved":
+                continue
+            idle_seconds = (now - session.last_activity_at).total_seconds()
+            if idle_seconds <= max_idle_seconds:
+                continue
+            await self._dispose_session_resources(session_id)
+            self.sessions.pop(session_id, None)
+            self.ws_connections.pop(session_id, None)
+            removed.append(session_id)
+        return removed
+
+    async def _dispose_session_resources(self, session_id: str) -> None:
+        try:
+            await asyncio.wait_for(self.wait_for_pending_events(session_id), timeout=2.0)
+        except Exception as e:
+            logger.warning(f"[RPA] Error waiting for pending events during cleanup: {e}")
+
+        context = self._contexts.pop(session_id, None)
+        self.detach_context(session_id)
+        if context:
+            try:
+                await context.close()
+            except Exception as e:
+                logger.warning(f"[RPA] Error closing context during cleanup: {e}")
+
+        connections = list(self.ws_connections.get(session_id, []) or [])
+        for ws in connections:
+            close = getattr(ws, "close", None)
+            if not callable(close):
+                continue
+            try:
+                result = close()
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as e:
+                logger.warning(f"[RPA] Error closing websocket during cleanup: {e}")
 
     def attach_context(self, session_id: str, context: BrowserContext):
         self._contexts[session_id] = context
@@ -643,6 +724,8 @@ class RPASessionManager:
         await self.wait_for_pending_events(session_id)
         if session_id in self.sessions:
             self.sessions[session_id].status = "stopped"
+            self.sessions[session_id].stopped_at = datetime.now()
+            self.touch_session(session_id)
 
         context = self._contexts.pop(session_id, None)
         self.detach_context(session_id)
@@ -698,6 +781,18 @@ class RPASessionManager:
         if deleted:
             self._rebuild_runtime_results(session)
         return deleted
+
+    async def delete_trace_diagnostic(self, session_id: str, diagnostic_id: str) -> bool:
+        session = self.sessions.get(session_id)
+        if not session or not diagnostic_id:
+            return False
+        original_count = len(session.trace_diagnostics)
+        session.trace_diagnostics = [
+            diagnostic
+            for diagnostic in session.trace_diagnostics
+            if diagnostic.diagnostic_id != diagnostic_id
+        ]
+        return len(session.trace_diagnostics) != original_count
 
     @staticmethod
     def _rebuild_runtime_results(session: RPASession) -> None:
@@ -1089,6 +1184,44 @@ class RPASessionManager:
         await self._record_manual_trace_for_step(session_id, step)
         await self._broadcast_step(session_id, step)
         return step
+
+    async def select_trace_locator_candidate(
+        self,
+        session_id: str,
+        trace_id: str,
+        candidate_index: int,
+    ) -> RPAAcceptedTrace:
+        session = self.sessions.get(session_id)
+        if not session or not trace_id:
+            raise ValueError("Invalid trace id")
+
+        trace = next((item for item in session.traces if item.trace_id == trace_id), None)
+        if trace is None:
+            raise ValueError("Invalid trace id")
+        if candidate_index < 0 or candidate_index >= len(trace.locator_candidates):
+            raise ValueError("Invalid locator candidate index")
+
+        selected_candidate = trace.locator_candidates[candidate_index]
+        locator = self._resolve_candidate_locator(selected_candidate)
+
+        for index, candidate in enumerate(trace.locator_candidates):
+            candidate["selected"] = index == candidate_index
+
+        selected_candidate["locator"] = locator
+        trace.validation = dict(trace.validation or {})
+        trace.validation["selected_candidate_index"] = candidate_index
+        trace.validation["selected_candidate_kind"] = selected_candidate.get("kind", "")
+        strict_match_count = selected_candidate.get("strict_match_count")
+        if isinstance(strict_match_count, int):
+            trace.validation["status"] = "ok" if strict_match_count == 1 else "fallback"
+        if selected_candidate.get("reason"):
+            trace.validation["details"] = selected_candidate["reason"]
+
+        if trace.dataflow and trace.dataflow.target_field:
+            trace.dataflow.target_field.locator_candidates = [
+                dict(candidate) for candidate in trace.locator_candidates
+            ]
+        return trace
 
     def pause_recording(self, session_id: str):
         """Pause event recording (used during AI execution)."""

@@ -6,7 +6,7 @@ import json
 import asyncio
 from types import SimpleNamespace
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -192,6 +192,58 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
             self.session.runtime_results.resolve_ref("selected_project.url"),
             "https://github.com/owner/repo",
         )
+
+    async def test_session_keeps_skill_config_draft_per_session(self):
+        first = MANAGER_MODULE.RPASession(id="s1", user_id="u1", sandbox_session_id="box-1")
+        second = MANAGER_MODULE.RPASession(id="s2", user_id="u1", sandbox_session_id="box-2")
+        self.manager.sessions[first.id] = first
+        self.manager.sessions[second.id] = second
+
+        draft = MANAGER_MODULE.RPASkillConfigDraft(
+            skill_name="First Skill",
+            description="Only for session one",
+            params={
+                "query": {
+                    "original_value": "recorded",
+                    "default_value": "configured",
+                    "sensitive": False,
+                    "credential_id": "",
+                }
+            },
+        )
+
+        self.manager.update_skill_config_draft("s1", draft)
+
+        self.assertEqual(self.manager.sessions["s1"].skill_config_draft, draft)
+        self.assertIsNone(self.manager.sessions["s2"].skill_config_draft)
+
+    async def test_manager_cleans_expired_unsaved_sessions(self):
+        expired = MANAGER_MODULE.RPASession(id="expired", user_id="u1", sandbox_session_id="box-1")
+        active = MANAGER_MODULE.RPASession(id="active", user_id="u1", sandbox_session_id="box-2")
+        expired.last_activity_at = datetime.now() - timedelta(hours=3)
+        active.last_activity_at = datetime.now()
+        self.manager.sessions[expired.id] = expired
+        self.manager.sessions[active.id] = active
+
+        removed = await self.manager.cleanup_expired_sessions(max_idle_seconds=3600)
+
+        self.assertEqual(removed, ["expired"])
+        self.assertNotIn("expired", self.manager.sessions)
+        self.assertIn("active", self.manager.sessions)
+
+    async def test_manager_cleanup_closes_expired_session_context(self):
+        expired = MANAGER_MODULE.RPASession(id="expired", user_id="u1", sandbox_session_id="box-1")
+        expired.last_activity_at = datetime.now() - timedelta(hours=3)
+        context = _FakeContext()
+        self.manager.sessions[expired.id] = expired
+        self.manager.attach_context(expired.id, context)
+
+        removed = await self.manager.cleanup_expired_sessions(max_idle_seconds=3600)
+
+        self.assertEqual(removed, ["expired"])
+        self.assertTrue(context.closed)
+        self.assertNotIn("expired", self.manager.sessions)
+        self.assertNotIn("expired", self.manager._contexts)
 
     async def test_delete_trace_rebuilds_runtime_results_from_remaining_traces(self):
         deleted_trace = TRACE_MODELS_MODULE.RPAAcceptedTrace(

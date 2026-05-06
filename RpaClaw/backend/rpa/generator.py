@@ -731,7 +731,11 @@ class StepExecutionError(Exception):
                 if param_info.get("sensitive"):
                     # No default value for sensitive params
                     return f"kwargs['{param_name}']"
-                return f"kwargs.get('{param_name}', '{value}')"
+                default_value = param_info.get("default_value")
+                if default_value in (None, ""):
+                    default_value = value
+                safe_default = str(default_value).replace("'", "\\'")
+                return f"kwargs.get('{param_name}', '{safe_default}')"
         safe = value.replace("'", "\\'")
         return f"'{safe}'"
 

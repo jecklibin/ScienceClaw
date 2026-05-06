@@ -1,11 +1,4 @@
 ﻿servers:
-  - id: pubmed
-    name: PubMed MCP
-    description: PubMed search access
-    transport: streamable_http
-    enabled: true
-    default_enabled: true
-    url: http://mcp-pubmed:8080/mcp
     # Optional HTTP headers for streamable_http/sse transports.
     # `http_headers` and `http_header` are accepted aliases and are normalized
     # to `headers` by the backend.

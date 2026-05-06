@@ -471,9 +471,9 @@ class TraceSkillCompiler:
             "                return value",
             "    raise RuntimeError(f\"Text pattern value not found: {spec}\")",
             "",
-            "async def _execute_runtime_ai_instruction(page, results, instruction, output_key):",
+            "async def _execute_runtime_ai_instruction(page, results, kwargs, instruction, output_key):",
             "    from backend.rpa.recording_runtime_agent import RecordingRuntimeAgent",
-            "    agent = RecordingRuntimeAgent()",
+            "    agent = RecordingRuntimeAgent(model_config=kwargs.get('_model_config'))",
             "    outcome = await agent.run(page=page, instruction=instruction, runtime_results=results)",
             "    if not outcome.success:",
             "        detail = '; '.join(str(item.message) for item in outcome.diagnostics) or outcome.message",
@@ -1111,7 +1111,7 @@ class TraceSkillCompiler:
         return [
             "",
             f"    # trace {index}: runtime semantic instruction",
-            f"    _result = await _execute_runtime_ai_instruction(current_page, _results, {instruction!r}, {key!r})",
+            f"    _result = await _execute_runtime_ai_instruction(current_page, _results, kwargs, {instruction!r}, {key!r})",
         ]
 
     def _is_navigation_only_ai_trace(self, trace: RPAAcceptedTrace) -> bool:

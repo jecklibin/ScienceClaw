@@ -13,7 +13,7 @@ from websockets.exceptions import ConnectionClosed
 import httpx
 from fastapi.responses import Response as FastAPIResponse
 
-from backend.rpa.manager import rpa_manager
+from backend.rpa.manager import rpa_manager, RPASkillConfigDraft
 from backend.rpa.generator import PlaywrightGenerator
 from backend.rpa.executor import ScriptExecutor
 from backend.rpa.skill_exporter import SkillExporter
@@ -25,9 +25,13 @@ from backend.rpa.trace_skill_compiler import TraceSkillCompiler
 from backend.rpa.mcp_step_projection import session_to_mcp_steps
 from backend.rpa.cdp_connector import get_cdp_connector
 from backend.rpa.screencast import SessionScreencastController
-from backend.user.dependencies import get_current_user, User
+from backend.user.dependencies import (
+    get_current_user,
+    get_user_from_session_id,
+    User,
+)
 from backend.config import settings
-from backend.models import get_model_config
+from backend.models import get_model_config, resolve_default_model_config
 from backend.storage import get_repository
 from backend.credential.vault import inject_credentials
 
@@ -84,6 +88,10 @@ class PromoteLocatorRequest(BaseModel):
     candidate_index: int
 
 
+class SkillConfigDraftRequest(RPASkillConfigDraft):
+    pass
+
+
 def _generate_session_script(session, params: Dict[str, Any], *, test_mode: bool = False) -> str:
     traces_for_compile = _session_traces_for_compile(session)
     if traces_for_compile:
@@ -100,6 +108,11 @@ def _generate_session_script(session, params: Dict[str, Any], *, test_mode: bool
         is_local=(settings.storage_backend == "local"),
         test_mode=test_mode,
     )
+
+
+def _session_model_config(session) -> dict | None:
+    model_config = getattr(session, "llm_model_config", None)
+    return model_config if isinstance(model_config, dict) and model_config else None
 
 
 def _model_dump_json(value: Any) -> Any:
@@ -348,36 +361,16 @@ async def _get_ws_user(websocket: WebSocket) -> User | None:
 
     Browser WebSocket APIs cannot attach custom Authorization headers in the
     same way axios does, so we accept a bearer token via query param as a
-    fallback and keep the existing local-mode shortcut.
+    fallback and keep the explicit no-auth local shortcut.
     """
-    if settings.storage_backend == "local":
-        return User(id="local_admin", username="admin", role="admin")
-
     if getattr(settings, "auth_provider", "local") == "none":
-        return User(id="anonymous", username="Anonymous", role="user")
+        return await get_current_user(websocket)  # type: ignore[arg-type]
 
     session_id = (
         websocket.query_params.get("token")
         or websocket.cookies.get(settings.session_cookie)
     )
-    if not session_id:
-        return None
-
-    repo = get_repository("user_sessions")
-    session_doc = await repo.find_one({"_id": session_id})
-    if not session_doc:
-        return None
-
-    import time
-    if session_doc.get("expires_at", 0) < time.time():
-        await repo.delete_one({"_id": session_id})
-        return None
-
-    return User(
-        id=str(session_doc["user_id"]),
-        username=session_doc["username"],
-        role=session_doc.get("role", "user"),
-    )
+    return await get_user_from_session_id(session_id)
 
 
 async def _get_http_user(request: Request) -> User | None:
@@ -386,34 +379,14 @@ async def _get_http_user(request: Request) -> User | None:
     This mirrors websocket auth so iframe-based noVNC pages can use either
     the session cookie or a `token` query param.
     """
-    if settings.storage_backend == "local":
-        return User(id="local_admin", username="admin", role="admin")
-
     if getattr(settings, "auth_provider", "local") == "none":
-        return User(id="anonymous", username="Anonymous", role="user")
+        return await get_current_user(request)
 
     session_id = (
         request.query_params.get("token")
         or request.cookies.get(settings.session_cookie)
     )
-    if not session_id:
-        return None
-
-    repo = get_repository("user_sessions")
-    session_doc = await repo.find_one({"_id": session_id})
-    if not session_doc:
-        return None
-
-    import time
-    if session_doc.get("expires_at", 0) < time.time():
-        await repo.delete_one({"_id": session_id})
-        return None
-
-    return User(
-        id=str(session_doc["user_id"]),
-        username=session_doc["username"],
-        role=session_doc.get("role", "user"),
-    )
+    return await get_user_from_session_id(session_id)
 
 
 def _get_sandbox_vnc_ws_url() -> str:
@@ -499,21 +472,9 @@ async def _resolve_user_model_config(user_id: str, model_config_id: str | None =
             raise HTTPException(status_code=403, detail="Cannot use this model")
         return model_config.model_dump()
 
-    # Try user's own active model first, then system models
-    docs = await get_repository("models").find_many(
-        {"$or": [{"user_id": user_id}, {"is_system": True}], "is_active": True, "api_key": {"$nin": ["", None]}},
-        sort=[("is_system", 1), ("updated_at", -1)],  # user models first
-        limit=1,
-    )
-    doc = docs[0] if docs else None
-    if doc:
-        return {
-            "model_name": doc.get("model_name"),
-            "base_url": doc.get("base_url"),
-            "api_key": doc.get("api_key"),
-            "context_window": doc.get("context_window"),
-            "provider": doc.get("provider", ""),
-        }
+    model_config = await resolve_default_model_config(user_id)
+    if model_config:
+        return model_config
     # Fall back to env defaults
     if (getattr(settings, "model_ds_api_key", None) or "").strip():
         return None  # get_llm_model(config=None) uses env defaults
@@ -536,6 +497,17 @@ async def start_rpa_session(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/sessions/cleanup")
+async def cleanup_rpa_sessions(
+    max_idle_seconds: int = 7200,
+    current_user: User = Depends(get_current_user),
+):
+    if getattr(current_user, "role", "") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    removed = await rpa_manager.cleanup_expired_sessions(max_idle_seconds=max_idle_seconds)
+    return {"status": "success", "removed": removed}
+
+
 @router.get("/session/{session_id}")
 async def get_rpa_session(
     session_id: str,
@@ -546,7 +518,43 @@ async def get_rpa_session(
         raise HTTPException(status_code=404, detail="Session not found")
     if session.user_id != str(current_user.id):
         raise HTTPException(status_code=403, detail="Not authorized")
+    rpa_manager.touch_session(session_id)
     return {"status": "success", "session": session}
+
+
+@router.get("/session/{session_id}/skill-config-draft")
+async def get_skill_config_draft(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    session = await rpa_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _ensure_session_owner(session, current_user)
+    rpa_manager.touch_session(session_id)
+    return {
+        "status": "success",
+        "draft": session.skill_config_draft.model_dump(mode="json")
+        if session.skill_config_draft
+        else None,
+    }
+
+
+@router.put("/session/{session_id}/skill-config-draft")
+async def update_skill_config_draft(
+    session_id: str,
+    request: SkillConfigDraftRequest,
+    current_user: User = Depends(get_current_user),
+):
+    session = await rpa_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _ensure_session_owner(session, current_user)
+    draft = rpa_manager.update_skill_config_draft(session_id, request)
+    return {
+        "status": "success",
+        "draft": draft.model_dump(mode="json"),
+    }
 
 
 @router.get("/session/{session_id}/tabs")
@@ -559,6 +567,7 @@ async def list_rpa_tabs(
         raise HTTPException(status_code=404, detail="Session not found")
     if session.user_id != str(current_user.id):
         raise HTTPException(status_code=403, detail="Not authorized")
+    rpa_manager.touch_session(session_id)
     return {
         "status": "success",
         "tabs": rpa_manager.list_tabs(session_id),
@@ -577,6 +586,7 @@ async def activate_rpa_tab(
         raise HTTPException(status_code=404, detail="Session not found")
     if session.user_id != str(current_user.id):
         raise HTTPException(status_code=403, detail="Not authorized")
+    rpa_manager.touch_session(session_id)
     try:
         result = await rpa_manager.activate_tab(session_id, tab_id, source="user")
     except ValueError as exc:
@@ -600,6 +610,7 @@ async def navigate_rpa_session(
         raise HTTPException(status_code=404, detail="Session not found")
     if session.user_id != str(current_user.id):
         raise HTTPException(status_code=403, detail="Not authorized")
+    rpa_manager.touch_session(session_id)
     try:
         result = await rpa_manager.navigate_active_tab(session_id, request.url)
     except ValueError as exc:
@@ -622,6 +633,7 @@ async def stop_rpa_session(
         raise HTTPException(status_code=404, detail="Session not found")
     if session.user_id != str(current_user.id):
         raise HTTPException(status_code=403, detail="Not authorized")
+    rpa_manager.touch_session(session_id)
     await rpa_manager.stop_session(session_id)
     return {"status": "success", "session": session}
 
@@ -637,6 +649,7 @@ async def delete_step(
         raise HTTPException(status_code=404, detail="Session not found")
     if session.user_id != str(current_user.id):
         raise HTTPException(status_code=403, detail="Not authorized")
+    rpa_manager.touch_session(session_id)
     success = await rpa_manager.delete_step(session_id, step_index)
     if not success:
         raise HTTPException(status_code=400, detail="Invalid step index")
@@ -654,6 +667,7 @@ async def delete_timeline_item(
         raise HTTPException(status_code=404, detail="Session not found")
     if session.user_id != str(current_user.id):
         raise HTTPException(status_code=403, detail="Not authorized")
+    rpa_manager.touch_session(session_id)
 
     if request.kind == "manual_step":
         success = await rpa_manager.delete_step_by_id(session_id, request.step_id or "")
@@ -664,6 +678,44 @@ async def delete_timeline_item(
 
     if not success:
         raise HTTPException(status_code=400, detail="Invalid timeline item")
+    return {"status": "success"}
+
+
+@router.delete("/session/{session_id}/trace/{trace_id}")
+async def delete_trace_item(
+    session_id: str,
+    trace_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    session = await rpa_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.user_id != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    rpa_manager.touch_session(session_id)
+
+    success = await rpa_manager.delete_trace(session_id, trace_id)
+    if not success:
+        raise HTTPException(status_code=400, detail="Invalid trace")
+    return {"status": "success"}
+
+
+@router.delete("/session/{session_id}/diagnostic/{diagnostic_id}")
+async def delete_diagnostic_item(
+    session_id: str,
+    diagnostic_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    session = await rpa_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.user_id != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    rpa_manager.touch_session(session_id)
+
+    success = await rpa_manager.delete_trace_diagnostic(session_id, diagnostic_id)
+    if not success:
+        raise HTTPException(status_code=400, detail="Invalid diagnostic")
     return {"status": "success"}
 
 
@@ -679,6 +731,7 @@ async def promote_step_locator(
         raise HTTPException(status_code=404, detail="Session not found")
     if session.user_id != str(current_user.id):
         raise HTTPException(status_code=403, detail="Not authorized")
+    rpa_manager.touch_session(session_id)
 
     try:
         step = await rpa_manager.select_step_locator_candidate(
@@ -692,6 +745,32 @@ async def promote_step_locator(
     return {"status": "success", "step": step}
 
 
+@router.post("/session/{session_id}/trace/{trace_id}/locator")
+async def promote_trace_locator(
+    session_id: str,
+    trace_id: str,
+    request: PromoteLocatorRequest,
+    current_user: User = Depends(get_current_user),
+):
+    session = await rpa_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.user_id != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    rpa_manager.touch_session(session_id)
+
+    try:
+        trace = await rpa_manager.select_trace_locator_candidate(
+            session_id,
+            trace_id,
+            request.candidate_index,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {"status": "success", "trace": trace}
+
+
 @router.post("/session/{session_id}/generate")
 async def generate_script(
     session_id: str,
@@ -703,6 +782,7 @@ async def generate_script(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     _ensure_session_owner(session, current_user)
+    rpa_manager.touch_session(session_id)
 
     _ensure_no_unresolved_manual_diagnostics(session)
     script = _generate_session_script(session, request.params)
@@ -720,6 +800,7 @@ async def test_script(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     _ensure_session_owner(session, current_user)
+    rpa_manager.touch_session(session_id)
 
     _ensure_no_unresolved_manual_diagnostics(session)
     steps = [step.model_dump() for step in session.steps]
@@ -738,6 +819,9 @@ async def test_script(
     # 本地模式：通过 pw_loop_runner 确保 Playwright 操作在正确的事件循环里执行
     if settings.storage_backend == "local":
         test_kwargs: Dict[str, Any] = {"_downloads_dir": downloads_dir}
+        model_config = _session_model_config(session)
+        if model_config:
+            test_kwargs["_model_config"] = model_config
         if request.params:
             test_kwargs.update(await inject_credentials(str(current_user.id), request.params, {}))
         result = await executor.execute(
@@ -756,10 +840,15 @@ async def test_script(
     else:
         # Docker 模式：使用原有逻辑
         docker_kwargs: Dict[str, Any] = {}
+        model_config = _session_model_config(session)
+        if model_config:
+            docker_kwargs["_model_config"] = model_config
         if request.params:
             docker_kwargs = await inject_credentials(
                 str(current_user.id), request.params, {}
             )
+            if model_config:
+                docker_kwargs["_model_config"] = model_config
         result = await executor.execute(
             browser,
             script,
@@ -828,6 +917,7 @@ async def save_skill(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     _ensure_session_owner(session, current_user)
+    rpa_manager.touch_session(session_id)
 
     _ensure_no_unresolved_manual_diagnostics(session)
     script = _generate_session_script(session, request.params)
@@ -862,6 +952,8 @@ async def chat_with_assistant(
 
     # Resolve user's model config
     model_config = await _resolve_user_model_config(str(current_user.id), request.model_config_id)
+    if model_config:
+        session.llm_model_config = model_config
 
     # Get the page object for this session
     page = rpa_manager.get_page(session_id)

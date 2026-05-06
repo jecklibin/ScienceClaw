@@ -58,6 +58,46 @@ class TestSkillExporter(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(meta["steps"][0]["action"], "goto")
             self.assertIn("params.json", meta["artifacts"])
 
+    async def test_export_skill_uses_configured_default_value_in_schema_and_examples(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            exporter = SkillExporter()
+            params = {
+                "query": {
+                    "type": "string",
+                    "description": "Search query",
+                    "required": False,
+                    "original_value": "recorded query",
+                    "default_value": "configured query",
+                    "sensitive": False,
+                    "credential_id": "",
+                }
+            }
+
+            original_backend = settings.storage_backend
+            original_dir = settings.external_skills_dir
+            settings.storage_backend = "local"
+            settings.external_skills_dir = temp_dir
+            try:
+                await exporter.export_skill(
+                    user_id="user-1",
+                    skill_name="configured_search",
+                    description="Configured search flow",
+                    script="print('ok')\n",
+                    params=params,
+                    steps=[],
+                )
+            finally:
+                settings.storage_backend = original_backend
+                settings.external_skills_dir = original_dir
+
+            skill_dir = Path(temp_dir) / "configured_search"
+            skill_md = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+            meta = json.loads((skill_dir / "skill.meta.json").read_text(encoding="utf-8"))
+            self.assertIn('"default": "configured query"', skill_md)
+            self.assertIn("--query=configured query", skill_md)
+            self.assertNotIn("--query=recorded query", skill_md)
+            self.assertEqual(meta["params"]["query"]["default_value"], "configured query")
+
     async def test_export_skill_serializes_datetime_values_in_recorded_steps(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             exporter = SkillExporter()

@@ -38,6 +38,13 @@ def _env_or_default(env_key: str, default: str) -> str:
     return explicit or default
 
 
+def _resolve_auth_provider() -> str:
+    explicit = (os.environ.get("AUTH_PROVIDER") or "").strip()
+    if explicit:
+        return explicit
+    return "none" if os.environ.get("STORAGE_BACKEND") == "local" else "local"
+
+
 def _resolve_sandbox_base_url() -> str:
     explicit_base = (os.environ.get("SANDBOX_BASE_URL") or "").strip()
     if explicit_base:
@@ -132,7 +139,7 @@ class Settings(BaseSettings):
     session_cookie: str = os.environ.get("SESSION_COOKIE") or "zdtc-agent-session"
     session_max_age: int = int(os.environ.get("SESSION_MAX_AGE", str(3600 * 24 * 7)))
 
-    auth_provider: str = os.environ.get("AUTH_PROVIDER", "local")
+    auth_provider: str = _resolve_auth_provider()
 
     bootstrap_admin_enabled: bool = os.environ.get("BOOTSTRAP_ADMIN_ENABLED", "true").lower() == "true"
     bootstrap_admin_username: str = os.environ.get("BOOTSTRAP_ADMIN_USERNAME", "admin")

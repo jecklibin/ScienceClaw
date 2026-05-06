@@ -64,6 +64,30 @@ runTest('extra env overrides defaults and preserves built-in resource paths', ()
   assert.equal(env.TOOLS_DIR, path.join('D:\\Users\\Alice\\RpaClaw', 'tools'));
 });
 
+runTest('desktop backend env defaults to no-auth local admin mode', () => {
+  const resourceDir = 'C:\\Apps\\RpaClaw\\resources';
+  const env = runtime.buildBackendEnv({
+    homeDir: 'D:\\Users\\Alice\\RpaClaw',
+    resourceDir,
+  });
+
+  assert.equal(env.STORAGE_BACKEND, 'local');
+  assert.equal(env.AUTH_PROVIDER, 'none');
+});
+
+runTest('extra env can opt desktop backend into explicit local auth mode', () => {
+  const resourceDir = 'C:\\Apps\\RpaClaw\\resources';
+  const env = runtime.buildBackendEnv({
+    homeDir: 'D:\\Users\\Alice\\RpaClaw',
+    resourceDir,
+    extraEnv: {
+      AUTH_PROVIDER: 'local',
+    },
+  });
+
+  assert.equal(env.AUTH_PROVIDER, 'local');
+});
+
 runTest('packaged backend env prepends bundled python to PATH for shell commands', () => {
   const resourceDir = 'C:\\Apps\\RpaClaw\\resources';
   const originalPath = 'C:\\Windows\\System32;C:\\Tools';

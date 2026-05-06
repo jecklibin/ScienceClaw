@@ -23,6 +23,13 @@ import {
   formatRpaActionLabel,
   formatRpaStepLocator,
 } from '@/utils/rpaStepTimeline';
+import {
+  buildRpaSkillConfigDraft,
+  draftParamsToParamItems,
+  paramItemsToDraftParams,
+  type RpaConfigParamItem,
+  type RpaSkillConfigDraft,
+} from '@/utils/rpaSkillConfigDraft';
 
 const router = useRouter();
 const route = useRoute();
@@ -75,17 +82,7 @@ interface StepItem extends RpaConfigureStep {
   configurable?: boolean;
 }
 
-interface ParamItem {
-  id: string;
-  name: string;
-  label: string;
-  original_value: string;
-  current_value: string;
-  enabled: boolean;
-  step_id: string;
-  sensitive: boolean;
-  credential_id: string;
-}
+interface ParamItem extends RpaConfigParamItem {}
 
 interface CredentialItem {
   id: string;
@@ -145,14 +142,20 @@ const getValidationClass = (status?: string) => {
   return VALIDATION_CLASS_MAP[status] || 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 ring-1 ring-gray-200 dark:ring-gray-700';
 };
 
-const promoteLocator = async (stepIndex: number, candidateIndex: number) => {
+const promoteLocator = async (stepIndex: number, candidateIndex: number, step: StepItem = steps.value[stepIndex]) => {
   if (!sessionId.value || promotingStepIndex.value !== null) return;
   promotingStepIndex.value = stepIndex;
   error.value = null;
   try {
-    await apiClient.post(`/rpa/session/${sessionId.value}/step/${stepIndex}/locator`, {
-      candidate_index: candidateIndex,
-    });
+    if (step?.traceId) {
+      await apiClient.post(`/rpa/session/${sessionId.value}/trace/${step.traceId}/locator`, {
+        candidate_index: candidateIndex,
+      });
+    } else {
+      await apiClient.post(`/rpa/session/${sessionId.value}/step/${stepIndex}/locator`, {
+        candidate_index: candidateIndex,
+      });
+    }
     await loadSession();
   } catch (err: any) {
     error.value = `切换定位器失败: ${err.response?.data?.detail || err.message}`;
@@ -162,16 +165,38 @@ const promoteLocator = async (stepIndex: number, candidateIndex: number) => {
 };
 
 const promoteDiagnosticLocator = async (diagnostic: RpaRecordingDiagnosticItem, candidateIndex: number) => {
+  if (!sessionId.value || promotingStepIndex.value !== null) return;
+  if (diagnostic.traceId) {
+    const promotionIndex = diagnostic.stepIndex ?? -1;
+    promotingStepIndex.value = promotionIndex;
+    error.value = null;
+    try {
+      await apiClient.post(`/rpa/session/${sessionId.value}/trace/${diagnostic.traceId}/locator`, {
+        candidate_index: candidateIndex,
+      });
+      await loadSession();
+    } catch (err: any) {
+      error.value = `鍒囨崲瀹氫綅鍣ㄥけ璐? ${err.response?.data?.detail || err.message}`;
+    } finally {
+      promotingStepIndex.value = null;
+    }
+    return;
+  }
   if (diagnostic.stepIndex === null) return;
   await promoteLocator(diagnostic.stepIndex, candidateIndex);
 };
 
 const deleteDiagnosticStep = async (diagnostic: RpaRecordingDiagnosticItem) => {
-  if (!sessionId.value || diagnostic.stepIndex === null || promotingStepIndex.value !== null) return;
-  promotingStepIndex.value = diagnostic.stepIndex;
+  if (!sessionId.value || promotingStepIndex.value !== null) return;
+  if (!diagnostic.diagnosticId && diagnostic.stepIndex === null) return;
+  promotingStepIndex.value = diagnostic.stepIndex ?? -1;
   error.value = null;
   try {
-    await apiClient.delete(`/rpa/session/${sessionId.value}/step/${diagnostic.stepIndex}`);
+    if (diagnostic.diagnosticId) {
+      await apiClient.delete(`/rpa/session/${sessionId.value}/diagnostic/${diagnostic.diagnosticId}`);
+    } else {
+      await apiClient.delete(`/rpa/session/${sessionId.value}/step/${diagnostic.stepIndex}`);
+    }
     await loadSession();
     if (!diagnostics.value.length && !generatedScript.value) {
       await generateScript({ openDrawer: false });
@@ -189,6 +214,21 @@ const loadCredentials = async () => {
     credentials.value = resp.data.credentials || [];
   } catch {
     // Credentials are optional for this page.
+  }
+};
+
+const loadSkillConfigDraft = async (generatedParams: ParamItem[]) => {
+  if (!sessionId.value) return false;
+  try {
+    const resp = await apiClient.get(`/rpa/session/${sessionId.value}/skill-config-draft`);
+    const draft = resp.data.draft as RpaSkillConfigDraft | null;
+    if (!draft) return false;
+    skillName.value = draft.skill_name || skillName.value;
+    skillDescription.value = draft.description || skillDescription.value;
+    params.value = draftParamsToParamItems(draft.params || {}, generatedParams) as ParamItem[];
+    return true;
+  } catch {
+    return false;
   }
 };
 
@@ -240,7 +280,10 @@ const loadSession = async () => {
 
   try {
     const resp = await apiClient.get(`/rpa/session/${sessionId.value}`);
-    const session = resp.data.session;
+    const session = {
+      ...(resp.data.session || {}),
+      timeline: resp.data.session?.timeline ?? resp.data.timeline,
+    };
     legacySteps.value = getLegacyRpaSteps(session) as StepItem[];
     steps.value = mapRpaConfigureDisplaySteps(session) as StepItem[];
     diagnostics.value = getManualRecordingDiagnostics(session);
@@ -248,7 +291,8 @@ const loadSession = async () => {
     error.value = null;
 
     const usedNames = new Set<string>();
-    params.value = legacySteps.value
+    const paramSourceSteps = Array.isArray(session.timeline) ? steps.value : legacySteps.value;
+    const generatedParams = paramSourceSteps
       .filter((step) => step.action === 'fill' || step.action === 'select')
       .map((step, index) => {
         let label = `参数${index + 1}`;
@@ -276,13 +320,14 @@ const loadSession = async () => {
           name,
           label,
           original_value: step.value || '',
-          current_value: step.value || '',
+          default_value: step.value || '',
           enabled: true,
           step_id: step.id,
           sensitive: !!step.sensitive,
           credential_id: '',
         };
       });
+    params.value = generatedParams;
 
     const navStep = steps.value.find((step) => !!step.url) || legacySteps.value.find((step) => !!step.url);
     if (navStep?.url) {
@@ -304,18 +349,18 @@ const loadSession = async () => {
   }
 };
 
-const buildParamMap = () => {
-  const paramMap: Record<string, any> = {};
-  params.value
-    .filter((param) => param.enabled)
-    .forEach((param) => {
-      paramMap[param.name] = {
-        original_value: param.original_value,
-        sensitive: param.sensitive || false,
-        credential_id: param.credential_id || '',
-      };
-    });
-  return paramMap;
+const buildParamMap = () => paramItemsToDraftParams(params.value);
+
+const saveSkillConfigDraft = async () => {
+  if (!sessionId.value) return;
+  await apiClient.put(
+    `/rpa/session/${sessionId.value}/skill-config-draft`,
+    buildRpaSkillConfigDraft({
+      skillName: skillName.value,
+      skillDescription: skillDescription.value,
+      params: params.value,
+    }),
+  );
 };
 
 const generateScript = async (options: { openDrawer?: boolean } | Event = { openDrawer: true }) => {
@@ -343,20 +388,22 @@ const generateScript = async (options: { openDrawer?: boolean } | Event = { open
   }
 };
 
-const goToTest = () => {
+const goToTest = async () => {
   if (hasDiagnostics.value) {
     error.value = `还有 ${diagnostics.value.length} 个待修复步骤，修复后才能开始测试`;
     return;
   }
-  router.push({
-    path: '/rpa/test',
-    query: {
-      sessionId: sessionId.value,
-      skillName: skillName.value,
-      skillDescription: skillDescription.value,
-      params: JSON.stringify(buildParamMap()),
-    },
-  });
+  try {
+    await saveSkillConfigDraft();
+    router.push({
+      path: '/rpa/test',
+      query: {
+        sessionId: sessionId.value,
+      },
+    });
+  } catch (err: any) {
+    error.value = `淇濆瓨閰嶇疆鑽夌澶辫触: ${err.response?.data?.detail || err.message}`;
+  }
 };
 
 const confirmDiscardAndRecord = () => {
@@ -395,6 +442,9 @@ const handleSecondaryAction = (id: string) => {
 
 onMounted(async () => {
   await loadSession();
+  if (!loadFailed.value) {
+    await loadSkillConfigDraft(params.value);
+  }
   loadCredentials();
   if (!loadFailed.value && sessionId.value && !hasDiagnostics.value) {
     await generateScript({ openDrawer: false });
@@ -505,10 +555,10 @@ onMounted(async () => {
                   <button
                     type="button"
                     class="shrink-0 rounded-full border border-rose-200 dark:border-rose-900/60 px-3 py-1.5 text-xs font-semibold text-rose-700 dark:text-rose-300 transition-colors hover:bg-rose-100/80 dark:hover:bg-rose-900/30 disabled:cursor-not-allowed disabled:opacity-60"
-                    :disabled="diagnostic.stepIndex === null || promotingStepIndex === diagnostic.stepIndex"
+                    :disabled="(!diagnostic.diagnosticId && diagnostic.stepIndex === null) || promotingStepIndex === (diagnostic.stepIndex ?? -1)"
                     @click="deleteDiagnosticStep(diagnostic)"
                   >
-                    {{ promotingStepIndex === diagnostic.stepIndex ? '处理中...' : '删除该步' }}
+                    {{ promotingStepIndex === (diagnostic.stepIndex ?? -1) ? '处理中...' : '删除该步' }}
                   </button>
                 </div>
 
@@ -535,10 +585,10 @@ onMounted(async () => {
                     <button
                       type="button"
                       class="shrink-0 rounded-full border border-[#831bd7]/25 px-3 py-1.5 text-xs font-semibold text-[#831bd7] transition-colors hover:bg-[#831bd7]/5 disabled:cursor-not-allowed disabled:opacity-60"
-                      :disabled="diagnostic.stepIndex === null || promotingStepIndex === diagnostic.stepIndex"
+                      :disabled="(!diagnostic.traceId && diagnostic.stepIndex === null) || promotingStepIndex === (diagnostic.stepIndex ?? -1)"
                       @click="promoteDiagnosticLocator(diagnostic, candidateIndex)"
                     >
-                      {{ promotingStepIndex === diagnostic.stepIndex ? '切换中...' : '使用此定位器' }}
+                      {{ promotingStepIndex === (diagnostic.stepIndex ?? -1) ? '切换中...' : '使用此定位器' }}
                     </button>
                   </div>
                 </div>
@@ -554,40 +604,11 @@ onMounted(async () => {
             :show-candidates="true"
             :promoting-step-index="promotingStepIndex"
             empty-message="当前没有可配置的录制步骤。"
-            @promote-locator="promoteLocator($event.stepIndex, $event.candidateIndex)"
+            @promote-locator="promoteLocator($event.stepIndex, $event.candidateIndex, $event.step)"
           />
         </section>
 
         <aside class="space-y-4 xl:sticky xl:top-24 xl:self-start">
-          <section class="rounded-3xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-[#272728] p-5 shadow-sm">
-            <div class="flex items-center justify-between gap-3">
-              <div class="min-w-0">
-                <h2 class="text-base font-extrabold">脚本预览</h2>
-                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                  {{ scriptGenerating ? '正在生成最终 Skill 脚本...' : (generatedScript ? '已根据录制 trace 生成最终脚本' : '脚本尚未生成') }}
-                </p>
-              </div>
-              <button
-                type="button"
-                class="shrink-0 rounded-full border border-[#831bd7]/25 px-3 py-1.5 text-xs font-semibold text-[#831bd7] transition-colors hover:bg-[#831bd7]/5 disabled:cursor-not-allowed disabled:opacity-50"
-                :disabled="!generatedScript || scriptGenerating || hasDiagnostics"
-                @click="isScriptDrawerOpen = true"
-              >
-                查看完整脚本
-              </button>
-            </div>
-            <div
-              v-if="hasDiagnostics"
-              class="mt-4 rounded-2xl border border-rose-200 dark:border-rose-900/60 bg-rose-50/80 dark:bg-rose-950/20 px-4 py-3 text-xs text-rose-700 dark:text-rose-300"
-            >
-              还有 {{ diagnostics.length }} 个待修复步骤，脚本预览与测试已暂时阻止。
-            </div>
-            <pre
-              v-if="generatedScript"
-              class="mt-4 max-h-56 overflow-auto rounded-2xl bg-[#0f1115] p-3 text-[11px] leading-5 text-emerald-300"
-            ><code>{{ generatedScript.slice(0, 1600) }}{{ generatedScript.length > 1600 ? '\n...' : '' }}</code></pre>
-          </section>
-
           <section class="rounded-3xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-[#272728] p-5 shadow-sm">
             <div class="flex items-center gap-3">
               <div class="flex h-10 w-10 items-center justify-center rounded-2xl bg-[#f4eaff] text-[#831bd7]">
@@ -671,7 +692,7 @@ onMounted(async () => {
                   </select>
                   <input
                     v-else
-                    v-model="param.current_value"
+                    v-model="param.default_value"
                     class="w-full rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-[#272728] px-3 py-2 text-sm text-gray-700 dark:text-gray-300 outline-none transition-colors focus:border-[#831bd7]"
                     placeholder="默认值"
                   />

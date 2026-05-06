@@ -84,12 +84,13 @@ class SkillExporter:
                 "description": param_info.get("description", ""),
             }
             original = param_info.get("original_value", "")
-            if original and original != "{{credential}}":
-                prop["default"] = original
+            default = param_info.get("default_value", original)
+            if default and default != "{{credential}}":
+                prop["default"] = default
                 has_auto_injected = True
             input_schema["properties"][param_name] = prop
             # Only required if no default value available
-            if param_info.get("required", False) and not original:
+            if param_info.get("required", False) and not default:
                 input_schema["required"].append(param_name)
 
         auto_inject_note = ""
@@ -98,8 +99,9 @@ class SkillExporter:
             examples = []
             for param_name, param_info in params.items():
                 original = param_info.get("original_value", "")
-                if original and original != "{{credential}}":
-                    examples.append(f"`--{param_name}={original}`")
+                default = param_info.get("default_value", original)
+                if default and default != "{{credential}}":
+                    examples.append(f"`--{param_name}={default}`")
             example_text = ""
             if examples:
                 example_text = f" For example: {', '.join(examples[:3])}"

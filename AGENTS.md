@@ -1,120 +1,42 @@
 # AGENTS.md
 
-## Project Overview
+## Core Thinking Principles
 
-RpaClaw is a privacy-first personal research assistant powered by LangChain DeepAgents. It provides 1,900+ built-in scientific tools, multi-format document generation, a sandboxed code execution environment, and an RPA skill recording system. All data stays local.
+- **第一性原理**：先追问原始目标和约束，不要机械沿用既有方案、业界惯例或之前补丁。
+- **拒绝盲从**：如果用户给出的路径存在过度设计、成本过高或边界模糊，要直接指出并给出更优路线。
+- **目标模糊时必须澄清**：发现关键矛盾、缺失上下文或多条路径后果明显不同，不要靠猜测推进。
+- **避免机械折中**：折中方案如果增加复杂度、模糊模块边界且收益不明确，应建议舍弃。
 
-## Tech Stack
+## Project Quick Context
 
-- **Backend**: FastAPI (Python 3.13), LangGraph + DeepAgents, Pydantic v2, Motor (async MongoDB)
-- **Frontend**: Vue 3 + TypeScript, Vite, Tailwind CSS, Reka UI
-- **Database**: MongoDB
-- **Cache/Queue**: Redis + Celery
-- **Sandbox**: Docker container (AIO Sandbox) with Xvfb, x11vnc, Playwright, Python 3.12
-- **Search**: SearXNG + Crawl4AI via websearch microservice
+RpaClaw is a privacy-first personal research assistant with a local RPA skill recording system. The current RPA direction is **Trace-first Recording + Post-hoc Skill Compilation**.
 
-## Directory Structure
+- **Backend**: FastAPI, Python, Pydantic v2, LangGraph/DeepAgents, MongoDB.
+- **Frontend**: Vue 3, TypeScript, Vite, Tailwind CSS.
+- **RPA runtime**: Playwright, local CDP screencast mode, Docker/VNC mode.
+- **Skill output**: `SKILL.md` plus `skill.py`.
 
-```
-RpaClaw/
-├── docker-compose.yml              # Dev compose (build from source)
-├── docker-compose-release.yml      # Production compose (pre-built images)
-├── Skills/                         # User skill packages (mounted to /app/Skills in Docker)
-├── Tools/                          # Custom user tools (hot-reload)
-└── RpaClaw/
-    ├── backend/                    # FastAPI backend
-    │   ├── main.py                 # Entry point, registers all routers
-    │   ├── config.py               # Pydantic BaseSettings, reads from .env
-    │   ├── route/                  # API routes (auth, sessions, chat, file, rpa, etc.)
-    │   ├── deepagent/              # Core LangGraph agent engine
-    │   ├── rpa/                    # RPA recording/playback (manager, generator, executor)
-    │   ├── builtin_skills/         # 9 built-in skills (pdf, docx, pptx, xlsx, etc.)
-    │   ├── mongodb/                # Database access layer
-    │   └── im/                     # IM integrations (Feishu/Lark)
-    ├── frontend/                   # Vue 3 SPA
-    │   └── src/
-    │       ├── main.ts             # App entry, router config
-    │       ├── api/                # API client (apiClient with auth token)
-    │       ├── pages/              # Page components (Home, Chat, Skills, Tools, Tasks, rpa/)
-    │       ├── components/         # Reusable components (ui/, filePreviews/, settings/)
-    │       ├── composables/        # Vue composables
-    │       ├── locales/            # i18n (en.ts, zh.ts)
-    │       └── utils/              # Utility functions
-    ├── sandbox/                    # Isolated execution environment
-    └── task-service/               # Celery-based scheduled task service
+Detailed project reference: [docs/project/reference.md](docs/project/reference.md)
+
+## Local Startup
+
+Backend:
+
+```powershell
+$env:PYTHONPATH="RpaClaw"
+python -m uvicorn backend.main:app --app-dir .\RpaClaw --host 0.0.0.0 --port 8000 --reload --reload-dir .\RpaClaw\backend
 ```
 
-## Services & Ports
+Frontend:
 
-| Service | Container Port | Host Port | Purpose |
-|---------|---------------|-----------|---------|
-| Frontend | 5173 | 5173 | Vue dev server / web UI |
-| Backend | 8000 | 12001 | FastAPI REST API |
-| Sandbox | 8080 | 18080 | Code execution (MCP protocol) |
-| Sandbox VNC | 6080 | 16080 | VNC WebSocket (for RPA) |
-| MongoDB | 27017 | 27014 | Database |
-| Task Service | 8001 | 12002 | Scheduled tasks |
-| Websearch | 8068 | 8068 | SearXNG + Crawl4AI |
-
-## Running Locally
-
-### Docker (recommended)
-```bash
-docker compose up -d --build          # Dev build
-docker compose -f docker-compose-release.yml up -d  # Pre-built images
-```
-
-### Local development
-```bash
-# Backend
-cd RpaClaw/backend
-cp .env.example .env  # Fill in API keys
-uv run uvicorn main:app --host 0.0.0.0 --port 8000
-
-# Frontend
-cd RpaClaw/frontend
-npm install
+```powershell
+$env:BACKEND_URL = "http://localhost:8000"
 npm run dev
 ```
 
-Default login: `admin` / `admin123`
+Default local/desktop mode opens as the bootstrap admin without login. Set `AUTH_PROVIDER=local` to enable login; the bootstrap admin is `admin` / `admin123` unless overridden.
 
-## Backend API
-
-All routes are prefixed with `/api/v1`. Key routers registered in `main.py`:
-
-- `/auth` — Login, register, password management
-- `/sessions` — Session CRUD, skills listing, file operations
-- `/chat` — Streaming chat with LLM agents
-- `/rpa` — RPA recording, testing, skill export
-- `/file` — File upload/download
-- `/models` — LLM model configuration
-- `/tools`, `/tooluniverse` — Tool discovery (1,900+ scientific tools)
-- `/task-settings` — Scheduled task configuration
-- `/im` — Feishu/Lark webhook integration
-
-Health check: `GET /health`, Readiness: `GET /ready`
-
-## Frontend Routing
-
-Routes defined in `src/main.ts`:
-
-- `/chat` — Main layout (requires auth)
-  - `/` — Home page (session list)
-  - `/:sessionId` — Chat conversation
-  - `/skills` — Skills browser
-  - `/tools` — Tools browser
-  - `/tasks` — Task scheduler
-- `/rpa/recorder` — RPA recording (VNC + step capture)
-- `/rpa/configure` — Configure recorded steps & parameters
-- `/rpa/test` — Test generated Playwright script
-- `/share/:sessionId` — Public session sharing (no auth)
-
-## RPA System
-
-The RPA module records user browser actions and generates Playwright scripts. Supports two modes: **Docker sandbox mode** and **local mode**.
-
-### RPA/Agent 架构专项军规
+## RPA/Agent 架构专项军规
 
 - **军规 1：RPA 录制主路径坚持 Trace-first。**
   录制阶段优先真实操作浏览器并记录 trace，不在录制时构建重型 contract 中间层。自然语言步骤可以生成 Python Playwright 代码完成当前操作，但录制目标是“快速、可观察、可追踪地完成当前步骤”，泛化与去冗余主要留到录制完成后的技能编译与回放验证阶段处理。
@@ -131,106 +53,61 @@ The RPA module records user browser actions and generates Playwright scripts. Su
 - **军规 5：Fallback 只能救急，不能反客为主。**
   `_infer_*`、关键词匹配、站点模板、经验提示、候选 selector 表都只能辅助局部失败恢复。一旦它们开始主导主路径行为，应回到第一性原理重新审视架构边界，而不是继续补规则。
 
-### Modes
-- **Docker mode** (`STORAGE_BACKEND=docker`): Playwright runs in sandbox container, uses VNC for display
-- **Local mode** (`STORAGE_BACKEND=local`): Playwright runs on host machine, uses CDP screencast for display
+- **军规 6：方案设计必须面向泛化场景，禁止为单一站点反向塑造架构。**
+  GitHub、百度、内部系统等只能作为验证案例或适配样本，不能成为核心抽象本身。新增编译策略、repair 策略或数据流机制时，必须先说明它解决的通用问题（如跨步骤数据依赖、录制现场值去硬编码、可见可编辑元素定位、动态列表提取），再说明站点案例如何落入该通用抽象。
 
-### Architecture
-1. **Recording**: 
-   - Docker mode: `manager.py` launches Playwright in sandbox on DISPLAY=:99, injects JS event capture via `page.expose_function`. Events written to `/tmp/rpa_events.jsonl`, polled by backend every 2s.
-   - Local mode: `LocalCDPConnector` launches Playwright on host, `ScreencastService` streams CDP frames via WebSocket at `/rpa/screencast`. Frontend displays frames on canvas and sends mouse/keyboard input back via WebSocket.
-2. **Locator generation**: Browser-side JS uses Playwright-codegen-style algorithm (score-based: testid → role+name → placeholder → label → alt → text → title → CSS). Elements are retargeted to nearest interactive ancestor. GUID-like IDs are rejected.
-3. **Script generation**: `generator.py` converts locator objects to Playwright API calls. Link clicks use `expect_navigation`, non-link clicks add `wait_for_timeout(500)`.
-4. **Execution**: 
-   - Docker mode: `executor.py` runs scripts via `nohup` in sandbox background, polls `/tmp/rpa_test_done.txt` for completion. Kills existing browsers via `supervisorctl stop browser` before test.
-   - Local mode: Scripts run directly on host via `LocalShellBackend`, no VNC connection needed.
-5. **Export**: `skill_exporter.py` saves to `EXTERNAL_SKILLS_DIR` with YAML front-matter in `SKILL.md`.
+- **军规 7：先比较 raw snapshot 和 compact snapshot，再修 planner。**
+  遇到“LLM 选错区域、提取错数据、操作错元素”时，必须先判断目标信息是否已经进入 `compact_snapshot`。如果 `raw_snapshot` 有信息而 `compact_snapshot` 缺失，优先审视 snapshot 压缩策略；此时直接修 prompt、repair 或 selector 只是补症状。
 
-### Key files
-- `backend/rpa/manager.py` — Session lifecycle, BROWSER_SCRIPT (runs inside sandbox), event polling
-- `backend/rpa/cdp_connector.py` — CDP connection abstraction (`SandboxCDPConnector` for Docker, `LocalCDPConnector` for local)
-- `backend/rpa/screencast.py` — `ScreencastService` for CDP frame streaming + input injection (local mode)
-- `backend/rpa/generator.py` — Playwright script generation from recorded steps
-- `backend/rpa/executor.py` — Script execution (sandbox or local)
-- `backend/rpa/skill_exporter.py` — Export skill to SKILL.md + skill.py
-- `backend/route/rpa.py` — REST + WebSocket endpoints (`/rpa/screencast` for CDP streaming)
-- `frontend/src/pages/rpa/RecorderPage.vue` — Recording UI (VNC for Docker, Canvas+WebSocket for local)
-- `frontend/src/pages/rpa/TestPage.vue` — Test UI (VNC for Docker, Canvas+WebSocket for local)
-- `frontend/src/utils/sandbox.ts` — `isLocalMode()` helper
+- **军规 8：snapshot 压缩必须区分任务形态。**
+  字段提取、表单读取、详情页信息抽取适合 TopK region 展开；候选选择、搜索结果选择、卡片列表选择需要横向保留候选摘要与主操作 locator。不能用同一种 TopK 区域展开机制覆盖所有页面任务。
 
-### Sandbox interaction
-- MCP JSON-RPC 2.0 protocol at `SANDBOX_MCP_URL`
-- `sandbox_execute_bash`: param `cmd`, response at `result.structuredContent.output`
-- `sandbox_execute_code`: params `code` + `language`, response at `result.structuredContent.stdout`
-- Supervisord manages sandbox services (`browser`, `mcp-server-browser` have `autorestart=true` — must use `supervisorctl stop/start`, not `pkill`)
+- **军规 9：不要加“拦住但不解决”的校验。**
+  空提取、弱 selector、页面慢加载等稳定性校验如果只能阻止成功或提前报错，却不能提供更接近 root cause 的修复路径，就不应进入录制主路径。此类校验应作为诊断证据或后置分析，不能替代修复 snapshot、planner 或编译阶段的数据流问题。
 
-## Skill System
+## RPA Implementation Boundaries
 
-Skills are directories containing `SKILL.md` (with YAML front-matter) + implementation files.
+- 录制阶段自然语言步骤由 `RecordingRuntimeAgent` 执行，只处理当前用户指令，不重新规划整套 SOP。
+- 录制阶段允许 LLM 生成临时 Python Playwright 代码；最终 Skill 编译阶段应优先使用 `TraceSkillCompiler` 的确定性逻辑。
+- 生成脚本阶段基本不调用 LLM；只有真正语义性的 replay 步骤才保留 runtime AI。
+- Repair 最多一次。不要为了提升单步成功率引入多轮循环 repair，除非重新评估录制阶段体验和成本。
+- 不要把录制现场 URL、项目名、页面文本直接当成最终脚本的泛化逻辑。录制现场值只能作为 evidence，用于推断 suffix、字段结构或验证输出。
+- 后一步依赖前一步结果时，应优先通过 `_results` / `output_key` 建立动态引用，而不是写死 observed value。
 
-```
-skill_name/
-├── SKILL.md    # ---\nname: ...\ndescription: ...\n---
-└── skill.py    # Implementation
-```
+RPA architecture docs:
 
-- **Builtin skills**: `BUILTIN_SKILLS_DIR` (default `/app/builtin_skills`, baked into Docker image)
-- **External skills**: `EXTERNAL_SKILLS_DIR` (default `/app/Skills`, mounted from host `./Skills`)
-- Skills API: `GET /api/v1/sessions/skills` scans both directories
-- `SKILL.md` must have YAML front-matter (`---\nname: ...\ndescription: ...\n---`) for the API to parse metadata
+- [Trace-first architecture](docs/rpa/trace-first-architecture.md)
+- [Failure repair policy](docs/rpa/failure-repair-policy.md)
+- [TraceSkillCompiler generalization](docs/rpa/trace-skill-compiler-generalization.md)
 
-## Environment Variables
+## Key RPA Files
 
-Key variables in `.env` (see `config.py` for full list):
-
-```bash
-# LLM
-DS_API_KEY=         # DeepSeek API key
-DS_URL=             # DeepSeek base URL
-DS_MODEL=           # Model name (default: deepseek-chat)
-
-# MongoDB
-MONGODB_HOST=localhost
-MONGODB_PORT=27014
-MONGODB_USER=scienceone
-MONGODB_PASSWORD=
-
-# Sandbox
-SANDBOX_BASE_URL=http://localhost:18080
-SANDBOX_MCP_URL=http://localhost:18080/mcp  # Optional override
-STORAGE_BACKEND=docker  # 'local' = local mode; non-local = sandbox mode
-RUNTIME_MODE=shared     # Only effective when STORAGE_BACKEND != local
-
-# Search
-WEBSEARCH_BASE_URL=http://localhost:8068
-
-# Skills (local dev — Docker uses /app/Skills and /app/builtin_skills)
-EXTERNAL_SKILLS_DIR=C:\Users\...\external_skills
-BUILTIN_SKILLS_DIR=D:\code\...\backend\builtin_skills
-TOOLS_DIR=C:\Users\...\tools
-
-# Workspace
-WORKSPACE_DIR=C:\Users\...\workspace
-```
+- `RpaClaw/backend/rpa/recording_runtime_agent.py`: natural-language recording-time browser operator.
+- `RpaClaw/backend/rpa/trace_models.py`: accepted trace, runtime result, diagnostic models.
+- `RpaClaw/backend/rpa/trace_recorder.py`: manual/AI trace conversion and dataflow inference.
+- `RpaClaw/backend/rpa/trace_skill_compiler.py`: post-hoc trace-to-skill compiler.
+- `RpaClaw/backend/route/rpa.py`: RPA REST and streaming endpoints.
+- `RpaClaw/frontend/src/pages/rpa/RecorderPage.vue`: recording UI.
+- `RpaClaw/frontend/src/pages/rpa/ConfigurePage.vue`: timeline and generated script configuration UI.
+- `RpaClaw/frontend/src/pages/rpa/TestPage.vue`: generated script test UI.
 
 ## Coding Conventions
 
-- **Python**: PEP 8, snake_case, Pydantic v2 models (use `model_dump()` not `.dict()`, `Field(default_factory=...)` not mutable defaults)
-- **TypeScript/Vue**: camelCase for variables/functions, PascalCase for components
-- **API routes**: kebab-case paths
-- **Frontend API calls**: use `apiClient` from `@/api/client` (handles auth token). Base URL is `/api/v1` — use relative paths like `/rpa/session/...`, not `/api/v1/rpa/...`
-- **i18n**: Both Chinese and English supported. UI strings in `src/locales/en.ts` and `zh.ts`
-- **Commit messages**: Chinese or English, prefixed with type: `feat:`, `fix:`, `refactor:`, `chore:`
+- **Python**: PEP 8, snake_case, Pydantic v2 (`model_dump()`, `Field(default_factory=...)`).
+- **TypeScript/Vue**: camelCase for variables/functions, PascalCase for components.
+- **API paths**: kebab-case.
+- **Frontend API calls**: use `apiClient`; paths are relative to `/api/v1`, so do not prefix `/api/v1` again.
+- **i18n**: update both `src/locales/en.ts` and `src/locales/zh.ts` when touching UI strings.
+- **Commits**: use prefixes such as `feat:`, `fix:`, `refactor:`, `chore:`.
 
 ## Common Pitfalls
 
-- **Pydantic v2**: Use `model_dump()` instead of `.dict()`. Use `Field(default_factory=datetime.now)` instead of `datetime.now()` as default.
-- **Sandbox process management**: Supervisord has `autorestart=true` on browser services. Use `supervisorctl stop/start`, not `pkill`.
-- **Playwright event loop**: In sandbox scripts, use `page.wait_for_timeout(N)` instead of `time.sleep(N)` — sleep blocks the Playwright event loop and prevents `expose_function` callbacks.
-- **Frontend double prefix**: `apiClient` base URL is `/api/v1`. Don't prefix paths with `/api/v1/` again.
-- **VNC access**: Docker mode only. Use port 18080 (nginx-served noVNC page), not 16080 (raw websocat). URL: `http://{host}:18080/vnc/index.html?autoconnect=true&resize=scale`
-- **Sandbox script execution**: `sandbox_execute_bash` kills the process tree when the MCP call returns. For long-running scripts, use `nohup` + sentinel file polling.
-- **Skills not appearing**: `SKILL.md` must have YAML front-matter. The `EXTERNAL_SKILLS_DIR` env var must point to the correct directory for your environment (Docker vs local).
-- **Desktop tools**: In Windows desktop local mode, the permanent tool library lives under `TOOLS_DIR` on the host. `/app/Tools` remains the sandbox-visible mount path for sandbox execution, not the desktop host save path.
-- **Local mode RPA**: Set `STORAGE_BACKEND=local` in `.env`. Frontend detects mode via `/client-config` endpoint. Local mode uses CDP screencast (WebSocket at `/rpa/screencast`), not VNC.
-- **CDP screencast performance**: Backend uses JPEG quality=40 for lower latency. Frontend throttles mousemove events and syncs canvas size with image naturalSize for accurate coordinate mapping.
+- **Pydantic v2**: use `model_dump()`, not `.dict()`.
+- **Sandbox processes**: browser services have `autorestart=true`; use `supervisorctl stop/start`, not `pkill`.
+- **Playwright event loop**: use `page.wait_for_timeout(N)`, not `time.sleep(N)` inside async scripts.
+- **Frontend API double prefix**: `apiClient` already includes `/api/v1`.
+- **Local mode RPA**: set `STORAGE_BACKEND=local`; local mode uses CDP screencast, not VNC.
+- **Docker VNC mode**: use noVNC via port `18080`, not raw VNC port `16080`.
+- **Long-running sandbox scripts**: use `nohup` plus sentinel-file polling; MCP shell calls kill child process trees when the call returns.
+- **Skills discovery**: `SKILL.md` must include YAML front matter.
+- **Desktop tools in local mode**: host tool library lives under `TOOLS_DIR`; `/app/Tools` is the sandbox-visible mount path.

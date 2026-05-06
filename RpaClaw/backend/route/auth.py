@@ -12,7 +12,12 @@ import bcrypt
 
 from backend.storage import get_repository
 from backend.config import settings
-from backend.user.dependencies import get_current_user, require_user, User
+from backend.user.dependencies import (
+    get_current_user,
+    local_admin_identity_enabled,
+    require_user,
+    User,
+)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -235,16 +240,20 @@ async def register(body: RegisterRequest):
 @router.get("/status", response_model=ApiResponse)
 async def get_auth_status(current_user: Optional[User] = Depends(get_current_user)) -> ApiResponse:
     auth_provider = getattr(settings, "auth_provider", "local")
-    if auth_provider == "none" or getattr(settings, "storage_backend", "mongo") == "local":
+    if auth_provider == "none":
+        user_id = current_user.id if current_user else ("local_admin" if local_admin_identity_enabled() else "anonymous")
+        fullname = current_user.username if current_user else ("Administrator" if local_admin_identity_enabled() else "Anonymous User")
+        email = "admin@localhost" if local_admin_identity_enabled() else "anonymous@localhost"
+        role = current_user.role if current_user else ("admin" if local_admin_identity_enabled() else "user")
         return ApiResponse(
             data=AuthStatusData(
                 authenticated=True,
                 auth_provider="none",
                 user=AuthUser(
-                    id="anonymous",
-                    fullname="Anonymous User",
-                    email="anonymous@localhost",
-                    role="user",
+                    id=user_id,
+                    fullname=fullname,
+                    email=email,
+                    role=role,
                     is_active=True,
                     created_at="",
                     updated_at="",

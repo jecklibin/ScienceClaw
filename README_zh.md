@@ -87,11 +87,11 @@ docker compose -f docker-compose-release.yml up -d
 http://localhost:5173
 ```
 
-**4. 登录**
+**4. 打开应用**
 
-默认管理员用户名：`admin`
+本地启动和端侧 APP 默认以 bootstrap 管理员身份进入，无需输入账号密码。
 
-> ⚠️ 首次登录时请设置您的密码。
+如需显式启用登录流程，请设置 `AUTH_PROVIDER=local`。未覆盖环境变量时，bootstrap 管理员账号为 `admin` / `admin123`。
 
 ---
 

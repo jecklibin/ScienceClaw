@@ -9,9 +9,13 @@ import websockets
 
 from backend.runtime.ownership import user_owns_runtime_session
 from backend.runtime.session_runtime_manager import get_session_runtime_manager
-from backend.storage import get_repository
 from backend.config import settings
-from backend.user.dependencies import User, require_user
+from backend.user.dependencies import (
+    User,
+    get_current_user,
+    get_user_from_session_id,
+    require_user,
+)
 
 
 router = APIRouter(tags=["runtime-proxy"])
@@ -53,33 +57,15 @@ def _build_runtime_ws_url(rest_base_url: str, path: str, query_string: str = "")
 
 
 async def _get_websocket_user(websocket: WebSocket) -> User | None:
-    if settings.storage_backend == "local":
-        return User(id="local_admin", username="admin", role="admin")
+    if getattr(settings, "auth_provider", "local") == "none":
+        return await get_current_user(websocket)  # type: ignore[arg-type]
 
     auth = websocket.headers.get("authorization") or websocket.headers.get("Authorization")
     if auth and auth.lower().startswith("bearer "):
         session_id = auth.split(" ", 1)[1].strip()
     else:
         session_id = websocket.cookies.get(settings.session_cookie)
-    if not session_id:
-        return None
-
-    repo = get_repository("user_sessions")
-    session_doc = await repo.find_one({"_id": session_id})
-    if not session_doc:
-        return None
-
-    import time
-
-    if session_doc.get("expires_at", 0) < time.time():
-        await repo.delete_one({"_id": session_id})
-        return None
-
-    return User(
-        id=str(session_doc["user_id"]),
-        username=session_doc["username"],
-        role=session_doc.get("role", "user"),
-    )
+    return await get_user_from_session_id(session_id)
 
 
 @router.get("/runtime/session/{session_id}/status")

@@ -1,23 +1,25 @@
 <template>
-  <div class="h-full flex flex-col overflow-hidden">
+  <div class="flex h-full flex-col overflow-hidden bg-white text-slate-900 dark:bg-[#15171d] dark:text-slate-100">
     <!-- Header Bar -->
-    <div class="flex-shrink-0 flex items-center justify-between px-5 py-3 border-b border-gray-100 bg-white">
+    <div class="flex-shrink-0 flex items-center justify-between bg-[#f3f4f5] px-4 py-3 dark:bg-[#1f2229]">
       <div class="flex items-center gap-2">
-        <SlidersHorizontal class="size-4 text-violet-600" />
-        <span class="text-sm font-bold text-gray-900">{{ t('Parameter Editor') }}</span>
+        <SlidersHorizontal class="size-4 text-violet-600 dark:text-violet-300" />
+        <span class="text-sm font-bold text-gray-900 dark:text-slate-100">{{ t('Parameter Editor') }}</span>
       </div>
       <div class="flex items-center gap-2">
         <button
           v-if="mode === 'form' && !isReadOnly"
+          type="button"
           @click="addParameter"
-          class="flex items-center gap-1.5 px-3 py-1.5 bg-violet-50 text-violet-600 rounded-lg text-xs font-semibold hover:bg-violet-100 transition-colors"
+          class="flex items-center gap-1.5 rounded-md bg-[#f0dbff] px-3 py-1.5 text-xs font-semibold text-[#6500ac] transition-colors hover:bg-[#ddb7ff] dark:bg-[#831BD7] dark:text-white dark:shadow-[0_0_0_1px_rgba(255,255,255,0.10)] dark:hover:bg-[#6f16b8]"
         >
           <Plus class="size-3.5" />
           {{ t('Add Parameter') }}
         </button>
         <button
+          type="button"
           @click="toggleMode"
-          class="flex items-center gap-1.5 px-3 py-1.5 bg-gray-50 text-gray-600 rounded-lg text-xs font-semibold hover:bg-gray-100 transition-colors"
+          class="flex items-center gap-1.5 rounded-md bg-white px-3 py-1.5 text-xs font-semibold text-gray-600 transition-colors hover:bg-[#e7e8e9] dark:bg-[#2c3038] dark:text-slate-100 dark:shadow-[0_0_0_1px_rgba(255,255,255,0.08)] dark:hover:bg-[#363b45]"
         >
           <Code2 v-if="mode === 'form'" class="size-3.5" />
           <LayoutList v-else class="size-3.5" />
@@ -27,14 +29,15 @@
     </div>
 
     <!-- Form Mode -->
-    <div v-if="mode === 'form'" class="flex-1 overflow-y-auto p-5 space-y-4 bg-[#f8f9fb]">
-        <div v-if="paramList.length === 0" class="flex flex-col items-center justify-center py-16 text-gray-400">
+    <div v-if="mode === 'form'" class="flex-1 space-y-3 overflow-y-auto bg-[#f3f4f5] p-4 dark:bg-[#15171d]">
+        <div v-if="paramList.length === 0" class="flex flex-col items-center justify-center py-16 text-gray-400 dark:text-slate-500">
           <SlidersHorizontal class="size-10 opacity-30 mb-3" />
           <p class="text-sm">{{ t('No parameters configured') }}</p>
           <button
             v-if="!isReadOnly"
+            type="button"
             @click="addParameter"
-            class="mt-3 flex items-center gap-1.5 px-4 py-2 bg-violet-600 text-white rounded-lg text-xs font-semibold hover:bg-violet-700 transition-colors"
+            class="mt-3 flex items-center gap-1.5 rounded-md bg-[#831BD7] px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#6500ac] dark:bg-[#831BD7] dark:shadow-[0_0_0_1px_rgba(255,255,255,0.10)] dark:hover:bg-[#6f16b8]"
           >
           <Plus class="size-3.5" />
           {{ t('Add Parameter') }}
@@ -45,53 +48,55 @@
       <div
         v-for="(param, index) in paramList"
         :key="param.key"
-        class="bg-white rounded-xl shadow-sm p-5 transition-all hover:ring-1 hover:ring-violet-200"
+        class="rounded-lg border border-transparent bg-white p-4 transition-all hover:bg-white/95 hover:shadow-[0_10px_30px_rgba(25,28,30,0.05)] dark:border-white/[0.06] dark:bg-[#24262c] dark:hover:bg-[#282b32]"
         :class="param.sensitive ? 'border-l-4 border-pink-400' : ''"
       >
         <div class="flex justify-between items-start mb-3">
           <div class="flex items-center gap-3">
-            <div class="p-2 rounded-lg" :class="param.sensitive ? 'bg-pink-50' : 'bg-gray-50'">
-              <Lock v-if="param.sensitive" class="size-4 text-pink-500" />
-              <User v-else-if="param.type === 'string'" class="size-4 text-gray-500" />
-              <Clock v-else-if="param.type === 'integer' || param.type === 'number'" class="size-4 text-gray-500" />
-              <Settings2 v-else class="size-4 text-gray-500" />
+            <div class="rounded-md p-2" :class="param.sensitive ? 'bg-pink-50 dark:bg-pink-500/12' : 'bg-[#f3f4f5] dark:bg-white/[0.07]'">
+              <Lock v-if="param.sensitive" class="size-4 text-pink-500 dark:text-pink-300" />
+              <User v-else-if="param.type === 'string'" class="size-4 text-gray-500 dark:text-slate-300" />
+              <Clock v-else-if="param.type === 'integer' || param.type === 'number'" class="size-4 text-gray-500 dark:text-slate-300" />
+              <Settings2 v-else class="size-4 text-gray-500 dark:text-slate-300" />
             </div>
             <div>
               <input
                 v-if="!isReadOnly"
                 v-model="param.name"
                 @input="emitChange"
-                class="text-sm font-bold text-gray-900 bg-transparent border-none p-0 focus:ring-0 focus:outline-none w-40"
+                class="w-40 border-none bg-transparent p-0 text-sm font-bold text-gray-900 focus:outline-none focus:ring-0 dark:text-slate-100 dark:placeholder:text-slate-500"
                 :placeholder="t('param_name')"
               />
-              <p v-else class="text-sm font-bold text-gray-900">{{ param.name }}</p>
+              <p v-else class="text-sm font-bold text-gray-900 dark:text-slate-100">{{ param.name }}</p>
               <div class="flex items-center gap-2 mt-0.5">
                 <select
                   v-if="!isReadOnly"
                   v-model="param.type"
                   @change="emitChange"
-                  class="text-[10px] font-semibold text-gray-400 uppercase tracking-widest bg-transparent border-none p-0 focus:ring-0 cursor-pointer"
+                  class="cursor-pointer border-none bg-transparent p-0 text-[10px] font-semibold uppercase tracking-widest text-gray-400 focus:ring-0 dark:text-slate-400"
                 >
                   <option value="string">String</option>
                   <option value="integer">Integer</option>
                   <option value="number">Number</option>
                   <option value="boolean">Boolean</option>
                 </select>
-                <span v-else class="text-[10px] font-semibold text-gray-400 uppercase tracking-widest">{{ param.type }}</span>
+                <span v-else class="text-[10px] font-semibold uppercase tracking-widest text-gray-400 dark:text-slate-400">{{ param.type }}</span>
               </div>
             </div>
           </div>
           <div v-if="!isReadOnly" class="flex items-center gap-2">
             <button
+              type="button"
               @click="param.sensitive = !param.sensitive; emitChange()"
-              class="px-2 py-0.5 text-[10px] font-bold rounded-full uppercase transition-colors"
+              class="rounded-md px-2 py-0.5 text-[10px] font-bold uppercase transition-colors"
               :class="param.sensitive
-                ? 'bg-pink-100 text-pink-600 hover:bg-pink-200'
-                : 'bg-green-100 text-green-600 hover:bg-green-200'"
+                ? 'bg-pink-100 text-pink-600 hover:bg-pink-200 dark:bg-pink-500/16 dark:text-pink-200 dark:hover:bg-pink-500/24'
+                : 'bg-green-100 text-green-600 hover:bg-green-200 dark:bg-emerald-500/16 dark:text-emerald-200 dark:hover:bg-emerald-500/24'"
             >
               {{ param.sensitive ? t('Sensitive') : t('Public') }}
             </button>
             <button
+              type="button"
               @click="removeParameter(index)"
               class="p-1 text-gray-400 hover:text-red-500 transition-colors"
             >
@@ -107,17 +112,18 @@
               v-if="!isReadOnly"
               v-model="param.original_value"
               @input="emitChange"
-              class="w-full bg-gray-50 border-none rounded-lg px-4 py-2.5 text-sm font-medium focus:ring-2 focus:ring-violet-200 transition-all"
+              class="w-full rounded-md border-none bg-[#f3f4f5] px-3 py-2 text-sm font-medium text-slate-900 transition-all placeholder:text-slate-400 focus:bg-white focus:ring-2 focus:ring-violet-200 dark:bg-[#181a20] dark:text-slate-100 dark:placeholder:text-slate-500 dark:focus:bg-[#1f2229] dark:focus:ring-violet-400/35"
               :type="param.sensitive && !param.showPassword ? 'password' : 'text'"
               :placeholder="param.sensitive ? '********' : t('Enter value...')"
             />
-            <div v-else class="w-full bg-gray-50 rounded-lg px-4 py-2.5 text-sm font-medium text-gray-700">
+            <div v-else class="w-full rounded-md bg-[#f3f4f5] px-3 py-2 text-sm font-medium text-gray-700 dark:bg-[#181a20] dark:text-slate-200">
               {{ param.sensitive ? '********' : (param.original_value || '-') }}
             </div>
             <button
               v-if="param.sensitive && !isReadOnly"
+              type="button"
               @click="param.showPassword = !param.showPassword"
-              class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-violet-600 transition-colors"
+              class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 transition-colors hover:text-violet-600 dark:text-slate-500 dark:hover:text-violet-300"
             >
               <EyeOff v-if="param.showPassword" class="size-4" />
               <Eye v-else class="size-4" />
@@ -125,8 +131,9 @@
           </div>
           <button
             v-if="param.sensitive && !isReadOnly"
+            type="button"
             @click="openVaultPicker(index)"
-            class="flex items-center gap-1.5 px-3 bg-white border-2 border-violet-100 rounded-lg text-xs font-semibold text-violet-600 hover:bg-violet-50 transition-all whitespace-nowrap"
+            class="flex items-center gap-1.5 whitespace-nowrap rounded-md bg-[#f0dbff] px-3 text-xs font-semibold text-[#6500ac] transition-all hover:bg-[#ddb7ff] dark:bg-[#831BD7] dark:text-white dark:shadow-[0_0_0_1px_rgba(255,255,255,0.10)] dark:hover:bg-[#6f16b8]"
           >
             <KeyRound class="size-3.5" />
             {{ t('Link Vault') }}
@@ -135,12 +142,12 @@
 
         <!-- Credential Link Display -->
         <div v-if="param.credential_id" class="mt-2 flex items-center gap-1.5">
-          <Link2 class="size-3 text-gray-400" />
-          <span class="text-[11px] font-semibold text-gray-500">
+          <Link2 class="size-3 text-gray-400 dark:text-slate-500" />
+          <span class="text-[11px] font-semibold text-gray-500 dark:text-slate-400">
             {{ t('Linked to') }}
-            <span class="text-violet-600">{{ param.credential_id }}</span>
+            <span class="text-violet-600 dark:text-violet-300">{{ param.credential_id }}</span>
           </span>
-          <button v-if="!isReadOnly" @click="param.credential_id = ''; emitChange()" class="ml-1 text-gray-400 hover:text-red-500">
+          <button v-if="!isReadOnly" type="button" @click="param.credential_id = ''; emitChange()" class="ml-1 text-gray-400 hover:text-red-500">
             <X class="size-3" />
           </button>
         </div>
@@ -153,16 +160,16 @@
             :id="`req-${index}`"
             v-model="param.required"
             @change="emitChange"
-            class="rounded border-gray-300 text-violet-600 focus:ring-violet-200 size-3.5"
+            class="size-3.5 rounded border-gray-300 text-violet-600 focus:ring-violet-200 dark:border-slate-600 dark:bg-[#181a20] dark:focus:ring-violet-400/35"
           />
           <span
             v-else
             class="inline-flex size-3.5 items-center justify-center rounded border text-[9px]"
-            :class="param.required ? 'border-violet-300 bg-violet-50 text-violet-600' : 'border-gray-200 bg-gray-50 text-gray-300'"
+            :class="param.required ? 'border-violet-300 bg-violet-50 text-violet-600 dark:border-violet-400/40 dark:bg-violet-500/12 dark:text-violet-200' : 'border-gray-200 bg-gray-50 text-gray-300 dark:border-slate-700 dark:bg-[#181a20] dark:text-slate-600'"
           >
             {{ param.required ? 'Y' : '' }}
           </span>
-          <label :for="`req-${index}`" class="text-xs text-gray-500">{{ t('Required') }}</label>
+          <label :for="`req-${index}`" class="text-xs text-gray-500 dark:text-slate-400">{{ t('Required') }}</label>
         </div>
       </div>
     </div>

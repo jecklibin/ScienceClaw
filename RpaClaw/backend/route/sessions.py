@@ -49,7 +49,7 @@ from backend.deepagent.sessions import (
 )
 from backend.runtime.session_runtime_manager import get_session_runtime_manager
 from backend.user.dependencies import get_current_user, require_user, User
-from backend.models import get_model_config
+from backend.models import get_model_config, resolve_default_model_config
 from backend.config import settings
 from backend.browser_preview import browser_preview_registry
 from backend.rpa.screencast import SessionScreencastController
@@ -220,7 +220,7 @@ def _count_user_messages(events: List[Dict[str, Any]]) -> int:
     )
 
 
-async def _generate_session_title(first_message: str) -> str:
+async def _generate_session_title(first_message: str, model_config: Optional[Dict[str, Any]] = None) -> str:
     """
     Use LLM to generate a short, descriptive chat title from the first user message.
     Returns a fallback if generation fails.
@@ -237,7 +237,7 @@ async def _generate_session_title(first_message: str) -> str:
         "Output only the title, no quotes, no explanation, no prefix."
     )
     try:
-        llm = get_llm_model(config=None, max_tokens_override=60, streaming=False)
+        llm = get_llm_model(config=model_config, max_tokens_override=60, streaming=False)
         response = await llm.ainvoke([
             SystemMessage(content=system),
             HumanMessage(content=prompt),
@@ -707,6 +707,8 @@ async def create_session(
                 if not mc.is_system and mc.user_id != current_user.id:
                     raise HTTPException(status_code=403, detail="Cannot use this model")
                 model_config_dict = mc.model_dump()
+        if model_config_dict is None:
+            model_config_dict = await resolve_default_model_config(current_user.id)
 
         session = await async_create_science_session(
             mode=body.mode,
@@ -789,6 +791,129 @@ def _read_recorded_skill_meta(skill_dir: _Path) -> Dict[str, Any] | None:
     return payload
 
 
+def _validate_skill_identifier(name: str) -> str:
+    normalized = name.strip()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Skill name cannot be empty")
+    if normalized in {".", ".."} or "/" in normalized or "\\" in normalized or "\x00" in normalized:
+        raise HTTPException(
+            status_code=400,
+            detail="Skill name cannot contain path separators",
+        )
+    return normalized
+
+
+def _build_skill_input_schema(params: Dict[str, Any]) -> Dict[str, Any]:
+    schema: Dict[str, Any] = {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    }
+    for param_name, param_info in params.items():
+        if not isinstance(param_info, dict):
+            continue
+        if param_info.get("sensitive") and param_info.get("credential_id"):
+            continue
+        prop: Dict[str, Any] = {
+            "type": param_info.get("type", "string"),
+            "description": param_info.get("description", ""),
+        }
+        original = param_info.get("original_value", "")
+        if original not in ("", None, "{{credential}}"):
+            prop["default"] = original
+        schema["properties"][param_name] = prop
+        if param_info.get("required", False) and original in ("", None):
+            schema["required"].append(param_name)
+    return schema
+
+
+def _replace_skill_md_body_overview(body: str, name: str, description: str) -> str:
+    lines = body.splitlines()
+    heading_index = next(
+        (index for index, line in enumerate(lines) if line.startswith("# ")),
+        -1,
+    )
+    if heading_index == -1:
+        lines = [f"# {name}", "", description, ""] + lines
+        return "\n".join(lines).strip() + "\n"
+
+    lines[heading_index] = f"# {name}"
+    start = heading_index + 1
+    while start < len(lines) and not lines[start].strip():
+        start += 1
+    end = start
+    if end < len(lines) and not lines[end].startswith("#") and not lines[end].startswith("```"):
+        while end < len(lines) and lines[end].strip():
+            end += 1
+    replacement = ["", description, ""]
+    return "\n".join(lines[: heading_index + 1] + replacement + lines[end:]).strip() + "\n"
+
+
+def _sync_skill_md_overview(
+    existing: str,
+    name: str,
+    description: str,
+    params: Dict[str, Any],
+) -> str:
+    match = re.match(r"^---\s*\n(.*?)\n---\s*\n?", existing, re.DOTALL)
+    body = existing[match.end():] if match else existing
+    frontmatter = _yaml.safe_dump(
+        {"name": name, "description": description},
+        allow_unicode=True,
+        sort_keys=False,
+    ).strip()
+    body = _replace_skill_md_body_overview(body, name, description)
+    input_schema = _build_skill_input_schema(params)
+    schema_block = (
+        "## Input Schema\n\n"
+        "```json\n"
+        f"{json.dumps(input_schema, ensure_ascii=False, indent=2)}\n"
+        "```"
+    )
+    schema_pattern = r"## Input Schema\s*\n\s*```json\n[\s\S]*?\n```"
+    if re.search(schema_pattern, body):
+        body = re.sub(schema_pattern, schema_block, body, count=1)
+    else:
+        body = body.rstrip() + "\n\n" + schema_block + "\n"
+    return f"---\n{frontmatter}\n---\n\n{body.rstrip()}\n"
+
+
+def _write_text_atomic(path: _Path, content: str) -> None:
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _write_text_group_atomic(files: Dict[_Path, str]) -> None:
+    original_content: Dict[_Path, str | None] = {}
+    written: List[_Path] = []
+    for path in files:
+        original_content[path] = path.read_text(encoding="utf-8") if path.exists() else None
+    try:
+        for path, content in files.items():
+            _write_text_atomic(path, content)
+            written.append(path)
+    except Exception:
+        for path in reversed(written):
+            previous = original_content[path]
+            try:
+                if previous is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    _write_text_atomic(path, previous)
+            except Exception as rollback_exc:
+                logger.warning("rollback failed for %s: %s", path, rollback_exc)
+        raise
+
+
+def _is_path_within(path: _Path, root: _Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
 async def _get_skill_files_payload(skill_name: str, current_user: User) -> List[Dict[str, str]]:
     if settings.storage_backend == "local":
         skill_dir = _Path(settings.external_skills_dir) / skill_name
@@ -826,6 +951,12 @@ async def _get_skill_files_payload(skill_name: str, current_user: User) -> List[
 
 class SkillBlockRequest(BaseModel):
     blocked: bool = Field(default=True)
+
+
+class UpdateSkillOverviewRequest(BaseModel):
+    name: str = Field(..., description="New skill identifier")
+    description: str = Field(default="", description="Skill description")
+    params: dict = Field(default_factory=dict, description="Skill parameters")
 
 
 @router.get("/skills", response_model=ApiResponse)
@@ -1095,6 +1226,124 @@ async def get_skill_detail(
         raise
     except Exception as exc:
         logger.exception("get_skill_detail failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.put("/skills/{skill_name}/overview", response_model=ApiResponse)
+async def update_skill_overview(
+    skill_name: str,
+    body: UpdateSkillOverviewRequest,
+    current_user: User = Depends(require_user),
+) -> ApiResponse:
+    """Update a recorded skill's identifier, description, and params together."""
+    try:
+        new_name = _validate_skill_identifier(body.name)
+        old_name = _validate_skill_identifier(skill_name)
+        description = body.description.strip()
+        params = body.params or {}
+
+        if settings.storage_backend == "local":
+            builtin_dir = _Path(settings.builtin_skills_dir).resolve()
+            if (builtin_dir / old_name).is_dir():
+                raise HTTPException(status_code=403, detail="Built-in skills cannot be edited")
+
+            external_dir = _Path(settings.external_skills_dir)
+            skill_dir = (external_dir / old_name).resolve()
+            external_root = external_dir.resolve()
+            if not _is_path_within(skill_dir, external_root) or not skill_dir.is_dir():
+                raise HTTPException(status_code=404, detail=f"Skill '{old_name}' not found")
+
+            target_dir = (external_dir / new_name).resolve()
+            if not _is_path_within(target_dir, external_root):
+                raise HTTPException(status_code=403, detail="Invalid skill name")
+            if new_name != old_name and target_dir.exists():
+                raise HTTPException(status_code=409, detail=f"Skill '{new_name}' already exists")
+
+            meta = _read_recorded_skill_meta(skill_dir)
+            if not meta:
+                raise HTTPException(status_code=400, detail="Recorded skill metadata not found")
+
+            skill_md_path = skill_dir / "SKILL.md"
+            skill_md = skill_md_path.read_text(encoding="utf-8") if skill_md_path.is_file() else ""
+            original_files = {
+                skill_dir / "skill.meta.json": (skill_dir / "skill.meta.json").read_text(encoding="utf-8"),
+                skill_dir / "params.json": (skill_dir / "params.json").read_text(encoding="utf-8") if (skill_dir / "params.json").exists() else "{}",
+                skill_md_path: skill_md,
+            }
+            meta["name"] = new_name
+            meta["description"] = description
+            meta["params"] = params
+            updated_files = {
+                skill_dir / "skill.meta.json": json.dumps(meta, ensure_ascii=False, indent=2),
+                skill_dir / "params.json": json.dumps(params, ensure_ascii=False, indent=2),
+                skill_md_path: _sync_skill_md_overview(skill_md, new_name, description, params),
+            }
+
+            files_written = False
+            try:
+                _write_text_group_atomic(updated_files)
+                files_written = True
+                if new_name != old_name:
+                    skill_dir.rename(target_dir)
+            except Exception:
+                if files_written and skill_dir.exists():
+                    _write_text_group_atomic(original_files)
+                raise
+
+            return ApiResponse(data={"skill_name": new_name, "renamed": new_name != old_name})
+
+        col = _get_repo("skills")
+        doc = await col.find_one(
+            {"user_id": current_user.id, "name": old_name},
+            projection={"_id": 1, "files": 1, "params": 1},
+        )
+        if not doc:
+            raise HTTPException(status_code=404, detail=f"Skill '{old_name}' not found")
+        if new_name != old_name:
+            existing = await col.find_one(
+                {"user_id": current_user.id, "name": new_name},
+                projection={"_id": 1},
+            )
+            if existing:
+                raise HTTPException(status_code=409, detail=f"Skill '{new_name}' already exists")
+
+        files = dict(doc.get("files") or {})
+        try:
+            meta = json.loads(files.get("skill.meta.json", "{}"))
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="Invalid recorded skill metadata") from exc
+        if meta.get("kind") != "rpa-recording":
+            raise HTTPException(status_code=400, detail="Recorded skill metadata not found")
+
+        meta["name"] = new_name
+        meta["description"] = description
+        meta["params"] = params
+        files["skill.meta.json"] = json.dumps(meta, ensure_ascii=False, indent=2)
+        files["params.json"] = json.dumps(params, ensure_ascii=False, indent=2)
+        files["SKILL.md"] = _sync_skill_md_overview(
+            files.get("SKILL.md", ""),
+            new_name,
+            description,
+            params,
+        )
+
+        await col.update_one(
+            {"_id": doc["_id"]},
+            {
+                "$set": {
+                    "name": new_name,
+                    "description": description,
+                    "params": params,
+                    "files": files,
+                    "updated_at": datetime.now(timezone.utc),
+                }
+            },
+        )
+        return ApiResponse(data={"skill_name": new_name, "renamed": new_name != old_name})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("update_skill_overview failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -1753,7 +2002,7 @@ async def _agent_background_worker(
         events = getattr(session, "events", []) or []
         if _count_user_messages(events) <= 1:
             try:
-                gen_title = await _generate_session_title(message)
+                gen_title = await _generate_session_title(message, getattr(session, "model_config", None))
                 if gen_title:
                     setattr(session, "title", gen_title)
                     await session.save()

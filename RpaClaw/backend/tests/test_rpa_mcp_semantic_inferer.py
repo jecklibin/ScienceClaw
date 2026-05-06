@@ -75,29 +75,15 @@ async def test_semantic_inferer_falls_back_on_invalid_json():
 
 @pytest.mark.anyio
 async def test_semantic_inferer_uses_active_user_model_when_env_model_is_missing(monkeypatch):
-    class FakeRepo:
-        async def find_many(self, filter_doc, sort=None, limit=0):
-            assert filter_doc == {
-                "$or": [{"is_system": True}, {"user_id": "user-1"}],
-                "is_active": True,
-                "api_key": {"$nin": ["", None]},
-            }
-            return [
-                {
-                    "_id": "model-1",
-                    "name": "Configured model",
-                    "provider": "openai",
-                    "base_url": "https://llm.example/v1",
-                    "api_key": "sk-user",
-                    "model_name": "configured-model",
-                    "context_window": 131072,
-                    "is_system": False,
-                    "user_id": "user-1",
-                    "is_active": True,
-                    "created_at": 1,
-                    "updated_at": 1,
-                }
-            ]
+    async def fake_resolve_default_model_config(user_id):
+        assert user_id == "user-1"
+        return {
+            "provider": "openai",
+            "base_url": "https://llm.example/v1",
+            "api_key": "sk-user",
+            "model_name": "configured-model",
+            "context_window": 131072,
+        }
 
     class FakeModel:
         async def ainvoke(self, _messages):
@@ -114,7 +100,7 @@ async def test_semantic_inferer_uses_active_user_model_when_env_model_is_missing
         captured["streaming"] = streaming
         return FakeModel()
 
-    monkeypatch.setattr("backend.rpa.mcp_semantic_inferer.get_repository", lambda name: FakeRepo())
+    monkeypatch.setattr("backend.rpa.mcp_semantic_inferer.resolve_default_model_config", fake_resolve_default_model_config)
     monkeypatch.setattr("backend.rpa.mcp_semantic_inferer.get_llm_model", fake_get_llm_model)
     monkeypatch.setattr("backend.rpa.mcp_semantic_inferer.settings.model_ds_api_key", "")
 
@@ -132,3 +118,46 @@ async def test_semantic_inferer_uses_active_user_model_when_env_model_is_missing
     assert captured["config"]["model_name"] == "configured-model"
     assert captured["max_tokens_override"] == 2000
     assert captured["streaming"] is False
+
+
+@pytest.mark.anyio
+async def test_semantic_inferer_prefers_active_user_model_over_env_model(monkeypatch):
+    async def fake_resolve_default_model_config(user_id):
+        assert user_id == "user-1"
+        return {
+            "provider": "openai",
+            "base_url": "https://llm.example/v1",
+            "api_key": "sk-user",
+            "model_name": "configured-model",
+            "context_window": 131072,
+        }
+
+    class FakeModel:
+        async def ainvoke(self, _messages):
+            class Response:
+                content = '{"tool":{"tool_name":"search_reports","display_name":"Search reports","description":"Search."},"input_schema":{"type":"object","properties":{},"required":[]},"params":{},"warnings":[]}'
+
+            return Response()
+
+    captured = {}
+
+    def fake_get_llm_model(config=None, max_tokens_override=None, streaming=False):
+        captured["config"] = config
+        return FakeModel()
+
+    monkeypatch.setattr("backend.rpa.mcp_semantic_inferer.resolve_default_model_config", fake_resolve_default_model_config)
+    monkeypatch.setattr("backend.rpa.mcp_semantic_inferer.get_llm_model", fake_get_llm_model)
+    monkeypatch.setattr("backend.rpa.mcp_semantic_inferer.settings.model_ds_api_key", "sk-env")
+
+    recommendation = await RpaMcpSemanticInferer().infer(
+        user_id="user-1",
+        requested_name="Search Reports",
+        requested_description="Search.",
+        steps=[],
+        removed_step_details=[],
+        fallback_params={},
+    )
+
+    assert recommendation.source == "ai_inferred"
+    assert captured["config"]["api_key"] == "sk-user"
+    assert captured["config"]["model_name"] == "configured-model"

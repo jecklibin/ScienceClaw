@@ -34,20 +34,18 @@ import {
   type RpaRecordingDiagnosticItem,
 } from '@/utils/rpaConfigureTimeline';
 import { type RpaTestState } from '@/utils/rpaFlowGuide';
+import { type RpaSkillConfigDraft } from '@/utils/rpaSkillConfigDraft';
 
 const router = useRouter();
 const route = useRoute();
 
 const sessionId = computed(() => route.query.sessionId as string);
-const skillName = computed(() => (route.query.skillName as string) || '录制技能');
-const skillDescription = computed(() => (route.query.skillDescription as string) || '');
-const params = computed(() => {
-  try {
-    return JSON.parse((route.query.params as string) || '{}');
-  } catch {
-    return {};
-  }
-});
+const testConfigSnapshot = ref<RpaSkillConfigDraft | null>(null);
+const skillName = computed(() => testConfigSnapshot.value?.skill_name || '录制技能');
+const skillDescription = computed(() => testConfigSnapshot.value?.description || '');
+const params = computed(() => Object.fromEntries(
+  Object.entries(testConfigSnapshot.value?.params || {}).filter(([, param]) => param.enabled !== false),
+));
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 let screencastWs: WebSocket | null = null;
@@ -107,16 +105,35 @@ interface LocatorCandidate {
 }
 
 const failedStepIndex = ref<number | null>(null);
+const failedTraceId = ref<string | null>(null);
 const failedStepCandidates = ref<LocatorCandidate[]>([]);
 const failedStepError = ref('');
 const triedCandidateIndices = ref<Set<number>>(new Set());
 const retryingWithCandidate = ref(false);
 
+const loadSkillConfigDraft = async () => {
+  if (!sessionId.value) return;
+  try {
+    const resp = await apiClient.get(`/rpa/session/${sessionId.value}/skill-config-draft`);
+    const draft = resp.data.draft as RpaSkillConfigDraft | null;
+    if (!draft) {
+      error.value = '缺少技能配置草稿，请返回配置页确认后再测试';
+      return;
+    }
+    testConfigSnapshot.value = draft;
+  } catch (err: any) {
+    error.value = `加载技能配置草稿失败: ${err.response?.data?.detail || err.message}`;
+  }
+};
+
 const loadSessionDiagnostics = async () => {
   if (!sessionId.value) return;
   try {
     const resp = await apiClient.get(`/rpa/session/${sessionId.value}`);
-    const session = resp.data.session || {};
+    const session = {
+      ...(resp.data.session || {}),
+      timeline: resp.data.session?.timeline ?? resp.data.timeline,
+    };
     recordedSteps.value = mapRpaConfigureDisplaySteps(session);
     recordingDiagnostics.value = getManualRecordingDiagnostics(session);
   } catch (err) {
@@ -299,6 +316,11 @@ const runTest = async () => {
     return;
   }
 
+  if (!testConfigSnapshot.value) {
+    error.value = '缺少技能配置草稿，请返回配置页确认后再测试';
+    return;
+  }
+
   if (recordingDiagnostics.value.length > 0) {
     error.value = `还有 ${recordingDiagnostics.value.length} 个待修复步骤，修复后才能开始测试`;
     testLogs.value = [`错误: 还有 ${recordingDiagnostics.value.length} 个待修复步骤，修复后才能开始测试`];
@@ -313,7 +335,9 @@ const runTest = async () => {
   error.value = null;
   testLogs.value = ['正在生成并执行 Playwright 脚本...'];
   const previousFailedIndex = failedStepIndex.value;
+  const previousFailedTraceId = failedTraceId.value;
   failedStepIndex.value = null;
+  failedTraceId.value = null;
   failedStepCandidates.value = [];
   failedStepError.value = '';
 
@@ -331,10 +355,19 @@ const runTest = async () => {
     testLogs.value = resp.data.logs || [];
     generatedScript.value = resp.data.script || '';
     testSuccess.value = result.success !== false;
-    const newFailedIndex = resp.data.failed_step_index ?? null;
-    if (newFailedIndex !== previousFailedIndex) {
+    const newFailedTraceId = typeof resp.data.failed_trace_id === 'string' && resp.data.failed_trace_id
+      ? resp.data.failed_trace_id
+      : null;
+    const traceMatchedIndex = newFailedTraceId
+      ? recordedSteps.value.findIndex((step) => step?.traceId === newFailedTraceId)
+      : -1;
+    const newFailedIndex = traceMatchedIndex >= 0
+      ? traceMatchedIndex
+      : (resp.data.failed_step_index ?? resp.data.failed_trace_index ?? null);
+    if (newFailedIndex !== previousFailedIndex || newFailedTraceId !== previousFailedTraceId) {
       triedCandidateIndices.value = new Set();
     }
+    failedTraceId.value = newFailedTraceId;
     failedStepIndex.value = newFailedIndex;
     failedStepCandidates.value = resp.data.failed_step_candidates || [];
     failedStepError.value = result.error || '';
@@ -349,21 +382,29 @@ const runTest = async () => {
 };
 
 const retryWithCandidate = async (candidateIndex: number) => {
-  if (retryingWithCandidate.value || failedStepIndex.value === null) return;
+  if (retryingWithCandidate.value || (!failedTraceId.value && failedStepIndex.value === null)) return;
   retryingWithCandidate.value = true;
 
   try {
     const candidate = failedStepCandidates.value[candidateIndex];
     const originalIndex = candidate.original_index ?? candidateIndex;
-    await apiClient.post(
-      `/rpa/session/${sessionId.value}/step/${failedStepIndex.value}/locator`,
-      { candidate_index: originalIndex },
-    );
+    if (failedTraceId.value) {
+      await apiClient.post(
+        `/rpa/session/${sessionId.value}/trace/${failedTraceId.value}/locator`,
+        { candidate_index: originalIndex },
+      );
+    } else {
+      await apiClient.post(
+        `/rpa/session/${sessionId.value}/step/${failedStepIndex.value}/locator`,
+        { candidate_index: originalIndex },
+      );
+    }
 
     triedCandidateIndices.value.add(candidateIndex);
     await loadSessionDiagnostics();
 
     failedStepIndex.value = null;
+    failedTraceId.value = null;
     failedStepCandidates.value = [];
     failedStepError.value = '';
     await runTest();
@@ -396,6 +437,10 @@ const goToSkills = () => {
 
 const saveSkill = async () => {
   if (!sessionId.value) return;
+  if (!testConfigSnapshot.value) {
+    error.value = '缺少技能配置草稿，无法保存技能';
+    return;
+  }
   saving.value = true;
   error.value = null;
 
@@ -428,8 +473,8 @@ const handleTestPrimaryAction = () => {
 };
 
 onMounted(() => {
-  loadSessionDiagnostics().then(() => {
-    if (!recordingDiagnostics.value.length) {
+  Promise.all([loadSkillConfigDraft(), loadSessionDiagnostics()]).then(() => {
+    if (testConfigSnapshot.value && !recordingDiagnostics.value.length) {
       runTest();
     }
   });
@@ -592,7 +637,7 @@ onBeforeUnmount(() => {
               脚本已成功执行，可以保存为技能或重新执行验证。
             </p>
             <p
-              v-if="testDone && !testSuccess && failedStepIndex !== null && failedStepCandidates.length > 0"
+              v-if="testDone && !testSuccess && (failedTraceId || failedStepIndex !== null) && failedStepCandidates.length > 0"
               class="text-xs leading-relaxed text-red-700"
             >
               步骤 {{ (failedStepIndex ?? 0) + 1 }} 执行失败，左侧已展示候选定位器，请选择一个后自动重试。

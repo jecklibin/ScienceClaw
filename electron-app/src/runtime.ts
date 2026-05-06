@@ -134,6 +134,7 @@ export function buildBackendEnv(options: BuildBackendEnvOptions): Record<string,
 
   return {
     STORAGE_BACKEND: 'local',
+    AUTH_PROVIDER: 'none',
     RPA_CLAW_HOME: options.homeDir,
     WORKSPACE_DIR: homeLayout.workspaceDir,
     TOOLS_DIR: homeLayout.toolsDir,

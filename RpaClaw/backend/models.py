@@ -1,4 +1,4 @@
-from typing import Optional, List
+from typing import Optional, List, Any, Dict
 from pydantic import BaseModel, Field
 from datetime import datetime
 import uuid
@@ -96,6 +96,46 @@ async def get_model_config(model_id: str) -> Optional[ModelConfig]:
     # Remap _id to id
     doc["id"] = doc["_id"]
     return ModelConfig(**doc)
+
+
+async def resolve_default_model_config(user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Resolve the app-visible default model config.
+
+    User-created active models win over system/env-derived models. DS env remains
+    a legacy fallback through system-default or get_llm_model(config=None), but
+    it should not outrank a model configured from the product UI.
+    """
+    repo = get_repository("models")
+    filter_doc: Dict[str, Any] = {
+        "is_active": True,
+        "api_key": {"$nin": ["", None]},
+    }
+    if user_id:
+        filter_doc["$or"] = [{"user_id": user_id}, {"is_system": True}]
+    else:
+        filter_doc["is_system"] = True
+    docs = await repo.find_many(
+        filter_doc,
+        sort=[("is_system", 1), ("updated_at", -1), ("created_at", -1)],
+        limit=1,
+    )
+    doc = docs[0] if docs else None
+    if not doc:
+        return None
+    return {
+        "id": doc.get("_id") or doc.get("id"),
+        "provider": doc.get("provider") or "",
+        "model_name": doc.get("model_name") or "",
+        "base_url": doc.get("base_url"),
+        "api_key": doc.get("api_key"),
+        "context_window": doc.get("context_window"),
+        "is_system": bool(doc.get("is_system", False)),
+        "user_id": doc.get("user_id"),
+        "requested_user_id": user_id,
+        "selected_owner": "system" if bool(doc.get("is_system", False)) else "user",
+        "resolution_reason": "system_fallback" if bool(doc.get("is_system", False)) else "user_active_model",
+    }
+
 
 async def list_user_models(user_id: str) -> List[ModelConfig]:
     # Return System models + User models

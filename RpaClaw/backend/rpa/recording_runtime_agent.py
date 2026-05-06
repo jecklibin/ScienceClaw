@@ -68,6 +68,7 @@ logger = logging.getLogger(__name__)
 _GENERATED_CODE_FILENAME = "<recording_runtime_agent>"
 _RANDOM_LIKE_ATTR_RE = re.compile(r"(?i)(?:[a-z]+[-_])?[a-z0-9]{6,}[a-z][a-z0-9]*")
 _DOWNLOAD_EVENT_DRAIN_TIMEOUT_S = 0.5
+_RECORDING_PLANNER_MIN_OUTPUT_TOKENS = 8192
 
 
 def _env_positive_float(name: str, default: float) -> float:
@@ -242,6 +243,14 @@ class RecordingAgentResult(BaseModel):
     message: str = ""
 
 
+class RecordingPlannerContractError(ValueError):
+    def __init__(self, message: str, *, raw_output: str = "", cause: Optional[BaseException] = None):
+        super().__init__(message)
+        self.raw_output = raw_output
+        self.llm_call: Dict[str, Any] = {}
+        self.__cause__ = cause
+
+
 Planner = Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]
 Executor = Callable[[Any, Dict[str, Any], Dict[str, Any]], Awaitable[Dict[str, Any]]]
 CompletionVerifier = Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]
@@ -261,6 +270,7 @@ class RecordingRuntimeAgent:
         self.completion_verifier = completion_verifier
         self._instruction_completion_check_enabled = completion_verifier is not None or self._uses_default_planner
         self.model_config = model_config
+        self._planner_llm_calls: List[Dict[str, Any]] = []
 
     async def run(
         self,
@@ -690,12 +700,16 @@ class RecordingRuntimeAgent:
                 "action_type": "planner_error",
                 "expected_effect": "none",
             }
+            llm_call = getattr(exc, "llm_call", None)
+            raw_output = str(getattr(exc, "raw_output", "") or "")
             return plan, {
                 "success": False,
                 "error": str(exc),
                 "error_type": type(exc).__name__,
                 "traceback": _format_exception_for_repair(exc),
                 "output": "",
+                "planner_raw_output": raw_output,
+                "llm_call": _safe_jsonable(llm_call) if isinstance(llm_call, dict) else {},
                 "timing_ms": timing_ms,
             }
         started_at = time.perf_counter()
@@ -978,18 +992,41 @@ class RecordingRuntimeAgent:
         return fallback_trace
 
     async def _default_planner(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        from backend.config import settings
         from backend.deepagent.engine import get_llm_model
         from langchain_core.messages import HumanMessage, SystemMessage
 
-        model = get_llm_model(config=self.model_config, streaming=False)
-        response = await _ainvoke_model_with_recording_timeout(
-            model,
-            [
-                SystemMessage(content=RECORDING_RUNTIME_SYSTEM_PROMPT),
-                HumanMessage(content=json.dumps(payload, ensure_ascii=False, default=str)),
-            ],
+        planner_max_tokens = max(int(getattr(settings, "max_tokens", 0) or 0), _RECORDING_PLANNER_MIN_OUTPUT_TOKENS)
+        model = get_llm_model(
+            config=self.model_config,
+            max_tokens_override=planner_max_tokens,
+            streaming=False,
         )
-        return _parse_json_object(_extract_text(response))
+        messages = [
+            SystemMessage(content=RECORDING_RUNTIME_SYSTEM_PROMPT),
+            HumanMessage(content=json.dumps(payload, ensure_ascii=False, default=str)),
+        ]
+        llm_request = _build_planner_llm_request_summary(
+            model=model,
+            messages=messages,
+            model_config=self.model_config,
+        )
+        response = await _ainvoke_model_with_recording_timeout(model, messages)
+        response_text = _extract_text(response)
+        llm_call = {
+            "request": llm_request,
+            "response": _text_diagnostic(response_text, limit=8000),
+        }
+        self._planner_llm_calls.append(llm_call)
+        _log_planner_llm_call(llm_call)
+        try:
+            return _parse_json_object(response_text)
+        except Exception as exc:
+            try:
+                setattr(exc, "llm_call", llm_call)
+            except Exception:
+                pass
+            raise
 
     async def _semantic_terminal_judge(
         self,
@@ -1962,10 +1999,18 @@ def _parse_json_object(text: str) -> Dict[str, Any]:
                         validation_error = exc
                     continue
     if validation_error:
-        raise validation_error
+        raise RecordingPlannerContractError(
+            str(validation_error),
+            raw_output=raw,
+            cause=validation_error,
+        ) from validation_error
     if last_error:
-        raise last_error
-    raise ValueError("Recording planner must return a JSON object")
+        raise RecordingPlannerContractError(
+            f"Recording planner returned invalid JSON: {last_error}",
+            raw_output=raw,
+            cause=last_error,
+        ) from last_error
+    raise RecordingPlannerContractError("Recording planner must return a JSON object", raw_output=raw)
 
 
 def _parse_raw_json_object(text: str) -> Dict[str, Any]:
@@ -2338,6 +2383,120 @@ def _looks_like_planner_object(parsed: Dict[str, Any]) -> bool:
         "terminal_contract",
     }
     return any(key in parsed for key in planner_keys)
+
+
+def _model_config_summary(model_config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(model_config, dict) or not model_config:
+        return {}
+    summary: Dict[str, Any] = {}
+    for key in (
+        "provider",
+        "model_name",
+        "base_url",
+        "context_window",
+        "id",
+        "name",
+        "requested_user_id",
+        "selected_owner",
+        "resolution_reason",
+        "user_id",
+    ):
+        value = model_config.get(key)
+        if value not in (None, ""):
+            summary[key] = value
+    return summary
+
+
+def _build_planner_llm_request_summary(
+    *,
+    model: Any,
+    messages: List[Any],
+    model_config: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    message_summaries = []
+    total_chars = 0
+    include_prompt_preview = _planner_prompt_preview_enabled()
+    for message in messages:
+        content = str(getattr(message, "content", "") or "")
+        total_chars += len(content)
+        summary = {
+            "type": type(message).__name__,
+            "chars": len(content),
+            "truncated": len(content) > 20000,
+        }
+        if include_prompt_preview:
+            summary["preview"] = _truncate_text(content, 20000)
+        message_summaries.append(summary)
+    return {
+        "configured_model": _model_config_summary(model_config),
+        "effective_model": _effective_llm_model_summary(model),
+        "message_count": len(messages),
+        "total_message_chars": total_chars,
+        "messages": message_summaries,
+    }
+
+
+def _planner_prompt_preview_enabled() -> bool:
+    return str(os.getenv("RPA_LLM_DIAGNOSTIC_PROMPT_PREVIEW", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _effective_llm_model_summary(model: Any) -> Dict[str, Any]:
+    summary: Dict[str, Any] = {}
+    attr_map = {
+        "model_name": ("model_name", "model"),
+        "base_url": ("openai_api_base", "base_url"),
+        "max_tokens": ("max_tokens",),
+        "temperature": ("temperature",),
+        "streaming": ("streaming",),
+        "request_timeout": ("request_timeout", "timeout"),
+        "max_retries": ("max_retries",),
+        "model_kwargs": ("model_kwargs",),
+        "disabled_params": ("disabled_params",),
+        "profile": ("profile",),
+    }
+    for key, candidates in attr_map.items():
+        for attr in candidates:
+            value = getattr(model, attr, None)
+            if value not in (None, ""):
+                summary[key] = _safe_jsonable(value)
+                break
+    return summary
+
+
+def _text_diagnostic(text: Any, *, limit: int) -> Dict[str, Any]:
+    value = str(text or "")
+    return {
+        "chars": len(value),
+        "preview": _truncate_text(value, limit),
+        "truncated": len(value) > limit,
+    }
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    value = str(text or "")
+    if len(value) <= limit:
+        return value
+    return value[:limit]
+
+
+def _log_planner_llm_call(llm_call: Dict[str, Any]) -> None:
+    request = llm_call.get("request") if isinstance(llm_call, dict) else {}
+    response = llm_call.get("response") if isinstance(llm_call, dict) else {}
+    effective_model = request.get("effective_model") if isinstance(request, dict) else {}
+    logger.info(
+        "[RPA-LLM] planner call model=%s base_url=%s max_tokens=%s profile=%s input_chars=%s output_chars=%s",
+        effective_model.get("model_name"),
+        effective_model.get("base_url"),
+        effective_model.get("max_tokens"),
+        effective_model.get("profile"),
+        request.get("total_message_chars") if isinstance(request, dict) else None,
+        response.get("chars") if isinstance(response, dict) else None,
+    )
 
 
 def _dict_field(value: Any) -> Dict[str, Any]:

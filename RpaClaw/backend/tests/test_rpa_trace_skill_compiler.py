@@ -1131,6 +1131,35 @@ def test_manual_fill_uses_plain_param_default_when_configured():
     assert "fill('admi')" not in body
 
 
+def test_manual_fill_uses_configured_default_value_as_runtime_fallback():
+    trace = RPAAcceptedTrace(
+        trace_id="search-fill",
+        trace_type=RPATraceType.MANUAL_ACTION,
+        action="fill",
+        value="recorded query",
+        locator_candidates=[
+            {"locator": {"method": "role", "role": "textbox", "name": "Search"}, "selected": True},
+        ],
+    )
+
+    script = TraceSkillCompiler().generate_script(
+        [trace],
+        params={
+            "query": {
+                "original_value": "recorded query",
+                "default_value": "configured query",
+                "sensitive": False,
+                "credential_id": "",
+            }
+        },
+        is_local=True,
+    )
+    body = _execute_body(script)
+
+    assert "get_by_role('textbox', name='Search', exact=True).fill(kwargs.get('query', 'configured query'))" in body
+    assert "kwargs.get('query', 'recorded query')" not in body
+
+
 def test_manual_click_defaults_to_exact_match_for_role_locator():
     trace = RPAAcceptedTrace(
         trace_id="manual-click",
@@ -1799,6 +1828,31 @@ def test_chinese_semantic_project_click_without_url_stays_runtime_ai():
 
     assert "_execute_runtime_ai_instruction(" in body
     assert "get_by_role(\"link\", name=\"mattpocock / skills\")" not in body
+
+
+def test_runtime_ai_instruction_uses_runtime_model_config_kwarg_without_embedding_secret():
+    trace = RPAAcceptedTrace(
+        trace_type=RPATraceType.AI_OPERATION,
+        source="ai",
+        user_instruction="open the project most related to SKILL",
+        description="Click the semantically selected project",
+        output_key="selected_project",
+        output={"action_performed": True},
+        ai_execution=RPAAIExecution(
+            code=(
+                "async def run(page, results):\n"
+                "    await page.locator('a.project').nth(0).click()\n"
+                "    return {'action_performed': True}"
+            ),
+        ),
+    )
+
+    script = TraceSkillCompiler().generate_script([trace], is_local=True)
+    body = _execute_body(script)
+
+    assert "RecordingRuntimeAgent(model_config=kwargs.get('_model_config'))" in script
+    assert "sk-secret" not in script
+    assert "_execute_runtime_ai_instruction(current_page, _results, kwargs," in body
 
 
 def test_runtime_ai_preserve_signal_overrides_embedded_code():

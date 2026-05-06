@@ -3,13 +3,20 @@ from datetime import datetime
 
 import pytest
 
+CHAT_MODULE = importlib.import_module("backend.route.chat")
 from backend.rpa.manager import RPASession, RPAStep
 from backend.rpa.manual_recording_models import ManualActionKind, ManualRecordedAction, ManualRecordingDiagnostic
 from backend.rpa.recording_runtime_agent import RecordingAgentResult
-from backend.rpa.trace_models import RPAAcceptedTrace, RPAAIExecution, RPATraceType
+from backend.rpa.trace_models import RPAAcceptedTrace, RPAAIExecution, RPATraceDiagnostic, RPATraceType
 
 
 ROUTE_MODULE = importlib.import_module("backend.route.rpa")
+
+
+class FakeWebSocketRequest:
+    def __init__(self, query_params=None, cookies=None):
+        self.query_params = query_params or {}
+        self.cookies = cookies or {}
 
 
 @pytest.mark.anyio
@@ -82,6 +89,57 @@ async def test_resolve_user_model_config_rejects_missing_requested_model(monkeyp
         await ROUTE_MODULE._resolve_user_model_config("user-1", "missing-model")
 
     assert exc_info.value.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_parse_schedule_default_model_uses_system_model_over_env(monkeypatch):
+    async def fake_resolve_default_model_config(user_id=None):
+        assert user_id is None
+        return {
+            "provider": "openai",
+            "base_url": "https://llm.example/v1",
+            "api_key": "sk-system",
+            "model_name": "system-model",
+            "context_window": 65536,
+            "is_system": True,
+        }
+
+    monkeypatch.setattr(CHAT_MODULE, "resolve_default_model_config", fake_resolve_default_model_config)
+    monkeypatch.setattr(CHAT_MODULE.settings, "model_ds_api_key", "sk-env")
+
+    config = await CHAT_MODULE._resolve_any_model_config()
+
+    assert config["api_key"] == "sk-system"
+    assert config["model_name"] == "system-model"
+
+
+@pytest.mark.anyio
+async def test_parse_schedule_default_model_falls_back_to_env_without_system_model(monkeypatch):
+    async def fake_resolve_default_model_config(user_id=None):
+        assert user_id is None
+        return None
+
+    monkeypatch.setattr(CHAT_MODULE, "resolve_default_model_config", fake_resolve_default_model_config)
+    monkeypatch.setattr(CHAT_MODULE.settings, "model_ds_api_key", "sk-env")
+
+    config = await CHAT_MODULE._resolve_any_model_config()
+
+    assert config == {"_use_default": True}
+
+
+@pytest.mark.anyio
+async def test_screencast_websocket_no_auth_resolves_bootstrap_admin(monkeypatch):
+    async def fake_get_current_user(_request):
+        return ROUTE_MODULE.User(id="admin-uuid", username="admin", role="admin")
+
+    monkeypatch.setattr(ROUTE_MODULE.settings, "storage_backend", "local")
+    monkeypatch.setattr(ROUTE_MODULE.settings, "auth_provider", "none")
+    monkeypatch.setattr(ROUTE_MODULE, "get_current_user", fake_get_current_user)
+
+    user = await ROUTE_MODULE._get_ws_user(FakeWebSocketRequest())
+
+    assert user is not None
+    assert user.id == "admin-uuid"
 
 
 def test_generate_session_script_prefers_traces_over_legacy_steps():
@@ -414,6 +472,46 @@ def test_build_session_recording_meta_derives_traces_for_legacy_step_only_sessio
 
 
 @pytest.mark.asyncio
+async def test_skill_config_draft_round_trip():
+    manager = ROUTE_MODULE.rpa_manager
+    session = RPASession(id="route-draft", user_id="u1", sandbox_session_id="sandbox")
+    manager.sessions[session.id] = session
+
+    request = ROUTE_MODULE.SkillConfigDraftRequest(
+        skill_name="Search Skill",
+        description="Searches with a configured query",
+        params={
+            "query": {
+                "original_value": "recorded query",
+                "default_value": "configured query",
+                "sensitive": False,
+                "credential_id": "",
+            }
+        },
+    )
+
+    try:
+        user = type("User", (), {"id": "u1"})()
+        put_response = await ROUTE_MODULE.update_skill_config_draft(session.id, request, user)
+        get_response = await ROUTE_MODULE.get_skill_config_draft(session.id, user)
+
+        assert put_response["draft"]["skill_name"] == "Search Skill"
+        assert get_response["draft"]["params"]["query"]["default_value"] == "configured query"
+    finally:
+        manager.sessions.pop(session.id, None)
+
+
+@pytest.mark.asyncio
+async def test_skill_config_draft_missing_session_returns_404():
+    user = type("User", (), {"id": "u1"})()
+
+    with pytest.raises(ROUTE_MODULE.HTTPException) as exc_info:
+        await ROUTE_MODULE.get_skill_config_draft("missing-draft-session", user)
+
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_save_skill_exports_trace_first_recording_meta(monkeypatch):
     manager = ROUTE_MODULE.rpa_manager
     session = RPASession(id="route-save-trace", user_id="u1", sandbox_session_id="sandbox")
@@ -479,6 +577,104 @@ async def test_generate_script_blocks_when_recording_diagnostics_exist():
             await ROUTE_MODULE.generate_script(session.id, ROUTE_MODULE.GenerateRequest(), user)
         assert exc_info.value.status_code == 400
         assert "diagnostic" in exc_info.value.detail
+    finally:
+        manager.sessions.pop(session.id, None)
+
+
+@pytest.mark.asyncio
+async def test_delete_trace_route_removes_trace_by_stable_id():
+    manager = ROUTE_MODULE.rpa_manager
+    session = RPASession(id="route-delete-trace", user_id="u1", sandbox_session_id="sandbox")
+    session.traces.append(
+        RPAAcceptedTrace(
+            trace_id="trace-ai-delete",
+            trace_type=RPATraceType.AI_OPERATION,
+            source="ai",
+            output_key="result",
+            output={"old": True},
+        )
+    )
+    manager.sessions[session.id] = session
+
+    try:
+        user = type("User", (), {"id": "u1"})()
+        response = await ROUTE_MODULE.delete_trace_item(session.id, "trace-ai-delete", user)
+
+        assert response == {"status": "success"}
+        assert session.traces == []
+        assert session.runtime_results.values == {}
+    finally:
+        manager.sessions.pop(session.id, None)
+
+
+@pytest.mark.asyncio
+async def test_delete_diagnostic_route_removes_trace_diagnostic_by_stable_id():
+    manager = ROUTE_MODULE.rpa_manager
+    session = RPASession(id="route-delete-diagnostic", user_id="u1", sandbox_session_id="sandbox")
+    session.trace_diagnostics.append(
+        RPATraceDiagnostic(
+            diagnostic_id="diag-delete",
+            trace_id="trace-ai",
+            source="ai",
+            message="planner failed",
+        )
+    )
+    manager.sessions[session.id] = session
+
+    try:
+        user = type("User", (), {"id": "u1"})()
+        response = await ROUTE_MODULE.delete_diagnostic_item(session.id, "diag-delete", user)
+
+        assert response == {"status": "success"}
+        assert session.trace_diagnostics == []
+    finally:
+        manager.sessions.pop(session.id, None)
+
+
+@pytest.mark.asyncio
+async def test_promote_trace_locator_route_selects_candidate_by_trace_id():
+    manager = ROUTE_MODULE.rpa_manager
+    session = RPASession(id="route-promote-trace", user_id="u1", sandbox_session_id="sandbox")
+    session.traces.append(
+        RPAAcceptedTrace(
+            trace_id="trace-manual",
+            trace_type=RPATraceType.MANUAL_ACTION,
+            source="manual",
+            locator_candidates=[
+                {
+                    "kind": "css",
+                    "locator": {"method": "css", "value": "#old"},
+                    "selected": True,
+                    "strict_match_count": 2,
+                },
+                {
+                    "kind": "role",
+                    "locator": {"method": "role", "role": "button", "name": "Save"},
+                    "selected": False,
+                    "strict_match_count": 1,
+                },
+            ],
+            validation={"status": "fallback"},
+        )
+    )
+    manager.sessions[session.id] = session
+
+    try:
+        user = type("User", (), {"id": "u1"})()
+        response = await ROUTE_MODULE.promote_trace_locator(
+            session.id,
+            "trace-manual",
+            ROUTE_MODULE.PromoteLocatorRequest(candidate_index=1),
+            user,
+        )
+
+        trace = response["trace"]
+        assert response["status"] == "success"
+        assert trace.locator_candidates[0]["selected"] is False
+        assert trace.locator_candidates[1]["selected"] is True
+        assert trace.validation["selected_candidate_index"] == 1
+        assert trace.validation["selected_candidate_kind"] == "role"
+        assert trace.validation["status"] == "ok"
     finally:
         manager.sessions.pop(session.id, None)
 
@@ -856,6 +1052,48 @@ async def test_test_script_passes_route_timeout_to_executor(monkeypatch):
         user = type("User", (), {"id": "u1"})()
         await ROUTE_MODULE.test_script(session.id, ROUTE_MODULE.GenerateRequest(), user)
         assert captured["timeout"] == ROUTE_MODULE.RPA_TEST_TIMEOUT_S
+    finally:
+        manager.sessions.pop(session.id, None)
+
+
+@pytest.mark.asyncio
+async def test_test_script_passes_session_model_config_to_executor(monkeypatch):
+    manager = ROUTE_MODULE.rpa_manager
+    session = RPASession(id="session-model-test", user_id="u-model", sandbox_session_id="sandbox")
+    session.llm_model_config = {
+        "id": "model-selected",
+        "provider": "openai",
+        "base_url": "https://llm.example/v1",
+        "api_key": "sk-selected",
+        "model_name": "selected-model",
+        "context_window": 65536,
+    }
+    manager.sessions[session.id] = session
+
+    captured: dict = {}
+
+    class FakeConnector:
+        async def get_browser(self, **kwargs):
+            return object()
+
+        def run_in_pw_loop(self, coro):
+            return coro
+
+    async def fake_execute(*args, **kwargs):
+        captured["kwargs"] = kwargs.get("kwargs")
+        return {"success": True, "output": "SKILL_SUCCESS", "data": {}}
+
+    monkeypatch.setattr(ROUTE_MODULE, "_generate_session_script", lambda *args, **kwargs: "async def execute_skill(page, **kwargs):\n    return {}")
+    monkeypatch.setattr(ROUTE_MODULE, "get_cdp_connector", lambda: FakeConnector())
+    monkeypatch.setattr(ROUTE_MODULE.executor, "execute", fake_execute)
+    monkeypatch.setattr(ROUTE_MODULE.settings, "storage_backend", "local")
+    monkeypatch.setattr(ROUTE_MODULE.settings, "workspace_dir", "E:/Work-Project/OtherWork/ScienceClaw")
+
+    try:
+        user = type("User", (), {"id": "u-model"})()
+        await ROUTE_MODULE.test_script(session.id, ROUTE_MODULE.GenerateRequest(), user)
+        assert captured["kwargs"]["_model_config"]["api_key"] == "sk-selected"
+        assert captured["kwargs"]["_model_config"]["model_name"] == "selected-model"
     finally:
         manager.sessions.pop(session.id, None)
 

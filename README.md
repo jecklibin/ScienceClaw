@@ -87,11 +87,11 @@ docker compose -f docker-compose-release.yml up -d
 http://localhost:5173
 ```
 
-**4. Login**
+**4. Open the App**
 
-Default admin username: `admin`
+Local and desktop builds open as the bootstrap admin user by default.
 
-> ⚠️ Please set your password on first login.
+To enable the login flow explicitly, set `AUTH_PROVIDER=local`. The bootstrap admin account is `admin` / `admin123` unless overridden by environment variables.
 
 ---
 

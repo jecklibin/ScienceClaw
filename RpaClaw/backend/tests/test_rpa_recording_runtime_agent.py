@@ -5742,3 +5742,305 @@ def test_parse_json_object_rejects_run_python_without_runner():
     with pytest.raises(ValueError):
         _parse_json_object(json.dumps(payload))
 
+
+def test_parse_json_object_accepts_plan_with_extra_planner_output():
+    payload = {
+        "description": "Run",
+        "action_type": "run_python",
+        "code": "async def run(page, results):\n    return {'ok': True}",
+    }
+
+    parsed = _parse_json_object(json.dumps(payload) + "\n" + json.dumps({"reason": "extra"}))
+
+    assert parsed["description"] == "Run"
+    assert "async def run(page, results)" in parsed["code"]
+
+
+def test_parse_json_object_ignores_analysis_and_evidence_json_before_plan():
+    payload = {
+        "description": "Extract fork count",
+        "action_type": "run_python",
+        "expected_effect": "extract",
+        "allow_empty_output": False,
+        "output_key": "fork_count",
+        "code": "async def run(page, results):\n    return {'fork_count': 315}",
+    }
+    text = (
+        "1. Analyze the request.\n"
+        'Evidence: {"label": "Fork 315", "locator": {"method": "role"}}.\n'
+        "The output should be JSON.\n"
+        "```json\n"
+        + json.dumps(payload)
+        + "\n```"
+    )
+
+    parsed = _parse_json_object(text)
+
+    assert parsed["description"] == "Extract fork count"
+    assert parsed["output_key"] == "fork_count"
+    assert "async def run(page, results)" in parsed["code"]
+
+
+def test_parse_json_object_finds_unfenced_plan_after_evidence_json():
+    payload = {
+        "description": "Extract fork count",
+        "action_type": "run_python",
+        "expected_effect": "extract",
+        "allow_empty_output": False,
+        "output_key": "fork_count",
+        "code": "async def run(page, results):\n    return {'fork_count': 315}",
+    }
+    text = (
+        "Analysis before the answer.\n"
+        'Evidence: {"label": "Fork 315", "locator": {"method": "role"}}.\n'
+        + json.dumps(payload)
+    )
+
+    parsed = _parse_json_object(text)
+
+    assert parsed["description"] == "Extract fork count"
+    assert parsed["output_key"] == "fork_count"
+
+
+@pytest.mark.asyncio
+async def test_planner_json_parse_failure_returns_agent_diagnostic(monkeypatch):
+    async def fake_snapshot(_page):
+        return {
+            "url": "https://github.com/trending",
+            "title": "Trending",
+            "frames": [],
+            "content_nodes": [],
+            "actionable_nodes": [],
+            "containers": [],
+        }
+
+    async def bad_planner(_payload):
+        _parse_json_object("I could not build a JSON plan")
+
+    monkeypatch.setattr(recording_runtime_agent, "_safe_page_snapshot", fake_snapshot)
+
+    result = await RecordingRuntimeAgent(planner=bad_planner).run(
+        page=_FakePage(),
+        instruction="打开和Skill最相关的项目",
+        runtime_results={},
+    )
+
+    assert result.success is False
+    assert result.trace is None
+    assert result.diagnostics
+    assert result.diagnostics[0].source == "ai"
+    assert "planner" in result.diagnostics[0].message.lower()
+    assert result.diagnostics[0].raw["error_type"] == "planner_contract"
+
+
+@pytest.mark.asyncio
+async def test_default_planner_contract_diagnostic_includes_llm_call_summary(monkeypatch):
+    async def fake_snapshot(_page):
+        return {
+            "url": "https://github.com/trending",
+            "title": "Trending",
+            "frames": [],
+            "content_nodes": [],
+            "actionable_nodes": [],
+            "containers": [],
+        }
+
+    class FakeModel:
+        model_name = "glm-4.7"
+        openai_api_base = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        max_tokens = 100000
+        model_kwargs = {}
+        profile = {"max_input_tokens": 200000}
+
+        async def ainvoke(self, messages):
+            assert len(messages) == 2
+            return SimpleNamespace(content="I cannot return JSON")
+
+    import backend.deepagent.engine as engine
+
+    monkeypatch.setattr(recording_runtime_agent, "_safe_page_snapshot", fake_snapshot)
+    monkeypatch.setattr(
+        engine,
+        "get_llm_model",
+        lambda config=None, max_tokens_override=None, streaming=False: FakeModel(),
+    )
+
+    result = await RecordingRuntimeAgent(
+        model_config={
+            "id": "model-glm",
+            "provider": "other",
+            "model_name": "glm-4.7",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "context_window": 200000,
+            "user_id": "admin-uuid",
+        }
+    ).run(
+        page=_FakePage(),
+        instruction="find repo star count",
+        runtime_results={},
+    )
+
+    raw = result.diagnostics[0].raw
+    assert raw["error_type"] == "planner_contract"
+    assert raw["llm_call"]["request"]["effective_model"]["model_name"] == "glm-4.7"
+    assert raw["llm_call"]["request"]["effective_model"]["max_tokens"] == 100000
+    assert raw["llm_call"]["request"]["effective_model"]["profile"]["max_input_tokens"] == 200000
+    assert "preview" not in raw["llm_call"]["request"]["messages"][0]
+    assert raw["llm_call"]["response"]["preview"] == "I cannot return JSON"
+
+
+@pytest.mark.asyncio
+async def test_default_planner_prompt_preview_requires_debug_flag(monkeypatch):
+    async def fake_snapshot(_page):
+        return {
+            "url": "https://github.com/trending",
+            "title": "Trending",
+            "frames": [],
+            "content_nodes": [],
+            "actionable_nodes": [],
+            "containers": [],
+        }
+
+    class FakeModel:
+        model_name = "glm-4.7"
+        max_tokens = 8192
+        model_kwargs = {}
+
+        async def ainvoke(self, _messages):
+            return SimpleNamespace(content="not json")
+
+    import backend.deepagent.engine as engine
+
+    monkeypatch.setattr(recording_runtime_agent, "_safe_page_snapshot", fake_snapshot)
+    monkeypatch.setattr(
+        engine,
+        "get_llm_model",
+        lambda config=None, max_tokens_override=None, streaming=False: FakeModel(),
+    )
+    monkeypatch.setenv("RPA_LLM_DIAGNOSTIC_PROMPT_PREVIEW", "true")
+
+    result = await RecordingRuntimeAgent(model_config={"model_name": "glm-4.7"}).run(
+        page=_FakePage(),
+        instruction="find repo star count",
+        runtime_results={},
+    )
+
+    messages = result.diagnostics[0].raw["llm_call"]["request"]["messages"]
+    assert messages[0]["preview"].startswith("You operate exactly one RPA recording command.")
+    assert "find repo star count" in messages[1]["preview"]
+
+
+@pytest.mark.asyncio
+async def test_default_planner_uses_recording_token_floor(monkeypatch):
+    async def fake_snapshot(_page):
+        return {
+            "url": "https://github.com/example/repo",
+            "title": "Repo",
+            "frames": [],
+            "content_nodes": [],
+            "actionable_nodes": [],
+            "containers": [],
+        }
+
+    calls = []
+
+    class FakeModel:
+        model_name = "glm-4.7"
+        openai_api_base = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        max_tokens = 8192
+        model_kwargs = {}
+        profile = {"max_input_tokens": 200000}
+
+        async def ainvoke(self, _messages):
+            return SimpleNamespace(content="not json")
+
+    import backend.deepagent.engine as engine
+
+    def fake_get_llm_model(config=None, max_tokens_override=None, streaming=False):
+        calls.append(
+            {
+                "config": config,
+                "max_tokens_override": max_tokens_override,
+                "streaming": streaming,
+            }
+        )
+        return FakeModel()
+
+    monkeypatch.setattr(recording_runtime_agent, "_safe_page_snapshot", fake_snapshot)
+    monkeypatch.setattr(engine, "get_llm_model", fake_get_llm_model)
+
+    result = await RecordingRuntimeAgent(model_config={"model_name": "glm-4.7"}).run(
+        page=_FakePage(),
+        instruction="get fork count",
+        runtime_results={},
+    )
+
+    assert result.success is False
+    assert calls == [
+        {
+            "config": {"model_name": "glm-4.7"},
+            "max_tokens_override": 8192,
+            "streaming": False,
+        }
+    ]
+    assert result.diagnostics[0].raw["llm_call"]["request"]["effective_model"]["max_tokens"] == 8192
+
+
+@pytest.mark.asyncio
+async def test_execution_failure_diagnostic_includes_planner_llm_call_summary(monkeypatch):
+    async def fake_snapshot(_page):
+        return {
+            "url": "https://github.com/mattpocock/skills",
+            "title": "Skills",
+            "frames": [],
+            "content_nodes": [],
+            "actionable_nodes": [],
+            "containers": [],
+        }
+
+    bad_plan = {
+        "description": "Extract stars",
+        "action_type": "run_python",
+        "expected_effect": "extract",
+        "allow_empty_output": False,
+        "code": (
+            "async def run(page, results):\n"
+            "    link = page.get_by_role('link', name=lambda text: 'stars' in text)\n"
+            "    return await link.text_content()"
+        ),
+    }
+
+    class FakeModel:
+        model_name = "glm-4.7"
+        openai_api_base = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        max_tokens = 100000
+        model_kwargs = {}
+        profile = {"max_input_tokens": 200000}
+
+        async def ainvoke(self, _messages):
+            return SimpleNamespace(content=json.dumps(bad_plan))
+
+    class FailingPage(_FakePage):
+        def get_by_role(self, *_args, **_kwargs):
+            raise AttributeError("'function' object has no attribute 'replace'")
+
+    import backend.deepagent.engine as engine
+
+    monkeypatch.setattr(recording_runtime_agent, "_safe_page_snapshot", fake_snapshot)
+    monkeypatch.setattr(
+        engine,
+        "get_llm_model",
+        lambda config=None, max_tokens_override=None, streaming=False: FakeModel(),
+    )
+
+    result = await RecordingRuntimeAgent(model_config={"model_name": "glm-4.7"}).run(
+        page=FailingPage(),
+        instruction="get the repository star count",
+        runtime_results={},
+    )
+
+    assert result.success is False
+    raw = result.diagnostics[0].raw
+    assert "'function' object has no attribute 'replace'" in raw["result"]["error"]
+    assert raw["llm_call"]["response"]["preview"].startswith("{")
+    assert raw["llm_call"]["request"]["message_count"] == 2

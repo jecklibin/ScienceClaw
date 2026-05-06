@@ -20,7 +20,7 @@ from backend.config import settings
 from backend.deepagent.engine import get_llm_model
 from backend.deepagent.runner import arun_science_task_stream
 from backend.deepagent.sessions import async_create_science_session
-from backend.storage import get_repository
+from backend.models import resolve_default_model_config
 
 router = APIRouter(tags=["chat"])
 
@@ -209,27 +209,17 @@ class ParseScheduleRequest(BaseModel):
 
 
 async def _resolve_any_model_config() -> Optional[dict]:
-    """找到任意一个可用的模型配置，供 get_llm_model 使用。
+    """找到无用户上下文可用的系统模型配置，供 get_llm_model 使用。
 
-    优先使用 settings 中的全局默认（DeepSeek env），
-    其次使用数据库中任意 active 且有 api_key 的模型。
+    无用户上下文不能选择用户资产模型。优先使用数据库中的 system active model，
+    其次使用 settings 中的全局默认（DeepSeek env）。
     无可用模型时返回 None。
     """
+    model_config = await resolve_default_model_config(user_id=None)
+    if model_config:
+        return model_config
     if (getattr(settings, "model_ds_api_key", None) or "").strip():
         return {"_use_default": True}
-    docs = await get_repository("models").find_many(
-        {"is_active": True, "api_key": {"$nin": ["", None]}},
-        sort=[("created_at", -1)],
-        limit=1,
-    )
-    doc = docs[0] if docs else None
-    if doc:
-        return {
-            "model_name": doc.get("model_name"),
-            "base_url": doc.get("base_url"),
-            "api_key": doc.get("api_key"),
-            "context_window": doc.get("context_window"),
-        }
     return None
 
 

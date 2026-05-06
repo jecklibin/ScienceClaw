@@ -77,7 +77,7 @@ npm install
 npm run dev
 ```
 
-Default login: `admin` / `admin123`
+Default local/desktop mode opens as the bootstrap admin without login. Set `AUTH_PROVIDER=local` to enable login; the bootstrap admin is `admin` / `admin123` unless overridden.
 
 ## Backend API
 

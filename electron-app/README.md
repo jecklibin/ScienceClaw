@@ -120,6 +120,35 @@ Packaged app files:
 
 Electron DevTools: Press `Ctrl+Shift+I` in the app window
 
+## Authentication Mode
+
+The desktop app uses local storage and local browser automation by default:
+
+```env
+STORAGE_BACKEND=local
+```
+
+This does not imply no-login mode. The packaged desktop runtime defaults to:
+
+```env
+AUTH_PROVIDER=local
+```
+
+That means users sign in with local accounts and their models, credentials,
+skills, RPA sessions, and MCP tools remain separated by user id. The bootstrap
+admin account is created on first start; use `admin` / `admin123` unless the
+password has already been changed.
+
+For a single-user, no-login desktop build, explicitly override the packaged
+environment in `<install-dir>\.env`:
+
+```env
+AUTH_PROVIDER=none
+```
+
+Only use `AUTH_PROVIDER=none` when tenant isolation is not required. In that
+mode assets are owned by the local development identity `local_admin`.
+
 ## Project Structure
 
 ```

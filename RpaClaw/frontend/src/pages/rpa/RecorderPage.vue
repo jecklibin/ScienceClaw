@@ -45,6 +45,7 @@ import {
   getDefaultRpaAssistantModelId,
   shouldSubmitRpaAssistantComposer,
 } from '@/utils/rpaAssistantModel';
+import { buildRpaAssistantRequestHeaders } from '@/utils/rpaAssistantRequest';
 
 const router = useRouter();
 const route = useRoute();
@@ -180,6 +181,7 @@ const mapConfigureTimelineSteps = (session: any) => ([
     id: String(index + 1),
     stepId: step.stepId || '',
     traceId: step.traceId || '',
+    diagnosticId: step.diagnosticId || '',
     title: step.description || step.action,
     description: step.description || step.action,
     status: 'completed',
@@ -196,9 +198,10 @@ const mapConfigureTimelineSteps = (session: any) => ([
 const refreshTimeline = (session: any) => {
   const serverSteps = Array.isArray(session?.steps) ? session.steps : [];
   const serverTraces = Array.isArray(session?.traces) ? session.traces : [];
+  const serverTimeline = Array.isArray(session?.timeline) ? session.timeline : [];
   acceptedTraces.value = serverTraces;
   recordingDiagnostics.value = getManualRecordingDiagnostics(session);
-  if ((Array.isArray(session?.recorded_actions) && session.recorded_actions.length > 0) || serverTraces.length > 0) {
+  if (serverTimeline.length > 0 || (Array.isArray(session?.recorded_actions) && session.recorded_actions.length > 0) || serverTraces.length > 0) {
     steps.value = mapConfigureTimelineSteps(session);
     return;
   }
@@ -206,6 +209,11 @@ const refreshTimeline = (session: any) => {
     steps.value = mapServerSteps(serverSteps);
   }
 };
+
+const sessionWithTimeline = (payload: any) => ({
+  ...(payload?.session || {}),
+  timeline: payload?.session?.timeline ?? payload?.timeline,
+});
 
 interface ChatMessage {
   role: 'user' | 'assistant';
@@ -387,7 +395,7 @@ const startPollingSteps = () => {
     if (!sessionId.value) return;
     try {
       const resp = await apiClient.get(`/rpa/session/${sessionId.value}`);
-      refreshTimeline(resp.data.session || {});
+      refreshTimeline(sessionWithTimeline(resp.data));
     } catch (err) {
       // Ignore polling errors
     }
@@ -741,19 +749,19 @@ const goToSkills = () => {
 const deleteStep = async (step: any, fallbackStepIndex: number) => {
   if (!sessionId.value) return;
   try {
-    if (step.stepId) {
+    if (step.traceId) {
+      await apiClient.delete(`/rpa/session/${sessionId.value}/trace/${step.traceId}`);
+    } else if (step.diagnosticId) {
+      await apiClient.delete(`/rpa/session/${sessionId.value}/diagnostic/${step.diagnosticId}`);
+    } else if (step.stepId) {
       await apiClient.delete(`/rpa/session/${sessionId.value}/timeline-item`, {
         data: { kind: 'manual_step', step_id: step.stepId },
-      });
-    } else if (step.traceId) {
-      await apiClient.delete(`/rpa/session/${sessionId.value}/timeline-item`, {
-        data: { kind: 'trace', trace_id: step.traceId },
       });
     } else {
       await apiClient.delete(`/rpa/session/${sessionId.value}/step/${fallbackStepIndex}`);
     }
     const resp = await apiClient.get(`/rpa/session/${sessionId.value}`);
-    refreshTimeline(resp.data.session || {});
+    refreshTimeline(sessionWithTimeline(resp.data));
   } catch (err) {
     console.error('Failed to delete step:', err);
   }
@@ -802,10 +810,7 @@ const sendMessage = async () => {
   try {
     const resp = await fetch(`/api/v1/rpa/session/${sessionId.value}/chat`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${localStorage.getItem('token') || ''}`,
-      },
+      headers: buildRpaAssistantRequestHeaders(),
       body: JSON.stringify(buildRpaAssistantChatPayload(userText, selectedModelId.value)),
     });
 

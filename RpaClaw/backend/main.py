@@ -30,6 +30,7 @@ from backend.route.runtime_proxy import router as runtime_proxy_router
 from backend.runtime.session_runtime_manager import get_session_runtime_manager
 from backend.models import init_system_models
 from backend.user.bootstrap import ensure_admin_user
+from backend.user.asset_migration import migrate_local_admin_assets_to_bootstrap_admin
 
 
 async def _runtime_cleanup_loop(stop_event: asyncio.Event) -> None:
@@ -65,6 +66,10 @@ async def lifespan(app: FastAPI):
         await ensure_admin_user()
     except Exception as e:
         logger.error(f"Failed to bootstrap admin user: {e}")
+    try:
+        await migrate_local_admin_assets_to_bootstrap_admin()
+    except Exception as e:
+        logger.error(f"Failed to migrate local_admin assets: {e}")
     try:
         await cleanup_orphaned_sessions()
     except Exception as e:
