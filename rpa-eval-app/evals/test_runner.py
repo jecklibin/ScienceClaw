@@ -215,6 +215,53 @@ class RunnerAssertionTests(unittest.TestCase):
             action_log[-4:],
         )
 
+    def test_run_case_uses_replay_fixture_variant_and_replay_assertions(self):
+        args = type(
+            "Args",
+            (),
+            {
+                "reset_token": "rpa-eval-reset",
+                "eval_frontend_url": "http://localhost:5175",
+                "case_timeout_s": 180,
+                "verify_replay": True,
+                "replay_timeout_s": 90,
+            },
+        )()
+        case = {
+            "id": "case_dynamic_replay",
+            "name": "dynamic replay",
+            "tags": [],
+            "user": {"username": "buyer"},
+            "start_path": "/regression-lab",
+            "instruction": "Open the first item.",
+            "expected": {},
+            "assertions": {},
+            "api_assertions": [{"name": "record assertion should not be used during replay", "path": "/api/unused"}],
+            "replay": {
+                "fixture_variant": "dynamic_first_item_reordered",
+                "api_assertions": [
+                    {
+                        "name": "replay assertion",
+                        "path": "/api/lab/events",
+                        "find": {"event_key": "dynamic_first_item_opened"},
+                        "absent": True,
+                    }
+                ],
+            },
+        }
+        eval_client = FakeRunnerEvalClient()
+        rpa_client = FakeRunnerRpaClient()
+        action_log = []
+        eval_client.actions = action_log
+        rpa_client.actions = action_log
+
+        result = run_case(case, args, eval_client, rpa_client)
+
+        self.assertTrue(result["passed"], result.get("failure_message"))
+        self.assertIn("reset:rpa-eval-reset:dynamic_first_item_reordered", action_log)
+        self.assertIn("get:/api/lab/events", action_log)
+        self.assertNotIn("get:/api/unused", action_log)
+
     def test_recording_aborted_is_record_phase_failure(self):
         args = type(
             "Args",
@@ -433,6 +480,54 @@ class RunnerAssertionTests(unittest.TestCase):
             },
         )
 
+    def test_empty_result_accepts_snake_case_boolean_signal(self):
+        assert_expected_telemetry(
+            {"empty_result": {"query": "CT-2026-RPA-NOT-FOUND", "should_open_record": False}},
+            {
+                "output_text": (
+                    'SKILL_DATA:{"no_matching_contract_result":{'
+                    '"contract_no":"CT-2026-RPA-NOT-FOUND",'
+                    '"empty_result":true,"evidence":"zero_table_rows"}}'
+                )
+            },
+        )
+
+    def test_empty_result_accepts_no_matching_results_signal(self):
+        assert_expected_telemetry(
+            {"empty_result": {"query": "CT-2026-RPA-NOT-FOUND", "should_open_record": False}},
+            {
+                "output_text": (
+                    'SKILL_DATA:{"no_matching_contract_result":{'
+                    '"filled_value":"CT-2026-RPA-NOT-FOUND",'
+                    '"no_matching_results":true}}'
+                )
+            },
+        )
+
+    def test_empty_result_accepts_no_matching_result_value(self):
+        assert_expected_telemetry(
+            {"empty_result": {"query": "CT-2026-RPA-NOT-FOUND", "should_open_record": False}},
+            {
+                "output_text": (
+                    'SKILL_DATA:{"no_matching_contracts_result":{'
+                    '"filled_value":"CT-2026-RPA-NOT-FOUND",'
+                    '"result":"no_matching_contracts"}}'
+                )
+            },
+        )
+
+    def test_empty_result_accepts_no_match_confirmed_signal(self):
+        assert_expected_telemetry(
+            {"empty_result": {"query": "CT-2026-RPA-NOT-FOUND", "should_open_record": False}},
+            {
+                "output_text": (
+                    'SKILL_DATA:{"contract_no_match_result":{'
+                    '"searched_contract_number":"CT-2026-RPA-NOT-FOUND",'
+                    '"no_match_confirmed":true}}'
+                )
+            },
+        )
+
     def test_empty_result_accepts_flattened_matched_rows_zero(self):
         assert_expected_telemetry(
             {"empty_result": {"query": "CT-2026-RPA-NOT-FOUND", "should_open_record": False}},
@@ -593,14 +688,20 @@ class FakeRunnerEvalClient:
     def __init__(self):
         self.actions = []
 
-    def reset(self, reset_token):
-        self.actions.append(f"reset:{reset_token}")
+    def reset(self, reset_token, *, fixture_variant=None):
+        suffix = f":{fixture_variant}" if fixture_variant else ""
+        self.actions.append(f"reset:{reset_token}{suffix}")
         self.reset_token = reset_token
+        self.fixture_variant = fixture_variant
 
     def login(self, username, password):
         self.actions.append(f"login:{username}")
         self.login_args = (username, password)
         return EvalAppUserSession(username=username, token="token", user={"username": username})
+
+    def get_json(self, path, token):
+        self.actions.append(f"get:{path}")
+        return []
 
 
 class FakeRunnerRpaClient:
@@ -621,6 +722,16 @@ class FakeRunnerRpaClient:
 
     def navigate(self, session_id, url):
         self.navigations.append((session_id, url))
+        self.current_url = url
+
+    def navigate_and_wait(self, session_id, url, *, timeout_s=10.0):
+        self.navigate(session_id, url)
+
+    def get_tabs(self, session_id):
+        return {
+            "active_tab_id": "tab-1",
+            "tabs": [{"id": "tab-1", "url": getattr(self, "current_url", "")}],
+        }
 
     def chat_with_wall_timeout(self, session_id, instruction, *, timeout_s, business_instruction=None):
         self.instructions.append(instruction)

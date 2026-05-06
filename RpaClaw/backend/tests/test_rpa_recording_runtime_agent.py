@@ -27,6 +27,8 @@ from backend.rpa.recording_runtime_agent import (
 from backend.rpa.trace_skill_compiler import TraceSkillCompiler
 from backend.rpa.trace_models import RPAAcceptedTrace, RPAAIExecution, RPAPageState, RPATraceType
 from backend.rpa.recording_terminal_recovery import recover_failed_side_effect_from_snapshot_diff
+from backend.rpa.recording_effects import _filled_value_conflicts_with_source_output
+from backend.rpa.recording_verifier import verify_terminal_contract
 
 
 class _FakePage:
@@ -1631,7 +1633,7 @@ def test_ensure_expected_effect_accepts_closed_modal_after_terminal_submit():
     assert result["effect"]["terminal_evidence"] == "feedback_visible"
 
 
-def test_ensure_expected_effect_accepts_new_feedback_for_generic_state_change():
+def test_ensure_expected_effect_rejects_feedback_when_url_change_is_required():
     page = _FakePage()
     before = RPAPageState(url=page.url, title="Example")
 
@@ -1643,6 +1645,40 @@ def test_ensure_expected_effect_accepts_new_feedback_for_generic_state_change():
                 "action_type": "run_python",
                 "expected_effect": "mixed",
                 "terminal_contract": _required_terminal_contract("url_changed", kind="state_change"),
+            },
+            result={
+                "success": True,
+                "output": {"action_performed": True, "action_type": "click"},
+                "browser_evidence": {
+                    "before": {"visible_dialog_count": 0, "feedback_texts": [], "validation_texts": []},
+                    "after": {"visible_dialog_count": 0, "feedback_texts": ["Action completed"], "validation_texts": []},
+                },
+            },
+            before=before,
+        )
+    )
+
+    assert result["success"] is False
+    assert result["terminal_verification"]["missing_evidence"] == ["url_changed"]
+
+
+def test_ensure_expected_effect_accepts_new_feedback_for_generic_state_change_without_specific_evidence():
+    page = _FakePage()
+    before = RPAPageState(url=page.url, title="Example")
+
+    result = asyncio.run(
+        _ensure_expected_effect(
+            page=page,
+            instruction="perform an action and confirm the page changed state",
+            plan={
+                "action_type": "run_python",
+                "expected_effect": "mixed",
+                "terminal_contract": {
+                    "required": True,
+                    "kind": "state_change",
+                    "success_evidence": [],
+                    "allow_semantic_judge": False,
+                },
             },
             result={
                 "success": True,
@@ -1714,6 +1750,39 @@ def test_ensure_expected_effect_rejects_terminal_submit_when_modal_stays_visible
 
     assert result["success"] is False
     assert "required terminal evidence" in result["error"]
+
+
+def test_ensure_expected_effect_rejects_validation_error_even_with_success_feedback():
+    page = _FakePage()
+    before = RPAPageState(url=page.url, title="Example")
+
+    result = asyncio.run(
+        _ensure_expected_effect(
+            page=page,
+            instruction="submit the form and create the record",
+            plan={
+                "action_type": "run_python",
+                "expected_effect": "mixed",
+                "terminal_contract": _required_terminal_contract("feedback_visible", kind="record_created"),
+            },
+            result={
+                "success": True,
+                "output": {"action_performed": True, "action_type": "click"},
+                "browser_evidence": {
+                    "before": {"visible_dialog_count": 0, "feedback_texts": [], "validation_texts": []},
+                    "after": {
+                        "visible_dialog_count": 0,
+                        "feedback_texts": ["Saved successfully"],
+                        "validation_texts": ["Please complete required fields"],
+                    },
+                },
+            },
+            before=before,
+        )
+    )
+
+    assert result["success"] is False
+    assert result["terminal_verification"]["reason"] == "validation_error_visible"
 
 
 def test_ensure_expected_effect_accepts_terminal_write_with_structured_terminal_evidence():
@@ -1861,6 +1930,103 @@ def test_ensure_expected_effect_accepts_matched_rows_zero_for_empty_result_state
                 "terminal_contract": _required_terminal_contract("empty_result", kind="empty_result"),
             },
             result={"success": True, "output": {"matched_rows": 0, "conclusion": "no matching records"}},
+            before=before,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["effect"]["terminal_evidence"] == "empty_result"
+
+
+def test_ensure_expected_effect_rejects_contradictory_empty_result_output():
+    page = _FakePage()
+    before = RPAPageState(url=page.url, title="Example")
+
+    result = asyncio.run(
+        _ensure_expected_effect(
+            page=page,
+            instruction="filter failed audit records and confirm the result list is empty",
+            plan={
+                "action_type": "run_python",
+                "expected_effect": "mixed",
+                "terminal_contract": _required_terminal_contract("empty_result", kind="empty_result"),
+            },
+            result={
+                "success": True,
+                "output": {
+                    "empty_result": True,
+                    "confirmed_empty": True,
+                    "matched_rows": 0,
+                    "visible_rows": 2,
+                    "empty_state_text": "",
+                },
+            },
+            before=before,
+        )
+    )
+
+    assert result["success"] is False
+    assert "required terminal evidence" in result["error"]
+
+
+def test_ensure_expected_effect_rejects_false_row_found_when_visible_rows_remain():
+    page = _FakePage()
+    before = RPAPageState(url=page.url, title="Example")
+
+    result = asyncio.run(
+        _ensure_expected_effect(
+            page=page,
+            instruction="search and confirm no matching records",
+            plan={
+                "action_type": "run_python",
+                "expected_effect": "mixed",
+                "terminal_contract": _required_terminal_contract("empty_result", kind="empty_result"),
+            },
+            result={"success": True, "output": {"row_found": False, "visible_rows": 2}},
+            before=before,
+        )
+    )
+
+    assert result["success"] is False
+    assert "required terminal evidence" in result["error"]
+
+
+def test_ensure_expected_effect_accepts_structured_false_match_for_empty_result_state():
+    page = _FakePage()
+    before = RPAPageState(url=page.url, title="Example")
+
+    result = asyncio.run(
+        _ensure_expected_effect(
+            page=page,
+            instruction="search and confirm no matching records",
+            plan={
+                "action_type": "run_python",
+                "expected_effect": "mixed",
+                "terminal_contract": _required_terminal_contract("empty_result", kind="empty_result"),
+            },
+            result={"success": True, "output": {"matched_result": False, "query": "NOT-FOUND"}},
+            before=before,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["effect"]["terminal_evidence"] == "empty_result"
+
+
+def test_ensure_expected_effect_accepts_empty_state_text_for_empty_result_state():
+    page = _FakePage()
+    before = RPAPageState(url=page.url, title="Example")
+
+    result = asyncio.run(
+        _ensure_expected_effect(
+            page=page,
+            instruction="search and confirm no matching records",
+            plan={
+                "action_type": "run_python",
+                "expected_effect": "mixed",
+                "terminal_contract": _required_terminal_contract("empty_result", kind="empty_result"),
+            },
+            result={"success": True, "output": {"empty_state_text": "No matching results"}},
             before=before,
         )
     )
@@ -2089,7 +2255,7 @@ def test_ensure_expected_effect_accepts_structured_download_created_output():
     assert result["effect"]["terminal_evidence"] == "download_created"
 
 
-def test_ensure_expected_effect_accepts_download_filename_output():
+def test_ensure_expected_effect_rejects_download_filename_without_event_or_path():
     page = _FakePage()
     before = RPAPageState(url=page.url, title="Example")
 
@@ -2103,6 +2269,28 @@ def test_ensure_expected_effect_accepts_download_filename_output():
                 "terminal_contract": _required_terminal_contract("download_created", kind="download_created"),
             },
             result={"success": True, "output": {"downloaded_file": "report.csv"}},
+            before=before,
+        )
+    )
+
+    assert result["success"] is False
+    assert result["terminal_verification"]["missing_evidence"] == ["download_created"]
+
+
+def test_ensure_expected_effect_accepts_download_artifact_path_output():
+    page = _FakePage()
+    before = RPAPageState(url=page.url, title="Example")
+
+    result = asyncio.run(
+        _ensure_expected_effect(
+            page=page,
+            instruction="generate the report and download it",
+            plan={
+                "action_type": "run_python",
+                "expected_effect": "mixed",
+                "terminal_contract": _required_terminal_contract("download_created", kind="download_created"),
+            },
+            result={"success": True, "output": {"download": {"filename": "report.csv", "path": "/tmp/report.csv"}}},
             before=before,
         )
     )
@@ -2260,6 +2448,8 @@ def test_normalize_generated_playwright_code_routes_fill_to_editable_descendant_
     assert "get_by_role(\"option\"" in normalized
     assert "[role=combobox], [aria-haspopup=listbox]" in normalized
     assert "_try_active_dialog_single_editable" in normalized
+    assert "_try_nearest_single_editable" in normalized
+    assert "_try_following_label_editable" not in normalized
 
 
 def test_normalize_generated_playwright_code_falls_back_to_dialog_submit_action():
@@ -2306,6 +2496,502 @@ def test_normalize_generated_playwright_code_rewrites_callable_role_name_filter(
 
     assert "name=lambda" not in normalized
     assert "page.get_by_role('row').filter(has_text='REQ-001')" in normalized
+
+
+def test_normalize_generated_playwright_code_rewrites_callable_false_placeholder():
+    code = (
+        "async def run(page, results):\n"
+        "    rows = [page.get_by_role('row', name=lambda name: False).first]\n"
+        "    return rows\n"
+    )
+
+    normalized = _normalize_generated_playwright_code(code)
+
+    assert "name=lambda" not in normalized
+    assert "page.locator('__rpa_no_match__').first" in normalized
+
+
+def test_normalize_generated_playwright_code_rewrites_star_arg_callable_false_placeholder():
+    code = (
+        "async def run(page, results):\n"
+        "    rows = [page.get_by_role('row', name=lambda *_: False).first]\n"
+        "    return rows\n"
+    )
+
+    normalized = _normalize_generated_playwright_code(code)
+
+    assert "name=lambda" not in normalized
+    assert "page.locator('__rpa_no_match__').first" in normalized
+
+
+def test_normalize_generated_playwright_code_wraps_combobox_clicks():
+    code = (
+        "async def run(page, results):\n"
+        "    await page.get_by_role('combobox', name='Status').click()\n"
+    )
+
+    normalized = _normalize_generated_playwright_code(code)
+
+    assert "async def _rpa_click_combobox(" in normalized
+    assert "await _rpa_click_combobox(page.get_by_role('combobox', name='Status'))" in normalized
+    assert "get_by_role('combobox', name='Status').click()" not in normalized
+
+
+def test_normalize_generated_playwright_code_wraps_combobox_variable_clicks():
+    code = (
+        "async def run(page, results):\n"
+        "    status_filter = page.get_by_role('combobox', name='Status')\n"
+        "    await status_filter.click()\n"
+    )
+
+    normalized = _normalize_generated_playwright_code(code)
+
+    assert "async def _rpa_click_combobox(" in normalized
+    assert "await _rpa_click_combobox(status_filter)" in normalized
+
+
+def test_normalize_generated_playwright_code_wraps_enter_submission():
+    code = (
+        "async def run(page, results):\n"
+        "    target = page.locator('input').first\n"
+        "    await target.fill('abc')\n"
+        "    await target.press('Enter')\n"
+    )
+
+    normalized = _normalize_generated_playwright_code(code)
+
+    assert "async def _rpa_submit_text_input(" in normalized
+    assert "await _rpa_submit_text_input(target)" in normalized
+    assert "button[type=submit]" in normalized
+    assert "[role=button]" not in normalized
+    assert "Enter submission failed" in normalized
+
+
+def test_normalize_generated_playwright_code_broadens_row_cell_action_locator():
+    code = (
+        "async def run(page, results):\n"
+        "    row = page.locator('tbody tr').nth(0)\n"
+        "    await row.locator('td:nth-child(3) button').click()\n"
+    )
+
+    normalized = _normalize_generated_playwright_code(code)
+
+    assert "td:nth-child(3) a" in normalized
+    assert "td:nth-child(3) button" in normalized
+    assert "td:nth-child(3) [role=button]" in normalized
+
+
+def test_normalize_generated_playwright_code_waits_for_required_locator_guard():
+    code = (
+        "async def run(page, results):\n"
+        "    region = page.get_by_text('Dynamic first item list').first\n"
+        "    if await region.count() == 0:\n"
+        "        raise RuntimeError('missing region')\n"
+        "    return await region.inner_text()\n"
+    )
+
+    normalized = _normalize_generated_playwright_code(code)
+
+    assert "await region.wait_for(state=\"visible\", timeout=10000)" in normalized
+    assert normalized.index("await region.wait_for") < normalized.index("if await region.count() == 0")
+
+
+def test_normalize_generated_playwright_code_does_not_wait_for_fallback_locator_guard():
+    code = (
+        "async def run(page, results):\n"
+        "    table = page.get_by_role('table', name='Orders')\n"
+        "    if await table.count() == 0:\n"
+        "        table = page.locator('table').filter(has_text='Order ID')\n"
+        "    return await table.count()\n"
+    )
+
+    normalized = _normalize_generated_playwright_code(code)
+
+    assert "await table.wait_for" not in normalized
+
+
+def test_normalize_generated_playwright_code_expands_region_container_xpath():
+    code = (
+        "async def run(page, results):\n"
+        "    region = page.get_by_text('Orders').first\n"
+        "    container = region.locator('xpath=ancestor::*[self::section or self::div][1]')\n"
+        "    return await container.count()\n"
+    )
+
+    normalized = _normalize_generated_playwright_code(code)
+
+    assert "self::article" in normalized
+    assert '@role=\\"grid\\"' in normalized
+    assert "ancestor::*[self::section or self::div][1]" not in normalized
+    compile(normalized, "<normalized>", "exec")
+
+
+def test_normalize_generated_playwright_code_expands_ancestor_or_self_region_container_xpath():
+    code = (
+        "async def run(page, results):\n"
+        "    region = page.get_by_text('Orders').first\n"
+        "    container = region.locator('xpath=ancestor-or-self::*[self::section or self::div or self::article][1]')\n"
+        "    return await container.count()\n"
+    )
+
+    normalized = _normalize_generated_playwright_code(code)
+
+    assert '@role=\\"grid\\"' in normalized
+    assert "ancestor-or-self::*[self::section or self::div or self::article][1]" not in normalized
+    compile(normalized, "<normalized>", "exec")
+
+
+def test_normalize_generated_playwright_code_prepares_disabled_download_control():
+    code = (
+        "async def run(page, results):\n"
+        "    download_loc = page.get_by_test_id('download-report')\n"
+        "    async with page.expect_download() as download_info:\n"
+        "        await download_loc.click()\n"
+        "    return await download_info.value\n"
+    )
+
+    normalized = _normalize_generated_playwright_code(code)
+
+    assert "async def _rpa_prepare_download_control" in normalized
+    assert "await _rpa_prepare_download_control(page, download_loc)" in normalized
+    compile(normalized, "<normalized>", "exec")
+
+
+def test_normalize_generated_playwright_code_wraps_combobox_click_with_timeout():
+    code = (
+        "async def run(page, results):\n"
+        "    await page.get_by_role('combobox', name='Status').first.click(timeout=12000)\n"
+    )
+
+    normalized = _normalize_generated_playwright_code(code)
+
+    assert "async def _rpa_click_combobox" in normalized
+    assert "await _rpa_click_combobox(page.get_by_role('combobox', name='Status').first, timeout=12000)" in normalized
+    compile(normalized, "<normalized>", "exec")
+
+
+def test_normalize_generated_playwright_code_wraps_named_table_lookup():
+    normalized = _normalize_generated_playwright_code(
+        "async def run(page, results):\n"
+        "    table = page.get_by_role('table', name='Split header/body grid')\n"
+        "    row = table.locator('tbody tr').first\n"
+    )
+
+    assert "async def _rpa_named_table(page, name" in normalized
+    assert "table = await _rpa_named_table(page, 'Split header/body grid')" in normalized
+    compile(normalized, "<normalized>", "exec")
+
+
+def test_normalize_generated_playwright_code_removes_recorded_link_name_from_ordinal_row():
+    normalized = _normalize_generated_playwright_code(
+        "async def run(page, results):\n"
+        "    target_name = 'recorded-first-row.csv'\n"
+        "    table = page.get_by_role('table', name='Files')\n"
+        "    row = table.get_by_role('row').first\n"
+        "    link = row.get_by_role('link', name=target_name)\n"
+        "    await link.click()\n"
+    )
+
+    assert "link = row.get_by_role('link').first" in normalized
+    assert "link = row.get_by_role('link', name=target_name)" not in normalized
+    compile(normalized, "<normalized>", "exec")
+
+
+def test_normalize_generated_playwright_code_repairs_playwright_async_api_shapes():
+    normalized = _normalize_generated_playwright_code(
+        "async def run(page, results):\n"
+        "    value = page.get_by_text('Status').locator('xpath=following::*[1]').inner_text()\n"
+        "    filename = await download.suggested_filename\n"
+        "    return {'value': value, 'filename': filename}\n"
+    )
+
+    assert "value = await page.get_by_text('Status').locator('xpath=following::*[1]').inner_text()" in normalized
+    assert "filename = download.suggested_filename" in normalized
+    assert "await download.suggested_filename" not in normalized
+    compile(normalized, "<normalized>", "exec")
+
+
+def test_normalize_generated_playwright_code_rebinds_misaligned_testid_form_controls():
+    normalized = _normalize_generated_playwright_code(
+        "async def run(page, results):\n"
+        "    request_input = page.get_by_test_id('supplier-input')\n"
+        "    supplier_input = page.get_by_test_id('department-input')\n"
+        "    cost_center_input = page.locator('input').filter(has=page.get_by_text('Cost center'))\n"
+        "    await _rpa_fill(request_input, 'REQ-001')\n"
+        "    await _rpa_fill(supplier_input, 'SUP-001')\n"
+    )
+
+    assert "async def _rpa_form_control_by_semantic_name(" in normalized
+    assert "div, td, th" not in normalized
+    assert "request_input = await _rpa_form_control_by_semantic_name(page, 'request_input')" in normalized
+    assert "supplier_input = await _rpa_form_control_by_semantic_name(page, 'supplier_input')" in normalized
+    assert "cost_center_input = await _rpa_form_control_by_semantic_name(page, 'Cost center')" in normalized
+    assert "any(token in text" not in normalized
+    assert "Ambiguous form control" in normalized
+    compile(normalized, "<normalized>", "exec")
+
+
+def test_normalize_generated_playwright_code_does_not_rebind_non_fill_testid_controls():
+    normalized = _normalize_generated_playwright_code(
+        "async def run(page, results):\n"
+        "    opener = page.get_by_test_id('open-popup-report')\n"
+        "    await opener.click()\n"
+    )
+
+    assert "opener = page.get_by_test_id('open-popup-report')" in normalized
+    assert "_rpa_form_control_by_semantic_name(page, 'opener')" not in normalized
+    compile(normalized, "<normalized>", "exec")
+
+
+def test_normalize_generated_playwright_code_waits_for_text_count_assertions():
+    normalized = _normalize_generated_playwright_code(
+        "async def run(page, results):\n"
+        "    await page.get_by_text('Contracts', exact=True).click()\n"
+        "    await page.wait_for_load_state('networkidle')\n"
+        "    target_visible = await page.get_by_text('CT-2026-RPA-001', exact=True).count() > 0\n"
+        "    if not target_visible:\n"
+        "        raise RuntimeError('missing target')\n"
+    )
+
+    assert "async def _rpa_text_present(" in normalized
+    assert "target_visible = await _rpa_text_present(page, 'CT-2026-RPA-001', exact=True)" in normalized
+    assert ".count() > 0" not in normalized
+    compile(normalized, "<normalized>", "exec")
+
+
+def test_normalize_generated_playwright_code_uses_first_for_direct_text_waits():
+    normalized = _normalize_generated_playwright_code(
+        "async def run(page, results):\n"
+        "    await page.get_by_text('PO-2026-RPA-NEW-001').wait_for(state='visible')\n"
+    )
+
+    assert "await page.get_by_text('PO-2026-RPA-NEW-001').first.wait_for(state='visible')" in normalized
+    compile(normalized, "<normalized>", "exec")
+
+
+def test_normalize_generated_playwright_code_uses_first_for_expect_text_visible():
+    normalized = _normalize_generated_playwright_code(
+        "async def run(page, results):\n"
+        "    await expect(page.get_by_text('PR-2026-RPA-NEW-001')).to_be_visible(timeout=5000)\n"
+    )
+
+    assert "await expect(page.get_by_text('PR-2026-RPA-NEW-001').first).to_be_visible(timeout=5000)" in normalized
+    compile(normalized, "<normalized>", "exec")
+
+
+def test_normalize_generated_playwright_code_rewrites_css_table_row_text_locator():
+    normalized = _normalize_generated_playwright_code(
+        "async def run(page, results):\n"
+        "    target_row = page.locator('.framework-table-body tbody tr', has_text='ROW-001').first\n"
+        "    await target_row.wait_for(state='visible', timeout=5000)\n"
+    )
+
+    assert "def _rpa_find_row_by_text(" in normalized
+    assert "target_row = _rpa_find_row_by_text(page, 'ROW-001')" in normalized
+    assert ".framework-table-body tbody tr" not in normalized
+    compile(normalized, "<normalized>", "exec")
+
+
+def test_normalize_generated_playwright_code_rewrites_scoped_table_filter_row_text_locator():
+    normalized = _normalize_generated_playwright_code(
+        "async def run(page, results):\n"
+        "    row = page.locator('table').filter(has_text='合同编号').first.locator('tbody tr').filter(has_text='CT-001').first\n"
+        "    await row.wait_for(state='visible', timeout=5000)\n"
+    )
+
+    assert "def _rpa_find_row_by_text(" in normalized
+    assert "row = _rpa_find_row_by_text(page, 'CT-001')" in normalized
+    assert ".filter(has_text='合同编号').first.locator('tbody tr')" not in normalized
+    compile(normalized, "<normalized>", "exec")
+
+
+def test_normalize_generated_playwright_code_rejects_unscoped_empty_textbox_fallback():
+    normalized = _normalize_generated_playwright_code(
+        "async def run(page, results):\n"
+        "    for value in ['item', '5', '6800']:\n"
+        "        loc = page.get_by_role('textbox').filter(has_not_text='').first\n"
+        "        if await loc.count():\n"
+        "            await _rpa_fill(loc, value, timeout=5000)\n"
+    )
+
+    assert "__rpa_rejected_unscoped_textbox_fallback__" in normalized
+    assert "get_by_role('textbox').filter(has_not_text='').first" not in normalized
+    compile(normalized, "<normalized>", "exec")
+
+
+def test_normalize_generated_playwright_code_keeps_common_abbreviated_field_testid():
+    normalized = _normalize_generated_playwright_code(
+        "async def run(page, results):\n"
+        "    dept_input = page.get_by_test_id('dataflow-department-input')\n"
+        "    await _rpa_fill(dept_input, department)\n"
+    )
+
+    assert "dept_input = page.get_by_test_id('dataflow-department-input')" in normalized
+    assert "_rpa_form_control_by_semantic_name(page, 'dept_input')" not in normalized
+    compile(normalized, "<normalized>", "exec")
+
+
+def test_normalize_generated_playwright_code_filters_row_collection_by_checked_text():
+    normalized = _normalize_generated_playwright_code(
+        "async def run(page, results):\n"
+        "    contract_no = 'ROW-001'\n"
+        "    table = page.locator('table').filter(has_text='Header')\n"
+        "    rows = table.locator('tbody tr')\n"
+        "    for i in range(await rows.count()):\n"
+        "        row = rows.nth(i)\n"
+        "        if contract_no in await row.inner_text():\n"
+        "            return {'ok': True}\n"
+        "    raise RuntimeError('missing')\n"
+    )
+
+    assert "rows = _rpa_rows_containing_text(page, contract_no)" in normalized
+    assert "def _rpa_rows_containing_text(" in normalized
+    compile(normalized, "<normalized>", "exec")
+
+
+def test_normalize_generated_playwright_code_does_not_guess_dialog_opener():
+    normalized = _normalize_generated_playwright_code(
+        "async def run(page, results):\n"
+        "    modal = page.get_by_role('dialog')\n"
+        "    await modal.wait_for(state='visible')\n"
+    )
+
+    assert "async def _rpa_ensure_visible_dialog(" not in normalized
+    assert "await _rpa_ensure_visible_dialog(page, modal)" not in normalized
+    assert "await modal.wait_for(state='visible')" in normalized
+    compile(normalized, "<normalized>", "exec")
+
+
+def test_normalize_generated_playwright_code_removes_body_text_navigation_guard():
+    normalized = _normalize_generated_playwright_code(
+        "async def run(page, results):\n"
+        "    if 'Contracts' not in await page.locator('body').inner_text():\n"
+        "        nav = page.get_by_text('Contracts', exact=True)\n"
+        "        await nav.click()\n"
+        "        await page.wait_for_load_state('networkidle')\n"
+        "    return {'ok': True}\n"
+    )
+
+    assert "if 'Contracts' not in await page.locator('body').inner_text():" not in normalized
+    assert "    nav = page.get_by_text('Contracts', exact=True)" in normalized
+    assert "    await nav.click()" in normalized
+    compile(normalized, "<normalized>", "exec")
+
+
+def test_normalize_generated_playwright_code_keeps_non_navigation_body_text_guard():
+    normalized = _normalize_generated_playwright_code(
+        "async def run(page, results):\n"
+        "    if 'Exported' not in await page.locator('body').inner_text():\n"
+        "        await page.get_by_role('button', name='Export').click()\n"
+        "    return {'ok': True}\n"
+    )
+
+    assert "if 'Exported' not in await page.locator('body').inner_text():" in normalized
+    assert "await page.get_by_role('button', name='Export').click()" in normalized
+    compile(normalized, "<normalized>", "exec")
+
+
+def test_normalize_generated_playwright_code_removes_post_navigation_body_text_assertions():
+    normalized = _normalize_generated_playwright_code(
+        "async def run(page, results):\n"
+        "    await page.get_by_role('menuitem', name='合同台账').click()\n"
+        "    await page.wait_for_load_state('networkidle')\n"
+        "    body_text = await page.locator('body').inner_text()\n"
+        "    if 'CT-2026-RPA-001' not in body_text:\n"
+        "        raise RuntimeError('contract row not visible')\n"
+        "    return {'ok': True}\n"
+    )
+
+    assert "body_text = await page.locator('body').inner_text()" in normalized
+    assert "if 'CT-2026-RPA-001' not in body_text:" not in normalized
+    assert "raise RuntimeError('contract row not visible')" not in normalized
+    compile(normalized, "<normalized>", "exec")
+
+
+def test_named_table_helper_allows_empty_tables():
+    normalized = _normalize_generated_playwright_code(
+        "async def run(page, results):\n"
+        "    table = page.get_by_role('table', name='Audit records')\n"
+        "    row_count = await table.locator('tbody tr').count()\n"
+        "    return {'row_count': row_count}\n"
+    )
+
+    assert "async def _rpa_named_table(" in normalized
+    assert "following::table[.//tbody/tr]" not in normalized
+    assert "return await candidate.first.is_visible()" in normalized
+    compile(normalized, "<normalized>", "exec")
+
+
+def test_verify_terminal_contract_requires_explicit_field_value_evidence():
+    outcome = verify_terminal_contract(
+        plan={
+            "expected_effect": "state_change",
+            "terminal_contract": {
+                "kind": "state_change",
+                "success_evidence": [{"type": "field_value_equals"}],
+            },
+        },
+        result={"action_performed": True, "feedback_visible": True},
+        before=RPAPageState(url="https://example.test/form"),
+        after=RPAPageState(url="https://example.test/form"),
+    )
+
+    assert outcome["passed"] is False
+    assert outcome["reason"] == "missing_terminal_evidence"
+
+
+def test_trace_skill_compiler_normalizes_embedded_ai_code_before_export():
+    trace = RPAAcceptedTrace(
+        trace_type=RPATraceType.AI_OPERATION,
+        source="ai",
+        description="Click first file row",
+        output_key="clicked_file",
+        ai_execution=RPAAIExecution(
+            code=(
+                "async def run(page, results):\n"
+                "    target_name = 'recorded-first-row.csv'\n"
+                "    table = page.get_by_role('table', name='Files')\n"
+                "    row = table.get_by_role('row').first\n"
+                "    link = row.get_by_role('link', name=target_name)\n"
+                "    await link.click()\n"
+                "    return {'action_performed': True}\n"
+            )
+        ),
+    )
+
+    script = TraceSkillCompiler().generate_script([trace], is_local=True)
+
+    assert "async def _rpa_named_table(page, name" in script
+    assert "table = await _rpa_named_table(page, 'Files')" in script
+    assert "link = row.get_by_role('link').first" in script
+    assert "link = row.get_by_role('link', name=target_name)" not in script
+    compile(script, "<skill>", "exec")
+
+
+def test_normalize_generated_playwright_code_does_not_rewrite_awaited_dialog_button_lookup():
+    code = (
+        "async def run(page, results):\n"
+        "    _submit = await _first_visible(_dialog.get_by_role('button', name=_submit_pattern))\n"
+        "    await _submit.click(timeout=8000)\n"
+    )
+
+    normalized = _normalize_generated_playwright_code(code)
+
+    assert "await _submit.click(timeout=8000)" in normalized
+    compile(normalized, "<normalized>", "exec")
+
+
+def test_normalize_generated_playwright_code_broadens_table_checkbox_locator():
+    code = (
+        "async def run(page, results):\n"
+        "    checkboxes = table.locator('tbody input[type=\"checkbox\"]')\n"
+        "    return await checkboxes.count()\n"
+    )
+
+    normalized = _normalize_generated_playwright_code(code)
+
+    assert 'tbody input[type="checkbox"]' in normalized
+    assert 'tbody [role="checkbox"]' in normalized
 
 
 def test_normalize_generated_playwright_code_moves_visible_option_to_locator_filter():
@@ -2501,6 +3187,202 @@ async def test_ensure_expected_effect_accepts_run_python_fill_with_structured_ou
     assert result["success"] is True
     assert result["effect"]["action_performed"] is True
     assert result["effect"]["generic_evidence"] == "structured_output"
+
+
+def test_filled_value_conflicts_with_source_output_detects_mismatched_mapped_field():
+    error = _filled_value_conflicts_with_source_output(
+        {
+            "action_performed": True,
+            "action_type": "fill",
+            "filled_value": {"Department": "SUP-2026-001"},
+            "source_owner_department": "Procurement Automation",
+        }
+    )
+
+    assert "conflicts with its declared source output" in error
+
+
+def test_terminal_contract_accepts_structured_feedback_for_toast_evidence():
+    before = RPAPageState(url="http://app/items", title="Items")
+    after = RPAPageState(url="http://app/items", title="Items")
+
+    result = verify_terminal_contract(
+        plan={
+            "terminal_contract": {
+                "required": True,
+                "kind": "record_updated",
+                "success_evidence": [{"type": "toast_visible"}],
+            }
+        },
+        result={
+            "browser_evidence": {
+                "before": {"feedback_texts": []},
+                "after": {"feedback_texts": ["Saved"]},
+            }
+        },
+        before=before,
+        after=after,
+    )
+
+    assert result["passed"] is True
+    assert result["evidence"][0]["type"] == "feedback_visible"
+
+
+def test_terminal_contract_accepts_explicit_field_value_output_evidence():
+    before = RPAPageState(url="http://app/items", title="Items")
+    after = RPAPageState(url="http://app/items", title="Items")
+
+    result = verify_terminal_contract(
+        plan={
+            "terminal_contract": {
+                "required": True,
+                "kind": "state_change",
+                "success_evidence": [{"type": "field_value_equals"}],
+            }
+        },
+        result={"output": {"field_value_equals": "current-value"}},
+        before=before,
+        after=after,
+    )
+
+    assert result["passed"] is True
+    assert result["evidence"][0]["type"] == "field_value_equals"
+
+
+def test_terminal_contract_accepts_structured_clicked_row_output_for_row_exists_click():
+    result = verify_terminal_contract(
+        plan={
+            "expected_effect": "click",
+            "terminal_contract": {
+                "required": True,
+                "kind": "state_change",
+                "success_evidence": [{"type": "row_exists"}],
+            },
+        },
+        result={"output": {"action_performed": True, "clicked_row_text": "ROW-001\tFirst row"}},
+        before=RPAPageState(url="https://example.test/table"),
+        after=RPAPageState(url="https://example.test/table"),
+    )
+
+    assert result["passed"] is True
+    assert result["evidence"][0]["type"] == "row_exists"
+
+
+def test_terminal_contract_keeps_required_field_value_evidence_strict():
+    result = verify_terminal_contract(
+        plan={
+            "expected_effect": "click",
+            "terminal_contract": {
+                "required": True,
+                "kind": "state_change",
+                "success_evidence": [{"type": "field_value_equals"}],
+            },
+        },
+        result={
+            "browser_evidence": {
+                "before": {"feedback_texts": []},
+                "after": {"feedback_texts": ["Project opened"]},
+            }
+        },
+        before=RPAPageState(url="https://example.test/list"),
+        after=RPAPageState(url="https://example.test/list"),
+    )
+
+    assert result["passed"] is False
+    assert result["reason"] == "missing_terminal_evidence"
+    assert result["missing_evidence"] == ["field_value_equals"]
+
+
+def test_terminal_contract_treats_new_not_found_feedback_as_validation_error():
+    result = verify_terminal_contract(
+        plan={
+            "expected_effect": "click",
+            "terminal_contract": {
+                "required": True,
+                "kind": "state_change",
+                "success_evidence": [{"type": "feedback_visible"}],
+            },
+        },
+        result={
+            "browser_evidence": {
+                "before": {"feedback_texts": []},
+                "after": {"feedback_texts": ["未找到完成审批的按钮"]},
+            }
+        },
+        before=RPAPageState(url="https://example.test/approval"),
+        after=RPAPageState(url="https://example.test/approval"),
+    )
+
+    assert result["passed"] is False
+    assert result["reason"] == "validation_error_visible"
+
+
+def test_terminal_contract_treats_empty_result_feedback_as_positive_when_declared():
+    result = verify_terminal_contract(
+        plan={
+            "expected_effect": "extract",
+            "terminal_contract": {
+                "required": True,
+                "kind": "empty_result",
+                "success_evidence": [{"type": "empty_result"}],
+            },
+        },
+        result={
+            "output": {"empty_result": True, "row_count": 0},
+            "browser_evidence": {
+                "before": {"feedback_texts": []},
+                "after": {"feedback_texts": ["No failed records found"]},
+            },
+        },
+        before=RPAPageState(url="https://example.test/audit"),
+        after=RPAPageState(url="https://example.test/audit"),
+    )
+
+    assert result["passed"] is True
+    assert not any(item["type"] == "validation_error_visible" for item in result["evidence"])
+
+
+def test_terminal_contract_accepts_download_action_with_observed_filename():
+    result = verify_terminal_contract(
+        plan={
+            "terminal_contract": {
+                "required": True,
+                "kind": "download_created",
+                "success_evidence": [{"type": "download_created"}],
+            },
+        },
+        result={"output": {"action_type": "download", "downloaded_filename": "report.csv"}},
+        before=RPAPageState(url="https://example.test/report"),
+        after=RPAPageState(url="https://example.test/report"),
+    )
+
+    assert result["passed"] is True
+    assert result["evidence"][0]["type"] == "download_created"
+
+
+def test_terminal_contract_accepts_downloaded_flag_with_filename_like_key():
+    result = verify_terminal_contract(
+        plan={
+            "terminal_contract": {
+                "required": True,
+                "kind": "download_created",
+                "success_evidence": [{"type": "download_created"}],
+            },
+        },
+        result={
+            "output": {
+                "action_performed": True,
+                "action_type": "open_popup_and_download",
+                "downloaded": True,
+                "download_suggested_filename": "popup_report_2026.csv",
+            }
+        },
+        before=RPAPageState(url="https://example.test/report"),
+        after=RPAPageState(url="https://example.test/report"),
+    )
+
+    assert result["passed"] is True
+    assert result["evidence"][0]["type"] == "download_created"
 
 
 def test_ensure_expected_effect_allows_error_words_in_extract_output():
@@ -2887,7 +3769,7 @@ def test_detail_extract_plan_combines_multiple_detail_views():
     assert plan["section_title"] == "基本信息 / 供应商"
 
 
-def test_normalize_generated_playwright_code_removes_unsupported_filter_kwargs():
+def test_normalize_generated_playwright_code_preserves_unsupported_filter_kwargs():
     code = (
         "async def run(page, results):\n"
         "    loc = page.locator('input').filter(has_attribute='placeholder', has_text='')\n"
@@ -2896,9 +3778,8 @@ def test_normalize_generated_playwright_code_removes_unsupported_filter_kwargs()
 
     normalized = _normalize_generated_playwright_code(code)
 
-    assert "has_attribute" not in normalized
-    assert ".filter(has_text='')" in normalized
-    assert "other = page.locator('input')" in normalized
+    assert "has_attribute='placeholder'" in normalized
+    assert "has_attribute='disabled'" in normalized
 
 
 @pytest.mark.asyncio
@@ -3772,6 +4653,300 @@ def test_recover_failed_side_effect_requires_correlated_new_table_row_postcondit
     assert recovered_plan["postcondition"]["expect"] == {"Status": "pending"}
 
 
+def test_terminal_recovery_carries_snapshot_row_selector_hint():
+    before_snapshot = {"table_views": []}
+    after_snapshot = {
+        "table_views": [
+            {
+                "columns": [{"header": "Order No"}, {"header": "Status"}],
+                "rows": [
+                    {
+                        "locator_hints": [
+                            {
+                                "kind": "playwright",
+                                "expression": "page.locator('.el-table__body-wrapper tbody tr').nth(0)",
+                            }
+                        ],
+                        "cells": [
+                            {"column_header": "Order No", "text": "PO-002"},
+                            {"column_header": "Status", "text": "pending"},
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+    recovered = recover_failed_side_effect_from_snapshot_diff(
+        plan={
+            "action_type": "run_python",
+            "expected_effect": "mixed",
+            "terminal_contract": _required_terminal_contract("row_exists", kind="record_created"),
+            "input_bindings": {"order_no": {"default": "PO-002"}},
+        },
+        result={"success": False, "error": "post action assertion failed"},
+        before_snapshot=before_snapshot,
+        after_snapshot=after_snapshot,
+    )
+
+    assert recovered is not None
+    assert recovered[0]["postcondition"]["row_selector"] == ".el-table__body-wrapper tbody tr"
+
+
+def test_terminal_recovery_keeps_headers_needed_by_expectations_after_wide_columns():
+    after_snapshot = {
+        "table_views": [
+            {
+                "columns": [
+                    {"header": "Supplier No"},
+                    {"header": "Name"},
+                    {"header": "Category"},
+                    {"header": "Region"},
+                    {"header": "Risk"},
+                    {"header": "Rating"},
+                    {"header": "Contact"},
+                    {"header": "Phone"},
+                    {"header": "Status"},
+                ],
+                "rows": [
+                    {
+                        "cells": [
+                            {"column_header": "Supplier No", "text": "SUP-002"},
+                            {"column_header": "Name", "text": "Acme"},
+                            {"column_header": "Category", "text": "Audit"},
+                            {"column_header": "Region", "text": "North"},
+                            {"column_header": "Risk", "text": "medium"},
+                            {"column_header": "Rating", "text": "B"},
+                            {"column_header": "Contact", "text": "Alice"},
+                            {"column_header": "Phone", "text": "139-0000"},
+                            {"column_header": "Status", "text": "active"},
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+    recovered = recover_failed_side_effect_from_snapshot_diff(
+        plan={
+            "action_type": "run_python",
+            "expected_effect": "mixed",
+            "terminal_contract": _required_terminal_contract("field_value_equals", kind="record_updated"),
+            "input_bindings": {"supplier_no": {"default": "SUP-002"}},
+        },
+        result={"success": False, "error": "post action assertion failed", "output": {"status": "active"}},
+        before_snapshot={
+            "table_views": [
+                {
+                    "columns": after_snapshot["table_views"][0]["columns"],
+                    "rows": [
+                        {
+                            "cells": [
+                                {"column_header": "Supplier No", "text": "SUP-002"},
+                                {"column_header": "Name", "text": "Acme"},
+                                {"column_header": "Category", "text": "Audit"},
+                                {"column_header": "Region", "text": "North"},
+                                {"column_header": "Risk", "text": "medium"},
+                                {"column_header": "Rating", "text": "B"},
+                                {"column_header": "Contact", "text": ""},
+                                {"column_header": "Phone", "text": ""},
+                                {"column_header": "Status", "text": "inactive"},
+                            ],
+                        }
+                    ],
+                }
+            ]
+        },
+        after_snapshot=after_snapshot,
+    )
+
+    assert recovered is not None
+    headers = recovered[0]["postcondition"]["table_headers"]
+    assert "Supplier No" in headers
+    assert "Status" in headers
+
+
+def test_successful_action_can_recover_terminal_row_from_current_snapshot():
+    recovery = recording_runtime_agent.current_snapshot_terminal_postcondition(
+        plan={
+            "action_type": "run_python",
+            "expected_effect": "mixed",
+            "terminal_contract": _required_terminal_contract("row_exists", kind="record_created"),
+            "input_bindings": {"record_no": {"default": "REQ-002"}},
+        },
+        result={"success": True, "output": {"record_no": "REQ-002", "action_performed": True}},
+        snapshot={
+            "table_views": [
+                {
+                    "columns": [{"header": "Record No"}, {"header": "Status"}],
+                    "rows": [
+                        {
+                            "cells": [
+                                {"column_header": "Record No", "text": "REQ-001"},
+                                {"column_header": "Status", "text": "submitted"},
+                            ]
+                        },
+                        {
+                            "cells": [
+                                {"column_header": "Record No", "text": "REQ-002"},
+                                {"column_header": "Status", "text": "pending"},
+                            ]
+                        },
+                    ],
+                }
+            ]
+        },
+    )
+
+    assert recovery["postcondition"]["key"] == {"Record No": "REQ-002"}
+    assert recovery["evidence"][0]["type"] == "row_exists"
+
+
+def test_current_snapshot_recovery_does_not_replace_required_navigation_with_row_presence():
+    recovery = recording_runtime_agent.current_snapshot_terminal_postcondition(
+        plan={
+            "action_type": "run_python",
+            "expected_effect": "navigate",
+            "terminal_contract": _required_terminal_contract("url_changed", "field_value_equals", kind="state_change"),
+            "input_bindings": {"record_no": {"default": "REQ-002"}},
+        },
+        result={"success": True, "output": {"record_no": "REQ-002", "action_performed": True}},
+        snapshot={
+            "table_views": [
+                {
+                    "columns": [{"header": "Record No"}, {"header": "Status"}],
+                    "rows": [
+                        {
+                            "cells": [
+                                {"column_header": "Record No", "text": "REQ-002"},
+                                {"column_header": "Status", "text": "pending"},
+                            ]
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+
+    assert recovery == {}
+
+
+def test_current_snapshot_recovery_accepts_explicit_table_postcondition_for_state_change():
+    recovery = recording_runtime_agent.current_snapshot_terminal_postcondition(
+        plan={
+            "action_type": "run_python",
+            "expected_effect": "mixed",
+            "terminal_contract": _required_terminal_contract("row_exists", kind="state_change"),
+            "postcondition": {
+                "kind": "table_row_exists",
+                "key": {"Order No": "PO-002"},
+                "expect": {"Status": "pending"},
+            },
+        },
+        result={"success": True, "output": {"order_no": "PO-002", "status": "pending"}},
+        snapshot={
+            "table_views": [
+                {
+                    "columns": [{"header": "Order No"}, {"header": "Status"}],
+                    "rows": [
+                        {
+                            "cells": [
+                                {"column_header": "Order No", "text": "PO-002"},
+                                {"column_header": "Status", "text": "pending"},
+                            ]
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+
+    assert recovery["postcondition"]["key"] == {"Order No": "PO-002"}
+    assert any(item["type"] == "row_exists" for item in recovery["evidence"])
+
+
+def test_structural_terminal_recovery_is_detected_as_additional_evidence():
+    original = {
+        "effect": {
+            "terminal_evidence": "url_changed",
+            "terminal_evidence_items": [{"type": "url_changed"}],
+        }
+    }
+    recovered = {
+        "signals": {
+            "terminal_evidence": [
+                {"type": "row_exists", "source": "snapshot"},
+                {"type": "field_value_equals", "source": "snapshot"},
+            ]
+        }
+    }
+
+    assert recording_runtime_agent._terminal_recovery_adds_structural_evidence(original, recovered)
+
+
+def test_recover_failed_side_effect_rejects_row_exists_for_generic_state_change():
+    before_snapshot = {"table_views": []}
+    after_snapshot = {
+        "table_views": [
+            {
+                "columns": [{"header": "Record No"}, {"header": "Status"}],
+                "rows": [
+                    {
+                        "cells": [
+                            {"column_header": "Record No", "text": "REQ-002"},
+                            {"column_header": "Status", "text": "pending"},
+                        ]
+                    }
+                ],
+            }
+        ]
+    }
+
+    recovered = recover_failed_side_effect_from_snapshot_diff(
+        plan={
+            "action_type": "run_python",
+            "expected_effect": "mixed",
+            "terminal_contract": _required_terminal_contract("row_exists", kind="state_change"),
+            "input_bindings": {"record_no": {"default": "REQ-002"}},
+        },
+        result={"success": False, "error": "failed before terminal action"},
+        before_snapshot=before_snapshot,
+        after_snapshot=after_snapshot,
+    )
+
+    assert recovered is None
+
+
+def test_recover_failed_side_effect_requires_matching_contract_evidence_type():
+    recovered = recover_failed_side_effect_from_snapshot_diff(
+        plan={
+            "action_type": "run_python",
+            "expected_effect": "mixed",
+            "terminal_contract": _required_terminal_contract("row_status_changed", "toast_visible", kind="state_change"),
+            "input_bindings": {"order_no": {"default": "PO-001"}},
+        },
+        result={"success": False, "error": "approval click timed out"},
+        before_snapshot={"table_views": []},
+        after_snapshot={
+            "table_views": [
+                {
+                    "columns": [{"header": "Order No"}, {"header": "Status"}],
+                    "rows": [
+                        {
+                            "cells": [
+                                {"column_header": "Order No", "text": "PO-001"},
+                                {"column_header": "Status", "text": "pending"},
+                            ]
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+
+    assert recovered is None
+
+
 def test_recovered_side_effect_does_not_override_failed_instruction_completion():
     snapshot_before = {"table_views": []}
     snapshot_after = {
@@ -3879,7 +5054,7 @@ def test_recovered_side_effect_does_not_preserve_failed_preconditions_without_po
     assert "Create PO" in code
 
 
-def test_replayable_failed_preconditions_require_strong_fallback_postcondition():
+def test_replayable_failed_preconditions_skip_side_effectful_failed_attempts():
     precondition_plan = {
         "action_type": "run_python",
         "expected_effect": "mixed",
@@ -3916,8 +5091,8 @@ def test_replayable_failed_preconditions_require_strong_fallback_postcondition()
     )
 
     code = trace.ai_execution.code
-    assert "_RPA_PRECONDITION_CODES" in code
-    assert "Create PR" in code
+    assert "_RPA_PRECONDITION_CODES" not in code
+    assert "Create PR" not in code
     assert "Create PO" in code
     assert trace.postcondition == fallback_trace.postcondition
 
@@ -3946,6 +5121,57 @@ def test_recover_failed_side_effect_rejects_uncorrelated_new_table_row():
                 }
             ]
         },
+    )
+
+    assert recovered is None
+
+
+def test_recover_failed_side_effect_requires_new_instruction_identifier_for_created_record():
+    recovered = recover_failed_side_effect_from_snapshot_diff(
+        plan={
+            "action_type": "run_python",
+            "expected_effect": "mixed",
+            "terminal_contract": _required_terminal_contract("row_exists", kind="record_created"),
+            "input_bindings": {"source_contract": {"default": "CT-001"}},
+        },
+        result={"success": False, "error": "submit timed out after partially opening the source row"},
+        before_snapshot={
+            "table_views": [
+                {
+                    "columns": [{"header": "Contract No"}, {"header": "Status"}],
+                    "rows": [
+                        {
+                            "cells": [
+                                {"column_header": "Contract No", "text": "CT-001"},
+                                {"column_header": "Status", "text": "effective"},
+                            ]
+                        }
+                    ],
+                }
+            ]
+        },
+        after_snapshot={
+            "table_views": [
+                {
+                    "columns": [{"header": "Contract No"}, {"header": "Status"}],
+                    "rows": [
+                        {
+                            "cells": [
+                                {"column_header": "Contract No", "text": "CT-001"},
+                                {"column_header": "Status", "text": "effective"},
+                            ]
+                        },
+                        {
+                            "cells": [
+                                {"column_header": "Contract No", "text": "CT-001"},
+                                {"column_header": "Status", "text": "opened"},
+                            ]
+                        }
+                    ],
+                }
+            ]
+        },
+        instruction="open contract CT-001 and create purchase request PR-002",
     )
 
     assert recovered is None

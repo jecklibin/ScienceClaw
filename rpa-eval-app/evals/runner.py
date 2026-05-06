@@ -84,6 +84,7 @@ def main() -> int:
             flush=True,
         )
         result = run_case(case, args, eval_client, rpa_client)
+        result = retry_case_if_allowed(case, args, eval_client, rpa_client, result)
         case_results.append(result)
         status = "PASS" if result["passed"] else "FAIL"
         detail = "" if result["passed"] else f" {result.get('failure_stage')}: {result.get('failure_message')}"
@@ -148,6 +149,12 @@ def parse_args() -> argparse.Namespace:
         default=180.0,
         help="Default wall-clock timeout for one eval case. A case can override it with timeout_s in YAML.",
     )
+    parser.add_argument(
+        "--case-retries",
+        type=int,
+        default=0,
+        help="Retry record-stage case failures this many times. Attempts are reported separately from first-pass rate.",
+    )
     return parser.parse_args()
 
 
@@ -175,6 +182,46 @@ def select_cases(cases: list[dict[str, Any]], args: argparse.Namespace) -> list[
             if case["id"] in selected_ids or selected_tags.intersection(set(case.get("tags", [])))
         ]
     return [case for case in cases if "smoke" in case.get("tags", [])]
+
+
+def retry_case_if_allowed(
+    case: dict[str, Any],
+    args: argparse.Namespace,
+    eval_client: EvalAppClient,
+    rpa_client: RpaClawClient,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    max_retries = max(int(getattr(args, "case_retries", 0) or 0), 0)
+    if max_retries <= 0 or result.get("passed"):
+        return result
+    history = [case_attempt_summary(result)]
+    attempts = 1
+    while attempts <= max_retries and should_retry_case_result(result):
+        attempts += 1
+        print(f"    retry {attempts}/{max_retries + 1} after {result.get('failure_stage')}: {result.get('failure_message')}", flush=True)
+        result = run_case(case, args, eval_client, rpa_client)
+        history.append(case_attempt_summary(result))
+        if result.get("passed"):
+            break
+    result["attempts"] = attempts
+    result["attempt_history"] = history
+    return result
+
+
+def should_retry_case_result(result: dict[str, Any]) -> bool:
+    if result.get("passed"):
+        return False
+    return str(result.get("failure_stage") or "") == "record"
+
+
+def case_attempt_summary(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "passed": bool(result.get("passed")),
+        "failure_stage": result.get("failure_stage"),
+        "failure_message": result.get("failure_message"),
+        "latency_ms": result.get("latency_ms"),
+        "phase_results": result.get("phase_results") or {},
+    }
 
 
 def run_case(
@@ -205,7 +252,7 @@ def run_case(
     }
 
     try:
-        eval_client.reset(args.reset_token)
+        eval_client.reset(args.reset_token, fixture_variant=case.get("fixture_variant"))
         user = case.get("user") or {}
         username = user["username"]
         password = USER_PASSWORDS[username]
@@ -231,10 +278,13 @@ def run_case(
         assert_recording_succeeded(run.raw_events)
         result["phase_results"]["record"] = {"status": "passed"}
         assert_metrics(case.get("assertions", {}), result["metrics"])
+        replay_config = case.get("replay") if isinstance(case.get("replay"), dict) else {}
         if getattr(args, "verify_replay", False):
-            eval_client.reset(args.reset_token)
+            eval_client.reset(args.reset_token, fixture_variant=replay_config.get("fixture_variant"))
             eval_session = eval_client.login(username, password)
             result["eval_user"] = eval_session.user
+            replay_start_path = replay_config.get("start_path") or case.get("start_path", "/")
+            replay_start_url = build_frontend_url(args.eval_frontend_url, replay_start_path)
             try:
                 replay_result = replay_generated_skill(
                     rpa_client=rpa_client,
@@ -244,7 +294,7 @@ def run_case(
                     allow_runtime_ai=bool(getattr(args, "allow_runtime_ai_replay", False)),
                     setup_navigation=[
                         build_eval_auth_url(args.eval_frontend_url, eval_session.token),
-                        start_url,
+                        replay_start_url,
                     ],
                 )
             except CaseAssertionError as exc:
@@ -254,7 +304,10 @@ def run_case(
             result["phase_results"]["compile"] = replay_result["compile"]
             result["phase_results"]["replay"] = replay_result["replay"]
             result["replay"] = replay_result
-        assert_api_assertions(case.get("api_assertions", []), eval_client, eval_session.token)
+        api_assertions = case.get("api_assertions", [])
+        if getattr(args, "verify_replay", False) and replay_config.get("api_assertions") is not None:
+            api_assertions = replay_config.get("api_assertions") or []
+        assert_api_assertions(api_assertions, eval_client, eval_session.token)
         telemetry_metrics = result["metrics"]
         if getattr(args, "verify_replay", False):
             replay_metrics = (result.get("replay") or {}).get("metrics")
@@ -396,8 +449,13 @@ def run_rpa_case(
 ) -> RpaRunResult:
     session_id = rpa_client.start_session(case_id)
     try:
-        rpa_client.navigate(session_id, build_eval_auth_url(start_url, auth_token))
-        rpa_client.navigate(session_id, start_url)
+        auth_url = build_eval_auth_url(start_url, auth_token)
+        if hasattr(rpa_client, "navigate_and_wait"):
+            rpa_client.navigate_and_wait(session_id, auth_url)
+            rpa_client.navigate_and_wait(session_id, start_url)
+        else:
+            rpa_client.navigate(session_id, auth_url)
+            rpa_client.navigate(session_id, start_url)
         business_instruction = build_browser_instruction(
             case=case,
             login_url="",
@@ -911,6 +969,8 @@ def _structured_empty_result_evidence(value: Any, parent_key: str = "") -> bool:
         if not value and _is_count_or_collection_key(key):
             return True
         return any(_structured_empty_result_evidence(item, parent_key) for item in value)
+    if isinstance(value, str):
+        return _is_empty_result_text(value)
     return False
 
 
@@ -922,11 +982,32 @@ def _flattened_output_confirms_empty_result(output_blob: str) -> bool:
             return True
         if _is_empty_boolean_key(normalized_key) and normalize_text_for_match(value).lower() == "true":
             return True
+        if _is_empty_result_text(value):
+            return True
     return False
+
+
+def _is_empty_result_text(value: str) -> bool:
+    normalized = normalize_text_for_match(value).lower()
+    compact = re.sub(r"[^a-z0-9]+", "", normalized)
+    markers = {
+        "nomatch",
+        "nomatches",
+        "nomatching",
+        "nomatchingresult",
+        "nomatchingresults",
+        "nomatchingrecords",
+        "noresult",
+        "noresults",
+        "notfound",
+        "emptyresult",
+    }
+    return any(marker in compact for marker in markers)
 
 
 def _is_empty_boolean_key(key: str) -> bool:
     normalized = normalize_text_for_match(key).lower()
+    compact = re.sub(r"[^a-z0-9]+", "", normalized)
     return normalized in {
         "empty",
         "isempty",
@@ -935,19 +1016,43 @@ def _is_empty_boolean_key(key: str) -> bool:
         "emptystatevisible",
         "emptyvisible",
         "nomatch",
+        "nomatchconfirmed",
+        "nomatchingresult",
+        "nomatchingresults",
         "noresult",
+        "noresults",
+    } or compact in {
+        "empty",
+        "isempty",
+        "emptyresult",
+        "emptyresultconfirmed",
+        "emptystatevisible",
+        "emptyvisible",
+        "nomatch",
+        "nomatchconfirmed",
+        "nomatchingresult",
+        "nomatchingresults",
+        "noresult",
+        "noresults",
     }
 
 
 def _is_count_or_collection_key(key: str) -> bool:
     normalized = normalize_text_for_match(key).lower()
+    compact = re.sub(r"[^a-z0-9]+", "", normalized)
     return (
         "count" in normalized
+        or "count" in compact
         or normalized.endswith("rows")
         or normalized.endswith("items")
         or normalized.endswith("results")
         or normalized.endswith("records")
         or normalized.endswith("matches")
+        or compact.endswith("rows")
+        or compact.endswith("items")
+        or compact.endswith("results")
+        or compact.endswith("records")
+        or compact.endswith("matches")
     )
 
 

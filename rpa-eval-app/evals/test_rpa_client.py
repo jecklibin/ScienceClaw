@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from rpa_client import RpaClawClient, RpaClawTimeoutError, parse_sse_lines
+from rpa_client import RpaClawClient, RpaClawTimeoutError, active_tab_url, parse_sse_lines, urls_match
 
 
 class FakeResponse:
@@ -118,6 +118,19 @@ class RpaClawClientTests(unittest.TestCase):
                 "setup_navigation": ["http://eval/eval-auth.html?token=t", "http://eval/start"],
             },
         )
+
+    def test_active_tab_url_and_url_match_ignore_query(self):
+        tabs = {
+            "active_tab_id": "tab-2",
+            "tabs": [
+                {"id": "tab-1", "url": "http://eval/dashboard"},
+                {"id": "tab-2", "url": "http://eval/regression-lab?x=1"},
+            ],
+        }
+
+        self.assertEqual(active_tab_url(tabs), "http://eval/regression-lab?x=1")
+        self.assertTrue(urls_match("http://eval/regression-lab?x=1", "http://eval/regression-lab"))
+        self.assertFalse(urls_match("http://eval/dashboard", "http://eval/regression-lab"))
 
     def test_run_instruction_times_out_and_stops_session(self):
         client = RpaClawClient("http://rpaclaw")

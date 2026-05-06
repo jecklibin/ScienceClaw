@@ -48,6 +48,7 @@ def verify_terminal_contract(
         for item in contract.get("success_evidence") or []
         if str(item.get("type") or "").strip()
     }
+    desired_types = _calibrate_desired_evidence_types(plan, contract, desired_types)
     strong_observed = [
         item
         for item in observed
@@ -59,13 +60,10 @@ def verify_terminal_contract(
     ]
     if desired_types:
         matched = [item for item in strong_observed if item.get("type") in desired_types]
+        if "toast_visible" in desired_types:
+            matched.extend(item for item in strong_observed if item.get("type") == "feedback_visible")
     else:
         matched = strong_observed
-
-    if matched:
-        return {"required": True, "passed": True, "evidence": matched, "missing_evidence": []}
-    if contract.get("kind") == "state_change" and strong_observed:
-        return {"required": True, "passed": True, "evidence": strong_observed, "missing_evidence": []}
 
     if any(item.get("type") == "validation_error_visible" for item in observed):
         return {
@@ -75,6 +73,11 @@ def verify_terminal_contract(
             "missing_evidence": ["validation_error_absent"],
             "reason": "validation_error_visible",
         }
+
+    if matched:
+        return {"required": True, "passed": True, "evidence": matched, "missing_evidence": []}
+    if not desired_types and contract.get("kind") == "state_change" and strong_observed:
+        return {"required": True, "passed": True, "evidence": strong_observed, "missing_evidence": []}
 
     missing = sorted(desired_types) if desired_types else [str(contract.get("kind") or "terminal_evidence")]
     return {
@@ -107,6 +110,8 @@ def collect_observed_evidence(
     browser = result.get("browser_evidence") if isinstance(result.get("browser_evidence"), dict) else {}
     before_browser = browser.get("before") if isinstance(browser.get("before"), dict) else {}
     after_browser = browser.get("after") if isinstance(browser.get("after"), dict) else {}
+    contract = normalize_terminal_contract(plan)
+    empty_result_context = contract.get("kind") == "empty_result" or _output_has_empty_result_evidence(result.get("output"))
     if int(before_browser.get("visible_dialog_count") or 0) > 0 and int(after_browser.get("visible_dialog_count") or 0) == 0:
         evidence.append({"type": "dialog_closed"})
     before_feedback = {
@@ -117,7 +122,7 @@ def collect_observed_evidence(
     for text in list(after_browser.get("feedback_texts") or [])[:3]:
         normalized = _normalize_feedback_text(text)
         if normalized and normalized not in before_feedback:
-            if _feedback_looks_negative(normalized):
+            if _feedback_looks_negative(normalized) and not empty_result_context:
                 evidence.append({"type": "validation_error_visible", "text": normalized, "source": "browser"})
                 continue
             evidence.append({"type": "feedback_visible", "text": normalized, "source": "browser"})
@@ -126,6 +131,10 @@ def collect_observed_evidence(
             evidence.append({"type": "validation_error_visible", "text": str(text).strip()})
 
     evidence.extend(_observed_terminal_output_evidence(result.get("output")))
+    if _output_has_field_value_evidence(result.get("output")):
+        evidence.append({"type": "field_value_equals", "source": "observed"})
+    if _output_has_row_exists_evidence(result.get("output"), plan=plan):
+        evidence.append({"type": "row_exists", "source": "observed"})
     if _output_has_empty_result_evidence(result.get("output")):
         evidence.append({"type": "empty_result", "source": "observed"})
     if _output_has_row_absent_evidence(result.get("output")):
@@ -181,6 +190,70 @@ def _observed_terminal_output_evidence(value: Any) -> List[Dict[str, Any]]:
     return []
 
 
+def _output_has_field_value_evidence(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_text = str(key or "").strip().lower()
+            if key_text in {"field_value_equals", "field_value_matched", "value_confirmed"} and bool(item):
+                return True
+            if _output_has_field_value_evidence(item):
+                return True
+    if isinstance(value, list):
+        return any(_output_has_field_value_evidence(item) for item in value)
+    return False
+
+
+def _calibrate_desired_evidence_types(
+    plan: Dict[str, Any],
+    contract: Dict[str, Any],
+    desired_types: set[str],
+) -> set[str]:
+    _ = plan, contract
+    return desired_types
+
+
+def _output_has_row_exists_evidence(value: Any, *, plan: Dict[str, Any]) -> bool:
+    contract = normalize_terminal_contract(plan)
+    desired_types = {
+        str(item.get("type") or "").strip().lower()
+        for item in contract.get("success_evidence") or []
+        if str(item.get("type") or "").strip()
+    }
+    if "row_exists" not in desired_types:
+        return False
+    expected_effect = str(plan.get("expected_effect") or plan.get("action_type") or "").strip().lower()
+    if expected_effect not in {"click", "open", "select", "state_change"} and contract.get("kind") not in {
+        "state_change",
+        "record_updated",
+    }:
+        return False
+    return _output_has_structured_row_evidence(value)
+
+
+def _output_has_structured_row_evidence(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_text = str(key or "").strip().lower()
+            if key_text in {
+                "row",
+                "row_text",
+                "clicked_row",
+                "clicked_row_text",
+                "selected_row",
+                "selected_row_text",
+                "opened_row",
+                "matched_row",
+            } and bool(item):
+                return True
+            if key_text in {"row_found", "record_found", "matched", "exists", "present"} and item is True:
+                return True
+            if _output_has_structured_row_evidence(item):
+                return True
+    if isinstance(value, list):
+        return any(_output_has_structured_row_evidence(item) for item in value)
+    return False
+
+
 def _normalize_output_evidence(value: Any) -> List[Dict[str, Any]]:
     if isinstance(value, dict):
         value = [value]
@@ -212,11 +285,60 @@ def _feedback_looks_negative(value: str) -> bool:
     text = str(value or "").strip().lower()
     if not text:
         return False
-    return any(token in text for token in ("invalid", "failed", "failure", "error", "rejected", "denied", "失败", "错误", "无效", "拒绝"))
+    return any(
+        token in text
+        for token in (
+            "invalid",
+            "failed",
+            "failure",
+            "error",
+            "not found",
+            "rejected",
+            "denied",
+            "失败",
+            "错误",
+            "无效",
+            "拒绝",
+            "未找到",
+        )
+    )
 
 
 def _output_has_empty_result_evidence(value: Any) -> bool:
+    return _output_has_empty_result_evidence_at_path(value, depth=0)
+
+
+def _dict_contradicts_empty_result(value: Dict[Any, Any]) -> bool:
+    positive_count_keys = {
+        "row_count",
+        "row_count_after",
+        "visible_row_count",
+        "visible_rows",
+        "result_count",
+        "record_count",
+        "matched_count",
+        "match_count",
+        "matched_rows",
+        "matching_rows",
+        "filtered_rows",
+    }
+    for key, item in value.items():
+        key_text = str(key or "").strip().lower()
+        if key_text not in positive_count_keys:
+            continue
+        if isinstance(item, list) and len(item) > 0:
+            return True
+        try:
+            if int(item) > 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _output_has_empty_result_evidence_at_path(value: Any, *, depth: int) -> bool:
     if isinstance(value, dict):
+        contradicts_empty = _dict_contradicts_empty_result(value)
         for key, item in value.items():
             key_text = str(key or "").strip().lower()
             if key_text in {
@@ -224,14 +346,19 @@ def _output_has_empty_result_evidence(value: Any) -> bool:
                 "empty_result_confirmed",
                 "empty_state",
                 "empty_state_confirmed",
+                "empty_state_text",
                 "no_results",
                 "no_matching_results",
                 "no_matches",
-            } and item is True:
-                return True
+            }:
+                if item is True and not contradicts_empty:
+                    return True
+                if key_text == "empty_state_text" and str(item or "").strip() and not contradicts_empty:
+                    return True
             if key_text in {
                 "row_count",
                 "row_count_after",
+                "visible_row_count",
                 "result_count",
                 "record_count",
                 "matched_count",
@@ -239,22 +366,40 @@ def _output_has_empty_result_evidence(value: Any) -> bool:
                 "matched_rows",
                 "matching_rows",
                 "filtered_rows",
-                "visible_rows",
-                "total",
-                "count",
-            } or key_text.endswith(("_count", "count")):
+            }:
                 try:
-                    if int(item) == 0:
+                    if int(item) == 0 and not contradicts_empty:
                         return True
                 except (TypeError, ValueError):
                     pass
-            if key_text in {"rows", "items", "results", "records", "data"} and isinstance(item, list) and not item:
+            if key_text in {
+                "matched_result",
+                "matching_rows_found",
+                "matches_found",
+                "result_found",
+                "record_found",
+                "row_found",
+            } and item is False and not contradicts_empty:
                 return True
-            if _output_has_empty_result_evidence(item):
+            if (
+                key_text in {"rows", "items", "results", "records", "data"}
+                and isinstance(item, list)
+                and not item
+                and not contradicts_empty
+            ):
                 return True
+            if key_text in {"search", "filter", "query", "result", "results", "matches", "matched"}:
+                if _output_has_empty_result_evidence_at_path(item, depth=depth + 1):
+                    return True
+            if depth == 0 and key_text in {"terminal_evidence", "terminal_observation", "observed_evidence"}:
+                if _output_has_empty_result_evidence_at_path(item, depth=depth + 1):
+                    return True
+            if depth == 0 and key_text in {"output", "result"} and isinstance(item, dict):
+                if _output_has_empty_result_evidence_at_path(item, depth=depth + 1):
+                    return True
         return False
     if isinstance(value, list):
-        return len(value) == 0
+        return depth > 0 and len(value) == 0
     return False
 
 
@@ -283,20 +428,20 @@ def _output_has_row_absent_evidence(value: Any) -> bool:
 
 def _output_has_download_evidence(value: Any) -> bool:
     if isinstance(value, dict):
+        action_type = str(value.get("action_type") or value.get("type") or "").strip().lower()
+        if action_type in {"download", "open_popup_and_download", "popup_download", "async_download"} and _download_filename(value):
+            return True
+        if value.get("downloaded") is True and _download_filename(value):
+            return True
         for key, item in value.items():
             key_text = str(key or "").strip().lower()
             if key_text in {"download_created", "downloaded", "download_complete", "file_downloaded"} and item is True:
                 return True
-            if key_text in {
-                "downloaded_file",
-                "download_filename",
-                "download_suggested_filename",
-                "suggested_filename",
-                "filename",
-            } and str(item or "").strip():
-                return True
-            if key_text in {"download", "downloaded_file"} and isinstance(item, dict):
-                if item.get("filename") or item.get("path") or item.get("suggested_filename"):
+            if key_text in {"download", "downloaded_file", "artifact", "file"} and isinstance(item, dict):
+                if _download_dict_has_artifact_evidence(item):
+                    return True
+            if key_text in {"downloads", "downloaded_files", "artifacts"} and isinstance(item, list):
+                if any(isinstance(entry, dict) and _download_dict_has_artifact_evidence(entry) for entry in item):
                     return True
             if _output_has_download_evidence(item):
                 return True
@@ -304,6 +449,34 @@ def _output_has_download_evidence(value: Any) -> bool:
     if isinstance(value, list):
         return any(_output_has_download_evidence(item) for item in value)
     return False
+
+
+def _download_filename(value: Dict[str, Any]) -> str:
+    for key, item in value.items():
+        key_text = str(key or "").strip().lower()
+        if key_text in {
+            "filename",
+            "suggested_filename",
+            "downloaded_filename",
+            "downloaded_file_name",
+            "download_suggested_filename",
+            "observed_filename",
+        } or (("filename" in key_text or "file_name" in key_text) and "download" in key_text):
+            text = str(item or "").strip()
+            if text:
+                return text
+    return ""
+
+
+def _download_dict_has_artifact_evidence(value: Dict[str, Any]) -> bool:
+    if value.get("downloaded") is True or value.get("download_created") is True:
+        return True
+    if str(value.get("path") or value.get("artifact_path") or value.get("saved_as") or "").strip():
+        return True
+    source = str(value.get("source") or "").strip().lower()
+    return source in {"download", "playwright_download", "browser_download"} and bool(
+        value.get("filename") or value.get("suggested_filename")
+    )
 
 
 async def _visible_locator_texts(page: Any, selector: str, *, limit: int) -> List[str]:

@@ -1,3 +1,5 @@
+from typing import Any
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import Depends
@@ -38,15 +40,22 @@ def health() -> dict[str, str]:
 
 
 @app.post("/api/eval/reset", dependencies=[Depends(verify_reset_token)])
-def reset_eval() -> dict[str, str]:
+def reset_eval(payload: dict[str, Any] | None = None) -> dict[str, str]:
     recreate_database()
     reset_downloads_dir()
+    fixture_variant = str((payload or {}).get("fixture_variant") or "")
+    lab.set_fixture_variant(fixture_variant or None)
     db = SessionLocal()
     try:
         load_fixtures(db)
     finally:
         db.close()
-    return {"status": "reset", "database": "reloaded", "downloads": "cleared"}
+    return {
+        "status": "reset",
+        "database": "reloaded",
+        "downloads": "cleared",
+        "fixture_variant": fixture_variant or "default",
+    }
 
 
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])

@@ -1,0 +1,43 @@
+id: lab_dynamic_first_item_replay_001
+name: Replay clicks current first dynamic item
+tags: [regression, replay, dynamic_data, ordinal]
+user:
+  username: buyer
+  password: buyer123
+start_path: /regression-lab
+timeout_s: 120
+instruction: >
+  在 Dynamic first item list 区域，按照当前列表顺序点击第一个项目。
+  注意目标是“第一个项目”这个位置，不是某个固定项目名称。
+pre_api_assertions:
+  - name: dynamic_first_item_not_opened_before_run
+    path: /api/lab/events
+    find:
+      event_key: dynamic_first_item_opened
+    absent: true
+api_assertions:
+  - name: record_default_first_item_opened
+    path: /api/lab/events
+    find:
+      event_key: dynamic_first_item_opened
+      entity_id: DYN-REC-A
+    expect:
+      status: completed
+replay:
+  fixture_variant: dynamic_first_item_reordered
+  api_assertions:
+    - name: replay_current_first_item_opened
+      path: /api/lab/events
+      find:
+        event_key: dynamic_first_item_opened
+        entity_id: DYN-REPLAY-B
+      expect:
+        status: completed
+    - name: replay_did_not_click_recorded_first_item
+      path: /api/lab/events
+      find:
+        event_key: dynamic_first_item_opened
+        entity_id: DYN-REC-A
+      absent: true
+assertions:
+  accepted_trace_min: 1

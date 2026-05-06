@@ -100,6 +100,30 @@
       </table>
     </section>
 
+    <section class="panel" aria-labelledby="dynamic-first-heading" data-testid="dynamic-first-region">
+      <h2 id="dynamic-first-heading">Dynamic first item list</h2>
+      <p>Open the first project in the current list order.</p>
+      <table class="data-table" data-testid="dynamic-first-table">
+        <caption class="sr-only">Dynamic first item list</caption>
+        <thead>
+          <tr><th>Project ID</th><th>Project name</th><th>Action</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="project in dynamicProjects" :key="project.project_id">
+            <td>{{ project.project_id }}</td>
+            <td>
+              <a :data-testid="`dynamic-project-${project.project_id}`" href="#" @click.prevent="openDynamicProject(project.project_id)">
+                {{ project.project_name }}
+              </a>
+            </td>
+            <td>
+              <button @click="openDynamicProject(project.project_id)">Open project</button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
     <section class="panel" aria-labelledby="empty-audit-heading" data-testid="empty-audit-region">
       <h2 id="empty-audit-heading">Legitimate empty extraction</h2>
       <p>Filter audit records by failed status and report that the result list is empty.</p>
@@ -196,9 +220,15 @@ interface LabFile {
   status: string
 }
 
+interface DynamicProject {
+  project_id: string
+  project_name: string
+}
+
 const allSelected = ref(false)
 const exportMenuOpen = ref(false)
 const files = ref<LabFile[]>([])
+const dynamicProjects = ref<DynamicProject[]>([])
 const auditRows = ref<Array<Record<string, string>>>([])
 const auditFiltered = ref(false)
 const contractQuery = ref('')
@@ -243,6 +273,11 @@ async function openSplitFile(fileId: string) {
   setStatus('File opened')
 }
 
+async function openDynamicProject(projectId: string) {
+  await apiClient.post(`/lab/dynamic-first-items/open/${projectId}`)
+  setStatus('Project opened')
+}
+
 async function filterFailedAudits() {
   const { data } = await apiClient.get('/lab/empty-audit-records', { params: { status: 'failed' } })
   auditRows.value = data
@@ -262,8 +297,8 @@ function searchContracts() {
 }
 
 async function submitDataflow() {
-  await apiClient.post('/lab/dataflow-submit', dataflowForm)
-  setStatus('Form submitted')
+  const { data } = await apiClient.post('/lab/dataflow-submit', dataflowForm)
+  setStatus(data.status === 'completed' ? 'Form submitted' : 'Form validation failed')
 }
 
 async function openParameterizedContract(contractNumber: string) {
@@ -284,6 +319,8 @@ function openPopupReport() {
 onMounted(async () => {
   const { data } = await apiClient.get<LabFile[]>('/lab/split-grid/files')
   files.value = data
+  const projects = await apiClient.get<DynamicProject[]>('/lab/dynamic-first-items')
+  dynamicProjects.value = projects.data
   const audit = await apiClient.get('/lab/empty-audit-records')
   auditRows.value = audit.data
 })

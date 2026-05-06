@@ -3,14 +3,12 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, Dict, Iterable, List, Optional
+from urllib.parse import unquote, urlparse
 
 from backend.rpa.playwright_security import get_chromium_launch_kwargs, get_context_kwargs
 
 from .playwright_code_normalizer import (
-    stabilize_bare_text_clicks,
-    stabilize_callable_locator_filters,
-    stabilize_fill_targets,
-    stabilize_unsupported_locator_options,
+    normalize_generated_playwright_code,
 )
 from .trace_locator_utils import has_valid_locator, normalize_locator
 from .trace_models import RPAAcceptedTrace, RPATraceType
@@ -267,7 +265,25 @@ class TraceSkillCompiler:
             "    value = str(value or '').strip()",
             "    return '' if value == '-' else value",
             "",
-            "async def _extract_labeled_field_value(scope, label):",
+            "async def _extract_next_visible_value_after_text(scope, anchor):",
+            "    anchor = _normalize_visible_text(anchor)",
+            "    if not anchor:",
+            "        return ''",
+            "    try:",
+            "        text = await scope.locator('body').inner_text(timeout=2000)",
+            "    except Exception:",
+            "        try:",
+            "            text = await scope.inner_text(timeout=2000)",
+            "        except Exception:",
+            "            return ''",
+            "    lines = [_normalize_visible_text(line) for line in str(text or '').splitlines()]",
+            "    lines = [line for line in lines if line and line != '-']",
+            "    for index, line in enumerate(lines[:-1]):",
+            "        if line == anchor:",
+            "            return lines[index + 1]",
+            "    return ''",
+            "",
+            "async def _extract_labeled_field_value(scope, label, timeout_ms=10000):",
             "    label = _normalize_visible_text(label)",
             "    if not label:",
             "        return ''",
@@ -279,7 +295,7 @@ class TraceSkillCompiler:
             "            return '\"' + value + '\"'",
             "        return 'concat(' + ', \"\\'\", '.join(\"'\" + part + \"'\" for part in value.split(\"'\")) + ')'",
             "    candidate_labels = [label, label + ':', label + '：']",
-            "    js = r'''(labelEl) => {",
+            "    js = r'''(labelEl, targetLabel) => {",
             "        const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();",
             "        const nodeText = (node) => normalize(node && (node.innerText || node.textContent || ''));",
             "        const controlValue = (node) => {",
@@ -292,13 +308,18 @@ class TraceSkillCompiler:
             "            value = normalize(value);",
             "            return value && value !== '-' ? value : '';",
             "        };",
+            "        const targetText = normalize(targetLabel).replace(/[：:]$/, '').trim();",
             "        const labelText = nodeText(labelEl).replace(/[：:]$/, '').trim();",
+            "        if (targetText && labelText && labelText !== targetText && labelText.startsWith(targetText)) {",
+            "            const inlineValue = clean(labelText.slice(targetText.length).replace(/^[：:\\s]+/, ''));",
+            "            if (inlineValue) return inlineValue;",
+            "        }",
             "        const directControl = labelEl.id ? document.querySelector(`[aria-labelledby~=\"${CSS.escape(labelEl.id)}\"]`) : null;",
             "        let value = clean(controlValue(directControl));",
-            "        if (value && value !== labelText) return value;",
+            "        if (value && value !== labelText && value !== targetText) return value;",
             "        const forId = labelEl.getAttribute && labelEl.getAttribute('for');",
             "        value = clean(controlValue(forId ? document.getElementById(forId) : null));",
-            "        if (value && value !== labelText) return value;",
+            "        if (value && value !== labelText && value !== targetText) return value;",
             "        if (labelEl.matches && labelEl.matches('dt') && labelEl.nextElementSibling && labelEl.nextElementSibling.matches('dd')) {",
             "            value = clean(nodeText(labelEl.nextElementSibling));",
             "            if (value) return value;",
@@ -310,22 +331,22 @@ class TraceSkillCompiler:
             "            const index = cells.indexOf(cell);",
             "            for (const sibling of cells.slice(index + 1)) {",
             "                value = clean(controlValue(sibling.querySelector('input,textarea,select,[data-value],output') || sibling));",
-            "                if (value && value !== labelText) return value;",
+            "                if (value && value !== labelText && value !== targetText) return value;",
             "            }",
             "        }",
             "        let sibling = labelEl.nextElementSibling;",
             "        for (let i = 0; sibling && i < 4; i += 1, sibling = sibling.nextElementSibling) {",
             "            value = clean(controlValue(sibling.querySelector('input,textarea,select,[data-value],output') || sibling));",
-            "            if (value && value !== labelText) return value;",
+            "            if (value && value !== labelText && value !== targetText) return value;",
             "        }",
             "        const parent = labelEl.parentElement;",
             "        if (parent) {",
             "            const preferred = Array.from(parent.querySelectorAll('[data-value],output,dd,input,textarea,select')).find(node => node !== labelEl && !labelEl.contains(node));",
             "            value = clean(controlValue(preferred));",
-            "            if (value && value !== labelText) return value;",
+            "            if (value && value !== labelText && value !== targetText) return value;",
             "            const parentText = nodeText(parent);",
-            "            if (parentText && parentText !== labelText && parentText.startsWith(labelText)) {",
-            "                return clean(parentText.slice(labelText.length).replace(/^[：:\\s]+/, ''));",
+            "            if (targetText && parentText && parentText !== targetText && parentText.startsWith(targetText)) {",
+            "                return clean(parentText.slice(targetText.length).replace(/^[：:\\s]+/, ''));",
             "            }",
             "        }",
             "        let ancestor = labelEl.parentElement;",
@@ -333,38 +354,53 @@ class TraceSkillCompiler:
             "            let ancestorSibling = ancestor.nextElementSibling;",
             "            for (let i = 0; ancestorSibling && i < 4; i += 1, ancestorSibling = ancestorSibling.nextElementSibling) {",
             "                value = clean(controlValue(ancestorSibling.querySelector('input,textarea,select,[data-value],output') || ancestorSibling));",
-            "                if (value && value !== labelText) return value;",
+            "                if (value && value !== labelText && value !== targetText) return value;",
             "            }",
             "            const scopedPreferred = Array.from(ancestor.querySelectorAll('[data-value],output,dd,input,textarea,select'))",
             "                .find(node => node !== labelEl && !labelEl.contains(node) && !node.contains(labelEl));",
             "            value = clean(controlValue(scopedPreferred));",
-            "            if (value && value !== labelText) return value;",
+            "            if (value && value !== labelText && value !== targetText) return value;",
             "            const ancestorText = nodeText(ancestor);",
-            "            if (ancestorText && ancestorText !== labelText && ancestorText.startsWith(labelText)) {",
-            "                value = clean(ancestorText.slice(labelText.length).replace(/^[：:\\s]+/, ''));",
+            "            if (targetText && ancestorText && ancestorText !== targetText && ancestorText.startsWith(targetText)) {",
+            "                value = clean(ancestorText.slice(targetText.length).replace(/^[：:\\s]+/, ''));",
             "                if (value) return value;",
             "            }",
             "        }",
             "        return '';",
             "    }'''",
-            "    candidate_locators = []",
-            "    for candidate_label in candidate_labels:",
-            "        candidate_locators.append(scope.get_by_text(candidate_label, exact=True))",
-            "    literal = xpath_literal(label)",
-            "    candidate_locators.append(scope.locator(",
-            "        'xpath=.//*[contains(normalize-space(.), ' + literal + ') and string-length(normalize-space(.)) <= ' + str(len(label) + 6) + ']'",
-            "    ))",
-            "    for labels in candidate_locators:",
-            "        count = min(await labels.count(), 20)",
-            "        for index in range(count):",
-            "            label_node = labels.nth(index)",
-            "            try:",
-            "                value = await label_node.evaluate(js)",
-            "            except Exception:",
-            "                value = ''",
-            "            value = _normalize_visible_text(value)",
-            "            if value and value != label:",
-            "                return value",
+            "    deadline = time.perf_counter() + (timeout_ms / 1000)",
+            "    while True:",
+            "        candidate_locators = []",
+            "        for candidate_label in candidate_labels:",
+            "            candidate_locators.append(scope.get_by_text(candidate_label, exact=True))",
+            "        literal = xpath_literal(label)",
+            "        candidate_locators.append(scope.locator(",
+            "            'xpath=.//*[contains(normalize-space(.), ' + literal + ') and string-length(normalize-space(.)) <= ' + str(len(label) + 6) + ']'",
+            "        ))",
+            "        candidate_locators.append(scope.locator(",
+            "            'xpath=.//*[starts-with(normalize-space(.), ' + literal + ') and string-length(normalize-space(.)) <= ' + str(len(label) + 120) + ']'",
+            "        ))",
+            "        for labels in candidate_locators:",
+            "            count = min(await labels.count(), 20)",
+            "            for index in range(count):",
+            "                label_node = labels.nth(index)",
+            "                try:",
+            "                    value = await label_node.evaluate(js, label)",
+            "                except Exception:",
+            "                    value = ''",
+            "                value = _normalize_visible_text(value)",
+            "                if value and value != label:",
+            "                    return value",
+            "        if time.perf_counter() >= deadline:",
+            "            break",
+            "        try:",
+            "            page = getattr(scope, 'page', None)",
+            "            if page is not None:",
+            "                await page.wait_for_timeout(250)",
+            "            else:",
+            "                break",
+            "        except Exception:",
+            "            break",
             "    return ''",
             "",
             "def _normalize_visible_text(value):",
@@ -532,6 +568,8 @@ class TraceSkillCompiler:
             required.add("_extract_display_field_value")
         if "_extract_node_text_or_value(" in body_text:
             required.add("_extract_node_text_or_value")
+        if "_extract_next_visible_value_after_text(" in body_text:
+            required.update({"_extract_next_visible_value_after_text", "_normalize_visible_text"})
         if "_extract_labeled_field_value(" in body_text:
             required.update({"_extract_labeled_field_value", "_normalize_visible_text"})
         if "_extract_table_cell_value(" in body_text:
@@ -585,7 +623,7 @@ class TraceSkillCompiler:
     @staticmethod
     def _table_row_helper_lines() -> List[str]:
         return [
-            "async def _find_table_row_by_headers(page, table_headers, key_values, *, timeout_ms=10000):",
+            "async def _find_table_row_by_headers(page, table_headers, key_values, *, row_selector='', timeout_ms=10000):",
             "    def _norm_cell(value):",
             "        return re.sub(r'\\s+', ' ', str(value or '')).strip()",
             "    headers = [str(item).strip() for item in (table_headers or []) if str(item).strip()]",
@@ -593,6 +631,57 @@ class TraceSkillCompiler:
             "    deadline = time.perf_counter() + (timeout_ms / 1000)",
             "    last_seen = ''",
             "    while time.perf_counter() < deadline:",
+            "        if row_selector:",
+            "            direct_rows = page.locator(row_selector)",
+            "            if await direct_rows.count():",
+            "                for row_index in range(await direct_rows.count()):",
+            "                    row = direct_rows.nth(row_index)",
+            "                    header_texts = await row.evaluate(\"\"\"row => {",
+            "                        const norm = value => String(value || '').replace(/\\s+/g, ' ').trim();",
+            "                        const root = row.closest('table,[role=table],[role=grid],[role=treegrid],.el-table,.jalor-igrid');",
+            "                        if (!root) return [];",
+            "                        const selectors = [",
+            "                            '.el-table__header-wrapper thead th',",
+            "                            'thead tr:first-child th',",
+            "                            'thead tr:first-child td',",
+            "                            '[role=columnheader]',",
+            "                            '.jalor-igrid-head tbody.igrid-head td'",
+            "                        ];",
+            "                        const seen = new Set();",
+            "                        const cells = [];",
+            "                        for (const selector of selectors) {",
+            "                            for (const cell of Array.from(root.querySelectorAll(selector))) {",
+            "                                if (seen.has(cell)) continue;",
+            "                                seen.add(cell);",
+            "                                const text = norm(cell.innerText || cell.textContent);",
+            "                                if (text) cells.push(text);",
+            "                            }",
+            "                            if (cells.length) break;",
+            "                        }",
+            "                        return cells;",
+            "                    }\"\"\")",
+            "                    header_map = {str(text).strip(): idx for idx, text in enumerate(header_texts or []) if str(text).strip()}",
+            "                    if headers and not all(header in header_map for header in headers):",
+            "                        continue",
+            "                    if any(key not in header_map for key in expected):",
+            "                        continue",
+            "                    required_indexes = [header_map[key] for key in expected]",
+            "                    cells = row.locator('th, td, [role=cell], [role=gridcell], [role=rowheader]')",
+            "                    if required_indexes and await cells.count() <= max(required_indexes):",
+            "                        continue",
+            "                    matched = True",
+            "                    for key, value in expected.items():",
+            "                        cell_index = header_map[key]",
+            "                        if await cells.count() <= cell_index:",
+            "                            matched = False",
+            "                            break",
+            "                        actual = _norm_cell(await cells.nth(cell_index).inner_text())",
+            "                        expected_value = _norm_cell(value)",
+            "                        if actual != expected_value:",
+            "                            matched = False",
+            "                            break",
+            "                    if matched:",
+            "                        return row",
             "        tables = page.locator('table, [role=table], [role=grid], [role=treegrid]')",
             "        for table_index in range(await tables.count()):",
             "            table = tables.nth(table_index)",
@@ -626,16 +715,13 @@ class TraceSkillCompiler:
             "                if same_split_root:",
             "                    row_sets.append(split_body_rows)",
             "            if not row_sets:",
-            "                root_body_rows = table.locator(\"xpath=ancestor::*[count(.//table) <= 6 and .//table[.//tbody/tr]][1]//table[.//tbody/tr]//tbody/tr\")",
-            "                if await root_body_rows.count():",
-            "                    row_sets.append(root_body_rows)",
-            "            if not row_sets:",
             "                row_sets.append(table.locator('tr'))",
             "            for rows in row_sets:",
             "                for row_index in range(await rows.count()):",
             "                    row = rows.nth(row_index)",
             "                    cells = row.locator('th, td, [role=cell], [role=gridcell], [role=rowheader]')",
-            "                    if await cells.count() < len(header_map):",
+            "                    required_indexes = [header_map[key] for key in expected]",
+            "                    if required_indexes and await cells.count() <= max(required_indexes):",
             "                        continue",
             "                    matched = True",
             "                    for key, value in expected.items():",
@@ -680,6 +766,7 @@ class TraceSkillCompiler:
             for item in list(postcondition.get("table_headers") or [])
             if str(item).strip()
         ]
+        row_selector = str(postcondition.get("row_selector") or "").strip()
         key_values = self._postcondition_table_values(trace, postcondition)
         if not headers or not key_values:
             return []
@@ -691,7 +778,7 @@ class TraceSkillCompiler:
                 "    try:",
                 (
                     "        await _find_table_row_by_headers("
-                    f"current_page, {headers!r}, {expression}, timeout_ms=1500)"
+                    f"current_page, {headers!r}, {expression}, row_selector={row_selector!r}, timeout_ms=1500)"
                 ),
                 "    except RuntimeError:",
                 "        pass",
@@ -703,7 +790,7 @@ class TraceSkillCompiler:
             "    # verify table row postcondition",
             (
                 "    await _find_table_row_by_headers("
-                f"current_page, {headers!r}, {expression})"
+                f"current_page, {headers!r}, {expression}, row_selector={row_selector!r})"
             ),
         ]
 
@@ -814,6 +901,7 @@ class TraceSkillCompiler:
             [
                 "    await current_page.goto(_target_url, wait_until='domcontentloaded')",
                 "    await current_page.wait_for_load_state('domcontentloaded')",
+                "    await current_page.wait_for_timeout(500)",
             ]
         )
         return lines
@@ -1004,6 +1092,8 @@ class TraceSkillCompiler:
             return self._render_runtime_ai_instruction_trace(index, trace, used_output_keys)
         if _should_preserve_runtime_ai_instruction(trace):
             return self._render_runtime_ai_instruction_trace(index, trace, used_output_keys)
+        if self._is_navigation_only_ai_trace(trace):
+            return self._render_ai_navigation_trace(index, trace, used_output_keys)
         if trace.ai_execution and trace.ai_execution.code:
             return self._render_embedded_ai_code_trace(index, trace, previous_traces, used_output_keys)
         if trace.user_instruction or trace.description:
@@ -1024,6 +1114,49 @@ class TraceSkillCompiler:
             f"    _result = await _execute_runtime_ai_instruction(current_page, _results, {instruction!r}, {key!r})",
         ]
 
+    def _is_navigation_only_ai_trace(self, trace: RPAAcceptedTrace) -> bool:
+        before_url = str(trace.before_page.url or "")
+        after_url = str(trace.after_page.url or "")
+        if not before_url or not after_url or before_url == after_url:
+            return False
+        if _trace_signal(trace, "download") or _trace_signal(trace, "extract_snapshot"):
+            return False
+        contract = _trace_signal(trace, "terminal_contract")
+        if isinstance(contract, dict):
+            evidence_types = {
+                str(item.get("type") or "")
+                for item in contract.get("success_evidence") or []
+                if isinstance(item, dict)
+            }
+            side_effect_evidence = {
+                "download_created",
+                "row_exists",
+                "row_absent",
+                "row_status_changed",
+                "field_value_equals",
+                "postcondition",
+            }
+            if evidence_types & side_effect_evidence:
+                return False
+            if evidence_types and "url_changed" not in evidence_types:
+                return False
+        return after_url.startswith(("http://", "https://"))
+
+    def _render_ai_navigation_trace(
+        self,
+        index: int,
+        trace: RPAAcceptedTrace,
+        used_output_keys: Dict[str, int],
+    ) -> List[str]:
+        key = self._allocate_output_key(trace, trace.output_key, used_output_keys) if trace.output_key else ""
+        lines = ["", f"    # trace {index}: {trace.description or 'AI navigation'}"]
+        lines.append(f"    await current_page.goto({str(trace.after_page.url)!r}, wait_until='domcontentloaded')")
+        lines.append("    await current_page.wait_for_load_state('domcontentloaded')")
+        lines.append("    _result = {'action_performed': True, 'action_type': 'navigate', 'url': current_page.url}")
+        if key:
+            lines.append(f"    _results[{key!r}] = _result")
+        return lines
+
     def _render_snapshot_extract_trace(
         self,
         index: int,
@@ -1039,6 +1172,7 @@ class TraceSkillCompiler:
         lines.extend(scope_lines)
         lines.append("    _result = {}")
         lines.append("    _missing_required_fields = []")
+        lines.append("    _last_extracted_value = ''")
         for field in fields:
             label = str(field.get("label") or "").strip()
             data_prop = str(field.get("data_prop") or "").strip()
@@ -1046,15 +1180,21 @@ class TraceSkillCompiler:
                 continue
             value_locator = self._field_locator(field.get("value_locator"))
             field_locator = self._field_locator(field.get("field_locator"))
-            url_extraction = self._snapshot_url_extraction(field.get("url_extraction"))
+            label_locator = self._field_locator(field.get("label_locator"))
+            url_extraction = self._snapshot_url_extraction(field.get("url_extraction")) or self._infer_url_path_extraction(
+                field, trace.after_page.url
+            )
             text_pattern = self._snapshot_text_pattern(field.get("text_pattern"))
             label_extraction = self._snapshot_label_extraction(field)
             table_cell = self._snapshot_table_cell(field.get("table_cell"))
             replay_required = bool(field.get("replay_required", True))
+            if field.get("required") is False:
+                replay_required = False
             if url_extraction:
                 lines.append(f"    _value = _extract_url_path_value(current_page.url, {url_extraction!r})")
                 lines.append("    if _value:")
                 lines.append(f"        _result[{label!r}] = _value")
+                lines.append("        _last_extracted_value = _value")
                 if replay_required:
                     lines.append("    else:")
                     lines.append(f"        _missing_required_fields.append({label!r})")
@@ -1066,6 +1206,7 @@ class TraceSkillCompiler:
                 lines.append("        _value = ''")
                 lines.append("    if _value:")
                 lines.append(f"        _result[{label!r}] = _value")
+                lines.append("        _last_extracted_value = _value")
                 if replay_required:
                     lines.append("    else:")
                     lines.append(f"        _missing_required_fields.append({label!r})")
@@ -1077,14 +1218,53 @@ class TraceSkillCompiler:
                 lines.append("        _value = ''")
                 lines.append("    if _value:")
                 lines.append(f"        _result[{label!r}] = _value")
+                lines.append("        _last_extracted_value = _value")
                 if replay_required:
                     lines.append("    else:")
                     lines.append(f"        _missing_required_fields.append({label!r})")
                 continue
             if label_extraction:
                 lines.append(f"    _value = await _extract_labeled_field_value({scope_var}, {label_extraction['label']!r})")
+                if value_locator:
+                    lines.append("    if not _value:")
+                    lines.append(f"        _value_node = {_locator_expression(scope_var, value_locator)}")
+                    lines.append("        if await _value_node.count():")
+                    lines.append("            _value = await _extract_node_text_or_value(_value_node)")
+                if label_locator:
+                    lines.append("    if not _value:")
+                    lines.append(f"        _label_node = {_locator_expression(scope_var, label_locator)}")
+                    lines.append("        if await _label_node.count():")
+                    lines.append('            _value_node = _label_node.locator("xpath=following-sibling::*[1]").first')
+                    lines.append("            if await _value_node.count():")
+                    lines.append("                _value = await _extract_node_text_or_value(_value_node)")
+                label_literals = [
+                    f"normalize-space()={_xpath_literal(label)}",
+                    f"normalize-space()={_xpath_literal(label + ':')}",
+                    f"normalize-space()={_xpath_literal(label + '：')}",
+                ]
+                label_xpath = "xpath=.//*[" + " or ".join(label_literals) + "]"
+                lines.append("    if not _value:")
+                lines.append(f"        _label_node = {scope_var}.locator({label_xpath!r}).first")
+                lines.append("        if await _label_node.count():")
+                lines.append('            _value_node = _label_node.locator("xpath=following-sibling::*[1]").first')
+                lines.append("            if await _value_node.count():")
+                lines.append("                _value = await _extract_node_text_or_value(_value_node)")
+                if field_locator or data_prop:
+                    if field_locator:
+                        lines.append("    if not _value:")
+                        lines.append(f"        _field = {_locator_expression(scope_var, field_locator)}")
+                    else:
+                        selector = f'[data-prop="{data_prop}"]'
+                        lines.append("    if not _value:")
+                        lines.append(f"        _field = {scope_var}.locator({selector!r}).first")
+                    display_selectors = self._display_value_selectors(field)
+                    lines.append("        if await _field.count():")
+                    lines.append(f"            _value = await _extract_display_field_value(_field, {tuple(display_selectors)!r})")
+                lines.append("    if not _value and _last_extracted_value:")
+                lines.append(f"        _value = await _extract_next_visible_value_after_text({scope_var}, _last_extracted_value)")
                 lines.append("    if _value:")
                 lines.append(f"        _result[{label!r}] = _value")
+                lines.append("        _last_extracted_value = _value")
                 if replay_required:
                     lines.append("    else:")
                     lines.append(f"        _missing_required_fields.append({label!r})")
@@ -1096,6 +1276,7 @@ class TraceSkillCompiler:
                 lines.append("        _value = await _extract_node_text_or_value(_value_node)")
                 lines.append("    if _value:")
                 lines.append(f"        _result[{label!r}] = _value")
+                lines.append("        _last_extracted_value = _value")
                 if replay_required:
                     lines.append("    else:")
                     lines.append(f"        _missing_required_fields.append({label!r})")
@@ -1116,6 +1297,7 @@ class TraceSkillCompiler:
             lines.append("        _value = ''")
             lines.append("    if _value:")
             lines.append(f"        _result[{label!r}] = _value")
+            lines.append("        _last_extracted_value = _value")
             if replay_required:
                 lines.append("    else:")
                 lines.append(f"        _missing_required_fields.append({label!r})")
@@ -1174,6 +1356,8 @@ class TraceSkillCompiler:
         if TraceSkillCompiler._field_locator(field.get("value_locator")):
             return True
         if TraceSkillCompiler._field_locator(field.get("field_locator")):
+            return True
+        if TraceSkillCompiler._field_locator(field.get("label_locator")):
             return True
         if str(field.get("data_prop") or "").strip():
             return True
@@ -1259,6 +1443,20 @@ class TraceSkillCompiler:
         }
 
     @staticmethod
+    def _infer_url_path_extraction(field: Dict[str, Any], page_url: str) -> Dict[str, Any]:
+        value = str(field.get("value") or "").strip()
+        if not value or len(value) < 3 or not page_url:
+            return {}
+        try:
+            segments = [unquote(segment) for segment in urlparse(str(page_url)).path.split("/") if segment]
+        except Exception:
+            return {}
+        for index, segment in enumerate(segments):
+            if segment == value:
+                return {"kind": "url_path_join", "start": index, "count": 1, "separator": "/"}
+        return {}
+
+    @staticmethod
     def _snapshot_text_pattern(value: Any) -> Dict[str, Any]:
         if not isinstance(value, dict):
             return {}
@@ -1324,29 +1522,23 @@ class TraceSkillCompiler:
         )
         code = self._rewrite_input_bindings_in_code(code, trace.input_bindings)
         code = _rewrite_random_like_locator_in_code(code, trace)
-        code = stabilize_callable_locator_filters(code)
-        code = stabilize_unsupported_locator_options(code)
-        code = stabilize_bare_text_clicks(code)
-        code = stabilize_fill_targets(code)
+        code = normalize_generated_playwright_code(code)
         download_signal = _trace_signal(trace, "download")
         if download_signal:
             self._classify_download_signal(trace, download_signal)
-        recovered_attempt = _trace_signal(trace, "recovered_attempt")
-        idempotent_postcondition = _trace_signal(trace, "idempotent_postcondition_replay")
         code_handles_download = "expect_download" in code or ".save_as(" in code
         lines = ["", f"    # trace {index}: {trace.description or 'AI operation'}"]
-        if (recovered_attempt or idempotent_postcondition) and self._has_compilable_postcondition(trace):
-            lines.append("    try:")
-            for code_line in code.splitlines():
-                lines.append(f"        {code_line}" if code_line.strip() else "")
-            lines.append("        _result = await run(current_page, _results)")
-            if key:
-                lines.append(f"        _results[{key!r}] = _result")
-            lines.append("    except Exception as _recovered_exc:")
-            lines.append("        _results.setdefault('_recovered_attempt_errors', []).append(str(_recovered_exc))")
-            return lines
         for code_line in code.splitlines():
             lines.append(f"    {code_line}" if code_line.strip() else "")
+        lines.extend(
+            [
+                "    try:",
+                "        await current_page.wait_for_load_state('domcontentloaded', timeout=5000)",
+                "        await current_page.wait_for_timeout(300)",
+                "    except Exception:",
+                "        pass",
+            ]
+        )
         if download_signal and self._download_trigger_mode(download_signal) == "export_task" and not code_handles_download:
             download_name = str(download_signal.get("filename") or "file")
             safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", download_name.split(".")[0]) or "file"

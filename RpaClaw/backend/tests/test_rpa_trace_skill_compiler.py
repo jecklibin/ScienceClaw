@@ -82,7 +82,7 @@ def test_compiler_does_not_swallow_recovered_attempt_without_postcondition():
     assert "_results['created'] = _result" in body
 
 
-def test_compiler_allows_recovered_attempt_only_with_compiled_postcondition():
+def test_compiler_keeps_recovered_attempt_failures_fatal_even_with_postcondition():
     script = TraceSkillCompiler().generate_script(
         [
             RPAAcceptedTrace(
@@ -108,12 +108,12 @@ def test_compiler_allows_recovered_attempt_only_with_compiled_postcondition():
     )
 
     body = _execute_body(script)
-    assert "_recovered_attempt_errors" in body
+    assert "_recovered_attempt_errors" not in body
     assert "_find_table_row_by_headers(" in body
     assert "raise RuntimeError('terminal state not observed')" in body
 
 
-def test_compiler_allows_idempotent_replay_with_compiled_postcondition():
+def test_compiler_keeps_idempotent_replay_failures_fatal():
     script = TraceSkillCompiler().generate_script(
         [
             RPAAcceptedTrace(
@@ -137,7 +137,8 @@ def test_compiler_allows_idempotent_replay_with_compiled_postcondition():
     )
 
     body = _execute_body(script)
-    assert "_recovered_attempt_errors" in body
+    assert "_recovered_attempt_errors" not in body
+    assert "raise RuntimeError('task row not found')" in body
     assert "verify table row absence postcondition" in body
 
 
@@ -215,6 +216,33 @@ def test_snapshot_table_cell_evidence_compiles_to_structural_row_extract():
     assert "_extract_text_pattern_value(" not in body
     assert "async def _find_table_row_by_headers(" in script
     assert "async def _extract_table_cell_value(" in script
+
+
+def test_table_postcondition_does_not_use_cross_table_ancestor_fallback():
+    script = TraceSkillCompiler().generate_script(
+        [
+            RPAAcceptedTrace(
+                trace_type=RPATraceType.AI_OPERATION,
+                source="ai",
+                description="Verify row exists",
+                user_instruction="verify row exists",
+                ai_execution=RPAAIExecution(
+                    language="python",
+                    code="async def run(page, results):\n    return {'action_performed': True}",
+                ),
+                postcondition={
+                    "kind": "table_row_exists",
+                    "table_headers": ["ID", "Status"],
+                    "key": {"ID": "ROW-1"},
+                    "expect": {"Status": "Ready"},
+                },
+            )
+        ],
+        is_local=True,
+    )
+
+    assert "root_body_rows" not in script
+    assert "ancestor::*[count(.//table)" not in script
 
 
 def test_snapshot_unique_text_only_fields_fall_back_to_runtime_ai():
@@ -2200,6 +2228,7 @@ def test_table_row_postcondition_includes_generic_header_scoped_helper():
         postcondition={
             "kind": "table_row_exists",
             "table_headers": ["Invoice", "Project", "Status"],
+            "row_selector": ".invoice-grid tbody tr",
             "key": {"Invoice": "{{invoice_number}}", "Project": "Project Alpha"},
             "expect": {"Status": "Submitted"},
         },
@@ -2224,9 +2253,11 @@ def test_table_row_postcondition_includes_generic_header_scoped_helper():
     assert "same_split_root = await table.evaluate" in script
     assert "ancestor::*[.//table[.//tbody/tr]" not in script
     assert "row_text" not in script
+    assert "direct_rows = page.locator(row_selector)" in script
     assert (
         "await _find_table_row_by_headers(current_page, ['Invoice', 'Project', 'Status'], "
-        "{'Invoice': kwargs.get('invoice_number', 'INV-001'), 'Project': 'Project Alpha', 'Status': 'Submitted'})"
+        "{'Invoice': kwargs.get('invoice_number', 'INV-001'), 'Project': 'Project Alpha', 'Status': 'Submitted'}, "
+        "row_selector='.invoice-grid tbody tr')"
         in body
     )
     assert "InvoiceApp" not in script

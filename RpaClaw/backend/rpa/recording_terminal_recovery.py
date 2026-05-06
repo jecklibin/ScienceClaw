@@ -13,21 +13,39 @@ def snapshot_diff_terminal_postcondition(
     result: Dict[str, Any],
     before_snapshot: Dict[str, Any],
     after_snapshot: Dict[str, Any],
+    instruction: str = "",
 ) -> Dict[str, Any]:
+    contract_kind = str(normalize_terminal_contract(plan).get("kind") or "").strip()
+    if contract_kind == "record_created":
+        return _new_row_recovery(
+            before_snapshot=before_snapshot,
+            after_snapshot=after_snapshot,
+            plan=plan,
+            result=result,
+            instruction=instruction,
+        )
+    if contract_kind == "record_removed":
+        return _disappeared_row_recovery(
+            before_snapshot=before_snapshot,
+            after_snapshot=after_snapshot,
+            plan=plan,
+            result=result,
+        )
     recovery = _updated_row_recovery(
         before_snapshot=before_snapshot,
         after_snapshot=after_snapshot,
         plan=plan,
         result=result,
     )
-    if not recovery:
+    if not recovery and contract_kind not in {"record_updated", "state_change"}:
         recovery = _new_row_recovery(
             before_snapshot=before_snapshot,
             after_snapshot=after_snapshot,
             plan=plan,
             result=result,
+            instruction=instruction,
         )
-    if not recovery:
+    if not recovery and contract_kind not in {"record_updated", "state_change"}:
         recovery = _disappeared_row_recovery(
             before_snapshot=before_snapshot,
             after_snapshot=after_snapshot,
@@ -37,12 +55,70 @@ def snapshot_diff_terminal_postcondition(
     return recovery
 
 
+def current_snapshot_terminal_postcondition(
+    *,
+    plan: Dict[str, Any],
+    result: Dict[str, Any],
+    snapshot: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Build terminal evidence from current DOM facts after a successful action.
+
+    This is intentionally separate from failed-attempt recovery. A row that is
+    merely present is not enough to forgive a failed browser action, but it is
+    useful when the action itself succeeded and only the generated terminal
+    assertion used a brittle selector.
+    """
+
+    contract = normalize_terminal_contract(plan)
+    if not contract.get("required"):
+        return {}
+    desired = {
+        str(item.get("type") or "").strip().lower()
+        for item in contract.get("success_evidence") or []
+        if str(item.get("type") or "").strip()
+    }
+    if contract.get("kind") not in {"record_created", "record_updated"}:
+        postcondition = plan.get("postcondition") if isinstance(plan.get("postcondition"), dict) else {}
+        postcondition_kind = str(postcondition.get("kind") or "").strip().lower()
+        if contract.get("kind") != "state_change" or postcondition_kind != "table_row_exists":
+            return {}
+        if "row_exists" not in desired and "postcondition" not in desired:
+            return {}
+        if "url_changed" in desired or "download_created" in desired:
+            return {}
+    if desired and not (desired & {"row_exists", "field_value_equals", "postcondition"}):
+        return {}
+    row = _find_existing_table_row_matching_plan_values(snapshot=snapshot, plan=plan, result=result)
+    if not row:
+        return {}
+    postcondition = _postcondition_from_row(row, kind="table_row_exists")
+    if not postcondition:
+        return {}
+    evidence = [
+        {
+            "type": "row_exists",
+            "source": "snapshot",
+            "summary": "A correlated table row is visible after the successful browser action.",
+        }
+    ]
+    if postcondition.get("expect"):
+        evidence.append(
+            {
+                "type": "field_value_equals",
+                "source": "snapshot",
+                "summary": "The visible table row includes a terminal status/value.",
+            }
+        )
+    return {"postcondition": postcondition, "evidence": evidence, "row_values": row["row_values"]}
+
+
 def recover_failed_side_effect_from_snapshot_diff(
     *,
     plan: Dict[str, Any],
     result: Dict[str, Any],
     before_snapshot: Dict[str, Any],
     after_snapshot: Dict[str, Any],
+    instruction: str = "",
 ) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
     """Recover a failed side-effect attempt only when DOM table facts prove it.
 
@@ -68,12 +144,18 @@ def recover_failed_side_effect_from_snapshot_diff(
         after_snapshot=after_snapshot,
         plan=plan,
         result=result,
+        instruction=instruction,
     )
     if not recovery:
         return None
 
     postcondition = recovery["postcondition"]
     evidence = recovery["evidence"]
+    if not _recovery_evidence_matches_contract(evidence, contract):
+        return None
+    first_evidence_type = str((evidence[0] if evidence else {}).get("type") or "")
+    if contract.get("kind") == "state_change" and first_evidence_type == "row_exists":
+        return None
 
     signals = dict(result.get("signals") or {})
     signals["recovered_attempt"] = {
@@ -105,12 +187,60 @@ def recover_failed_side_effect_from_snapshot_diff(
     return recovered_plan, recovered_result
 
 
+def _recovery_evidence_matches_contract(evidence: List[Dict[str, Any]], contract: Dict[str, Any]) -> bool:
+    desired = {
+        str(item.get("type") or "").strip().lower()
+        for item in contract.get("success_evidence") or []
+        if str(item.get("type") or "").strip()
+    }
+    if not desired:
+        return True
+    observed = {
+        str(item.get("type") or "").strip().lower()
+        for item in evidence
+        if str(item.get("type") or "").strip()
+    }
+    if observed & desired:
+        return True
+    if "toast_visible" in desired and "feedback_visible" in observed:
+        return True
+    return False
+
+
+def _find_existing_table_row_matching_plan_values(
+    *,
+    snapshot: Dict[str, Any],
+    plan: Dict[str, Any],
+    result: Dict[str, Any],
+) -> Dict[str, Any]:
+    candidate_values = _plan_candidate_values(plan, result)
+    if not candidate_values:
+        return {}
+    min_score = min(2, len(candidate_values))
+    scored_rows: List[Tuple[int, Dict[str, Any]]] = []
+    for row in _snapshot_rows(snapshot):
+        row_values = {_clean_text(value) for value in row.get("row_values", {}).values() if _clean_text(value)}
+        matched_values = row_values & candidate_values
+        score = len(matched_values)
+        if score >= min_score:
+            scored_row = dict(row)
+            scored_row["matched_values"] = matched_values
+            scored_rows.append((score, scored_row))
+    if not scored_rows:
+        return {}
+    scored_rows.sort(key=lambda item: item[0], reverse=True)
+    if len(scored_rows) > 1 and scored_rows[0][0] == scored_rows[1][0]:
+        return {}
+    return scored_rows[0][1]
+
+
 def _new_row_recovery(
     *,
     before_snapshot: Dict[str, Any],
     after_snapshot: Dict[str, Any],
     plan: Dict[str, Any],
     result: Dict[str, Any],
+    instruction: str = "",
 ) -> Dict[str, Any]:
     diff = _find_table_row_matching_plan_values(
         before_snapshot=before_snapshot,
@@ -119,6 +249,13 @@ def _new_row_recovery(
         result=result,
     )
     if not diff:
+        return {}
+    contract = normalize_terminal_contract(plan)
+    if contract.get("kind") == "record_created" and not _row_contains_new_instruction_identifiers(
+        diff,
+        before_snapshot=before_snapshot,
+        instruction=instruction,
+    ):
         return {}
     postcondition = _postcondition_from_row(diff, kind="table_row_exists")
     if not postcondition:
@@ -321,6 +458,37 @@ def _find_disappeared_table_row_matching_plan_values(
     return scored_rows[0][1]
 
 
+def _row_contains_new_instruction_identifiers(
+    row: Dict[str, Any],
+    *,
+    before_snapshot: Dict[str, Any],
+    instruction: str,
+) -> bool:
+    """Require created-record recovery to prove newly requested identifiers.
+
+    If a multi-entity instruction mentions an existing source entity and a new
+    target entity, a row containing only the source entity is not terminal
+    evidence for record creation. This uses structured snapshot facts plus the
+    user instruction identifiers, not selector/error text.
+    """
+
+    instruction_tokens = set(_entity_tokens(instruction))
+    if not instruction_tokens:
+        return True
+    before_text = _clean_text(
+        json.dumps(
+            [_data_cell_values(item.get("row_values", {})) for item in _snapshot_rows(before_snapshot)],
+            ensure_ascii=False,
+            default=str,
+        )
+    ).lower()
+    new_tokens = {token for token in instruction_tokens if token.lower() not in before_text}
+    if not new_tokens:
+        return True
+    row_text = _clean_text(json.dumps(row.get("row_values") or {}, ensure_ascii=False, default=str)).lower()
+    return all(token.lower() in row_text for token in new_tokens)
+
+
 def _has_comparable_table_context(row: Dict[str, Any], after_snapshot: Dict[str, Any]) -> bool:
     headers = {_clean_text(header) for header in list(row.get("headers") or []) if _clean_text(header)}
     if not headers:
@@ -402,6 +570,7 @@ def _snapshot_rows(snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
                     "headers": headers,
                     "row_values": values,
                     "signature": signature,
+                    "row_selector": _row_selector_hint(row),
                 }
             )
     return rows
@@ -451,13 +620,42 @@ def _postcondition_from_row(diff: Dict[str, Any], *, kind: str) -> Dict[str, Any
     postcondition = {
         "kind": kind,
         "source": "snapshot",
-        "table_headers": [header for header in values.keys() if not str(header).startswith("index:")][:8],
+        "table_headers": _postcondition_headers(values, key_header, expect_values),
         "key": {key_header: values[key_header]},
         "expect": {},
     }
     if expect_values:
         postcondition["expect"] = expect_values
+    row_selector = _clean_text(diff.get("row_selector"))
+    if row_selector:
+        postcondition["row_selector"] = row_selector
     return postcondition
+
+
+def _postcondition_headers(values: Dict[str, str], key_header: str, expect_values: Dict[str, str]) -> List[str]:
+    headers = [header for header in values.keys() if not str(header).startswith("index:")]
+    required = [key_header, *expect_values.keys()]
+    selected: List[str] = []
+    for header in headers:
+        if header in required or len(selected) < 8:
+            selected.append(header)
+    for header in required:
+        if header and header not in selected:
+            selected.append(header)
+    return selected[:16]
+
+
+def _row_selector_hint(row: Dict[str, Any]) -> str:
+    for hint in list(row.get("locator_hints") or []):
+        if not isinstance(hint, dict):
+            continue
+        expression = _clean_text(hint.get("expression"))
+        match = re.search(r"page\.locator\((?P<quote>['\"])(?P<selector>.+?)(?P=quote)\)\.nth\(\d+\)", expression)
+        if match:
+            selector = _clean_text(match.group("selector"))
+            if selector:
+                return selector
+    return ""
 
 
 def _select_expect_values(

@@ -28,23 +28,27 @@ from .recording_effects import (
     _should_drain_download_events,
 )
 from .recording_contracts import normalize_terminal_contract
+from .recording_download_preplans import build_download_preplanned_plan
+from .recording_modal_preplans import build_modal_form_preplanned_plan
+from .recording_ordinal_preplans import (
+    build_preplanned_plan as build_ordinal_preplanned_plan,
+    _build_ordinal_overlay_plan,
+    _build_table_ordinal_overlay_plan,
+)
+from .recording_search_preplans import build_search_preplanned_plan
 from .recording_repair import (
     _classify_recording_failure,
     _known_failure_analysis,
     _repair_guidance_for_failure,
 )
 from .recording_terminal_recovery import (
+    current_snapshot_terminal_postcondition,
     recover_failed_side_effect_from_snapshot_diff,
     snapshot_diff_terminal_postcondition,
 )
 from .recording_verifier import capture_browser_evidence
 from .playwright_code_normalizer import (
-    stabilize_dialog_button_actions,
-    stabilize_bare_text_clicks,
-    stabilize_callable_locator_filters,
-    stabilize_download_contexts,
-    stabilize_fill_targets,
-    stabilize_unsupported_locator_options,
+    normalize_generated_playwright_code,
 )
 from .snapshot_compression import compact_recording_snapshot
 from .trace_models import (
@@ -270,6 +274,12 @@ class RecordingRuntimeAgent:
         debug_context = dict(debug_context or {})
         before = await _page_state(page)
         snapshot = await _safe_page_snapshot(page)
+        if _instruction_is_detail_extract_only(instruction) and not list(snapshot.get("detail_views") or []):
+            try:
+                await page.wait_for_timeout(750)
+                snapshot = await _safe_page_snapshot(page)
+            except Exception:
+                pass
         compact_snapshot = _compact_snapshot(snapshot, instruction)
         payload = {
             "instruction": instruction,
@@ -287,7 +297,7 @@ class RecordingRuntimeAgent:
             debug_context=debug_context,
         )
 
-        first_plan = _build_read_only_preplanned_plan(instruction, snapshot)
+        first_plan = _build_preplanned_plan(instruction, snapshot)
         if not first_plan:
             first_plan, first_result = await self._plan_and_execute(
                 page=page,
@@ -430,14 +440,32 @@ class RecordingRuntimeAgent:
             **payload,
             "repair": repair_context,
         }
-        repair_plan, repair_result = await self._plan_and_execute(
-            page=page,
-            payload=repair_payload,
-            runtime_results=runtime_results,
-            instruction=instruction,
-            before=before,
-            before_snapshot=failed_snapshot,
-        )
+        repair_plan = _build_preplanned_plan(instruction, failed_snapshot)
+        if repair_plan:
+            repair_result = await self.executor(page, repair_plan, runtime_results)
+            repair_result = await _ensure_expected_effect(
+                page=page,
+                instruction=instruction,
+                plan=repair_plan,
+                result=repair_result,
+                before=failed_page,
+            )
+            repair_result = await self._verify_instruction_completion_if_needed(
+                page=page,
+                instruction=instruction,
+                plan=repair_plan,
+                result=repair_result,
+                before=failed_page,
+            )
+        else:
+            repair_plan, repair_result = await self._plan_and_execute(
+                page=page,
+                payload=repair_payload,
+                runtime_results=runtime_results,
+                instruction=instruction,
+                before=before,
+                before_snapshot=failed_snapshot,
+            )
         _write_recording_attempt_debug(
             "repair_attempt",
             instruction=instruction,
@@ -683,7 +711,7 @@ class RecordingRuntimeAgent:
             before=before,
         )
         timing_ms["effect_verifier"] = round((time.perf_counter() - started_at) * 1000, 1)
-        if _is_terminal_contract_failure_result(result) and executor_result.get("success") and before_snapshot:
+        if executor_result.get("success") and before_snapshot and not _has_failed_instruction_completion(result):
             recovered = await self._recover_successful_side_effect_from_snapshot_diff(
                 page=page,
                 plan=plan,
@@ -691,7 +719,10 @@ class RecordingRuntimeAgent:
                 verifier_result=result,
                 before_snapshot=before_snapshot,
             )
-            if recovered:
+            if recovered and (
+                _is_terminal_contract_failure_result(result)
+                or _terminal_recovery_adds_structural_evidence(result, recovered)
+            ):
                 result = recovered
         if _should_try_semantic_terminal_judge(plan, result):
             try:
@@ -816,6 +847,7 @@ class RecordingRuntimeAgent:
             result=result,
             before_snapshot=before_snapshot,
             after_snapshot=after_snapshot,
+            instruction=instruction,
         )
         if not recovered_side_effect:
             return None
@@ -859,6 +891,9 @@ class RecordingRuntimeAgent:
         verifier_result: Dict[str, Any],
         before_snapshot: Dict[str, Any],
     ) -> Dict[str, Any]:
+        contract = normalize_terminal_contract(plan)
+        if contract.get("kind") == "state_change":
+            return {}
         after_snapshot = await _safe_page_snapshot(page)
         recovery = snapshot_diff_terminal_postcondition(
             plan=plan,
@@ -866,6 +901,12 @@ class RecordingRuntimeAgent:
             before_snapshot=before_snapshot,
             after_snapshot=after_snapshot,
         )
+        if not recovery:
+            recovery = current_snapshot_terminal_postcondition(
+                plan=plan,
+                result=executor_result,
+                snapshot=after_snapshot,
+            )
         if not recovery:
             return {}
         postcondition = recovery.get("postcondition")
@@ -875,6 +916,7 @@ class RecordingRuntimeAgent:
         plan["postcondition"] = postcondition
         signals = dict(executor_result.get("signals") or {})
         signals["terminal_evidence"] = evidence
+        signals["terminal_row"] = recovery.get("row_values") or {}
         effect = dict(executor_result.get("effect") or {})
         effect.setdefault("type", str(plan.get("expected_effect") or "mixed"))
         effect["terminal_evidence"] = str(evidence[0].get("type") or "postcondition")
@@ -907,7 +949,7 @@ class RecordingRuntimeAgent:
         fallback_trace: RPAAcceptedTrace,
     ) -> RPAAcceptedTrace:
         combined_plan = _combine_run_python_attempts(
-            [plan for plan in failed_plans if _plan_has_browser_side_effect(plan)],
+            [plan for plan in failed_plans if _plan_is_safe_replay_precondition(plan)],
             repair_plan,
         )
         if not combined_plan:
@@ -1979,6 +2021,28 @@ def _plan_has_browser_side_effect(plan: Dict[str, Any]) -> bool:
     return action_type in {"goto", "click", "fill", "run_python"}
 
 
+def _plan_is_safe_replay_precondition(plan: Dict[str, Any]) -> bool:
+    action_type = str(plan.get("action_type") or "").strip()
+    if action_type == "goto":
+        return True
+    if action_type != "run_python":
+        return False
+    code = str(plan.get("code") or "").lower()
+    mutation_markers = (
+        ".click(",
+        ".dblclick(",
+        ".fill(",
+        ".press(",
+        ".check(",
+        ".uncheck(",
+        ".select_option(",
+        ".set_input_files(",
+        ".dispatch_event(",
+        ".evaluate(",
+    )
+    return not any(marker in code for marker in mutation_markers)
+
+
 _ENTITY_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_])(?=[A-Za-z0-9_-]*[A-Za-z])(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9][A-Za-z0-9_-]{3,}(?![A-Za-z0-9_])")
 
 
@@ -2148,6 +2212,32 @@ def _has_failed_instruction_completion(result: Dict[str, Any]) -> bool:
     signals = result.get("signals") if isinstance(result.get("signals"), dict) else {}
     judgement = signals.get("instruction_completion") or result.get("instruction_completion")
     return isinstance(judgement, dict) and judgement.get("passed") is False
+
+
+def _terminal_recovery_adds_structural_evidence(original: Dict[str, Any], recovered: Dict[str, Any]) -> bool:
+    original_types = _terminal_evidence_types(original)
+    recovered_types = _terminal_evidence_types(recovered)
+    structural_types = {"row_exists", "row_absent", "row_status_changed", "field_value_equals", "postcondition"}
+    return bool((recovered_types - original_types) & structural_types)
+
+
+def _terminal_evidence_types(result: Dict[str, Any]) -> set[str]:
+    types: set[str] = set()
+    effect = result.get("effect") if isinstance(result.get("effect"), dict) else {}
+    if effect.get("terminal_evidence"):
+        types.add(str(effect.get("terminal_evidence")).strip().lower())
+    for item in effect.get("terminal_evidence_items") or []:
+        if isinstance(item, dict) and item.get("type"):
+            types.add(str(item.get("type")).strip().lower())
+    signals = result.get("signals") if isinstance(result.get("signals"), dict) else {}
+    for item in signals.get("terminal_evidence") or []:
+        if isinstance(item, dict) and item.get("type"):
+            types.add(str(item.get("type")).strip().lower())
+    verification = result.get("terminal_verification") if isinstance(result.get("terminal_verification"), dict) else {}
+    for item in verification.get("evidence") or []:
+        if isinstance(item, dict) and item.get("type"):
+            types.add(str(item.get("type")).strip().lower())
+    return {item for item in types if item}
 
 
 def _attach_semantic_terminal_judgement(result: Dict[str, Any], judgement: Dict[str, Any]) -> Dict[str, Any]:
@@ -2646,45 +2736,40 @@ def _instruction_is_detail_extract_only(instruction: str) -> bool:
     )
 
 
+def _build_preplanned_plan(instruction: str, snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    plan = build_download_preplanned_plan(instruction, snapshot)
+    if plan:
+        plan.setdefault("preplanned_source", "download_snapshot")
+        return plan
+    plan = build_modal_form_preplanned_plan(instruction, snapshot)
+    if plan:
+        plan.setdefault("preplanned_source", "modal_snapshot")
+        return plan
+    plan = build_search_preplanned_plan(instruction, snapshot)
+    if plan:
+        plan.setdefault("preplanned_source", "search_snapshot")
+        return plan
+    plan = build_ordinal_preplanned_plan(instruction, snapshot)
+    if plan:
+        return plan
+    plan = _build_detail_extract_plan(instruction, snapshot)
+    if plan:
+        plan = dict(plan)
+        plan.setdefault("preplanned_source", "detail_snapshot")
+        return plan
+    return None
+
+
 def _build_read_only_preplanned_plan(instruction: str, snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Use deterministic snapshot plans only for read-only extraction."""
-    for builder in (
-        _build_table_ordinal_overlay_plan,
-        _build_ordinal_overlay_plan,
-        _build_detail_extract_plan,
-    ):
-        plan = builder(instruction, snapshot)
-        if plan and _normalize_expected_effect(plan.get("expected_effect")) == "extract":
-            plan = dict(plan)
-            plan.setdefault("preplanned_source", "ordinal_snapshot" if builder is not _build_detail_extract_plan else "detail_snapshot")
-            return plan
+    """Backward-compatible helper for callers that only want extraction preplans."""
+    plan = _build_preplanned_plan(instruction, snapshot)
+    if plan and _normalize_expected_effect(plan.get("expected_effect")) == "extract":
+        return plan
     return None
 
 
 def _normalize_generated_playwright_code(code: str) -> str:
-    normalized = str(code or "").replace(".get_by_testid(", ".get_by_test_id(")
-    normalized = stabilize_callable_locator_filters(normalized)
-    normalized = stabilize_unsupported_locator_options(normalized)
-    normalized = stabilize_bare_text_clicks(normalized)
-    normalized = stabilize_fill_targets(normalized)
-    normalized = stabilize_dialog_button_actions(normalized)
-    normalized = stabilize_download_contexts(normalized)
-    normalized = re.sub(
-        r"\.filter\(\s*has_attribute\s*=\s*(['\"]).*?\1\s*,\s*has_text\s*=",
-        ".filter(has_text=",
-        normalized,
-    )
-    normalized = re.sub(
-        r"\.filter\(\s*has_text\s*=\s*([^,\)]+)\s*,\s*has_attribute\s*=\s*(['\"]).*?\2\s*\)",
-        r".filter(has_text=\1)",
-        normalized,
-    )
-    normalized = re.sub(
-        r"\.filter\(\s*has_attribute\s*=\s*(['\"]).*?\1\s*\)",
-        "",
-        normalized,
-    )
-    return normalized
+    return normalize_generated_playwright_code(code)
 
 
 def _combine_run_python_attempts(
@@ -2745,638 +2830,6 @@ def _has_run_function(code: str) -> bool:
 def _is_terminal_contract_failure_result(result: Dict[str, Any]) -> bool:
     terminal = result.get("terminal_verification")
     return isinstance(terminal, dict) and terminal.get("required") is True and terminal.get("passed") is False
-
-
-def _build_table_ordinal_overlay_plan(instruction: str, snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    intent = _detect_ordinal_intent(instruction)
-    if not intent:
-        return None
-    action = _detect_ordinal_action(instruction)
-    if action not in {"click_primary", "extract_title"}:
-        return None
-
-    table = _select_table_view(snapshot, instruction)
-    if not table:
-        return None
-    rows = list(table.get("rows") or [])
-    if not rows:
-        return None
-    if str(intent.get("kind") or "") == "first_n":
-        if action != "extract_title":
-            return None
-        limit = int(intent.get("limit") or 0)
-        if limit <= 0:
-            return None
-        return _table_first_n_rows_plan(table, limit)
-    index = _ordinal_index_from_intent(intent, len(rows))
-    if index is None:
-        return None
-    column = _select_table_column(table, instruction)
-    if not column:
-        return None
-
-    rows_setup = _table_rows_setup_code(table)
-    column_id = str(column.get("column_id") or "")
-    if column_id:
-        cell_selector = f"td[data-colid={column_id!r}]"
-    else:
-        col_index = int(column.get("index") or 0) + 1
-        cell_selector = f"td:nth-child({col_index})"
-
-    if action == "click_primary":
-        action_selector = _table_column_action_selector(table, index, column)
-        if not action_selector:
-            return None
-        code = (
-            "async def run(page, results):\n"
-            f"{rows_setup}"
-            f"    _row = _rows.nth({index})\n"
-            f"    await _row.locator({action_selector!r}).click()\n"
-            "    return {'action_performed': True}"
-        )
-        return {
-            "description": "Click table row column action",
-            "action_type": "run_python",
-            "expected_effect": "click",
-            "output_key": "table_row_action",
-            "code": code,
-            "table_ordinal_overlay": True,
-        }
-
-    code = (
-        "async def run(page, results):\n"
-        f"{rows_setup}"
-        f"    _row = _rows.nth({index})\n"
-        f"    return (await _row.locator({cell_selector!r}).inner_text()).strip()"
-    )
-    return {
-        "description": "Extract table row column value",
-        "action_type": "run_python",
-        "expected_effect": "extract",
-        "output_key": "table_row_value",
-        "code": code,
-        "table_ordinal_overlay": True,
-    }
-
-
-def _ordinal_index_from_intent(intent: Dict[str, int | str], row_count: int) -> Optional[int]:
-    kind = str(intent.get("kind") or "")
-    if kind == "last":
-        return row_count - 1 if row_count else None
-    if kind == "first_n":
-        return None
-    index = int(intent.get("index") or 0)
-    return index if 0 <= index < row_count else None
-
-
-def _select_table_view(snapshot: Dict[str, Any], instruction: str) -> Optional[Dict[str, Any]]:
-    tables = [table for table in list(snapshot.get("table_views") or []) if table.get("rows")]
-    if not tables:
-        return None
-    return max(tables, key=lambda table: _score_table_view_for_instruction(table, instruction))
-
-
-def _score_table_view_for_instruction(table: Dict[str, Any], instruction: str) -> int:
-    text = str(instruction or "").lower()
-    score = len(table.get("rows") or [])
-    title_parts = [str(table.get("title") or "")]
-    title_parts.extend(str(item or "") for item in table.get("nearby_headings") or [])
-    for title in title_parts:
-        normalized = title.strip().lower()
-        if not normalized:
-            continue
-        if normalized in text:
-            score += 100
-        elif all(token in text for token in normalized.split()):
-            score += 40
-    for column in table.get("columns") or []:
-        header = str(column.get("header") or "").strip().lower()
-        if header and header in text:
-            score += 20
-    return score
-
-
-def _select_table_column(table: Dict[str, Any], instruction: str) -> Optional[Dict[str, Any]]:
-    text = str(instruction or "").lower()
-    columns = list(table.get("columns") or [])
-    scored: List[tuple[int, Dict[str, Any]]] = []
-    for column in columns:
-        header = str(column.get("header") or "").lower()
-        role = str(column.get("role") or "").lower()
-        score = 0
-        if header and header in text:
-            score += 6
-        if any(token and token in text for token in header.replace("_", " ").split()):
-            score += 3
-        if role and role in text:
-            score += 3
-        if role == "file_link" and any(term in text for term in ("file", "文件", "名称", "名字")):
-            score += 5
-        if role == "status" and any(term in text for term in ("status", "状态")):
-            score += 5
-        if role == "selection" and any(term in text for term in ("checkbox", "勾选", "选择")):
-            score += 5
-        if score:
-            scored.append((score, column))
-    if not scored:
-        return None
-    scored.sort(key=lambda item: item[0], reverse=True)
-    return scored[0][1]
-
-
-def _table_row_selector(table: Dict[str, Any]) -> str:
-    for row in table.get("rows") or []:
-        for hint in row.get("locator_hints") or []:
-            expression = str(hint.get("expression") or "")
-            match = re.search(r"page\.locator\((['\"])(.*?)\1\)\.nth\(\d+\)", expression)
-            if match:
-                return match.group(2)
-    return "tbody tr"
-
-
-def _table_rows_setup_code(table: Dict[str, Any]) -> str:
-    title = str(table.get("title") or "").strip()
-    row_selector = _table_row_selector(table)
-    if title:
-        return (
-            f"    _heading = page.get_by_text({title!r}, exact=True).first\n"
-            "    if await _heading.count():\n"
-            "        _rows = _heading.locator(\"xpath=following::table[.//tbody/tr][1]//tbody/tr\")\n"
-            "    else:\n"
-            f"        _rows = page.locator({row_selector!r})\n"
-        )
-    return f"    _rows = page.locator({row_selector!r})\n"
-
-
-def _table_first_n_rows_plan(table: Dict[str, Any], limit: int) -> Optional[Dict[str, Any]]:
-    columns = []
-    for column in table.get("columns") or []:
-        header = str(column.get("header") or "").strip()
-        if not header:
-            continue
-        column_id = str(column.get("column_id") or "").strip()
-        if column_id:
-            selector = f"td[data-colid={column_id!r}]"
-        else:
-            index = int(column.get("index") or 0) + 1
-            selector = f"td:nth-child({index})"
-        columns.append((header, selector))
-    if not columns:
-        return None
-
-    rows_setup = _table_rows_setup_code(table)
-    column_specs = repr(columns)
-    code = (
-        "async def run(page, results):\n"
-        f"{rows_setup}"
-        f"    _limit = min({limit}, await _rows.count())\n"
-        f"    _columns = {column_specs}\n"
-        "    _records = []\n"
-        "    for _i in range(_limit):\n"
-        "        _row = _rows.nth(_i)\n"
-        "        _record = {}\n"
-        "        for _header, _selector in _columns:\n"
-        "            _cell = _row.locator(_selector)\n"
-        "            _record[_header] = (await _cell.inner_text()).strip() if await _cell.count() else ''\n"
-        "        _records.append(_record)\n"
-        "    return _records"
-    )
-    return {
-        "description": "Extract first table rows",
-        "action_type": "run_python",
-        "expected_effect": "extract",
-        "output_key": "table_rows",
-        "code": code,
-        "table_ordinal_overlay": True,
-    }
-
-
-def _table_column_action_selector(table: Dict[str, Any], index: int, column: Dict[str, Any]) -> str:
-    column_id = str(column.get("column_id") or "")
-    rows = list(table.get("rows") or [])
-    if index >= len(rows):
-        return ""
-    for cell in rows[index].get("cells") or []:
-        if column_id and str(cell.get("column_id") or "") != column_id:
-            continue
-        actions = list(cell.get("actions") or cell.get("row_local_actions") or [])
-        for action in actions:
-            locator = action.get("locator") if isinstance(action, dict) else {}
-            if isinstance(locator, dict) and locator.get("scope") == "row" and locator.get("value"):
-                return str(locator.get("value"))
-    if column_id:
-        return f"td[data-colid={column_id!r}] a, td[data-colid={column_id!r}] button"
-    return ""
-
-
-def _build_ordinal_overlay_plan(instruction: str, snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    intent = _detect_ordinal_intent(instruction)
-    if not intent:
-        return None
-
-    action = _detect_ordinal_action(instruction)
-    if not action:
-        return None
-
-    collection = _extract_repeated_candidate_collection(snapshot)
-    if not collection:
-        return None
-
-    items = list(collection.get("items") or [])
-    selector = str(collection.get("primary_selector") or "")
-    if not selector or not items:
-        return None
-
-    kind = intent["kind"]
-    index = int(intent.get("index") or 0)
-    if kind == "last":
-        index = len(items) - 1
-    if kind in {"nth", "last"} and (index < 0 or index >= len(items)):
-        return None
-
-    if kind == "first_n":
-        limit = int(intent.get("limit") or 0)
-        if limit <= 0:
-            return None
-        return _ordinal_first_n_titles_plan(selector, limit)
-
-    if action == "extract_title":
-        return _ordinal_extract_title_plan(selector, index)
-
-    if action == "click_secondary":
-        secondary_selector = _select_secondary_action_selector(collection, instruction)
-        if not secondary_selector:
-            return None
-        return _ordinal_click_plan(secondary_selector, index, description="Click ordinal item action")
-
-    if action == "click_primary":
-        return _ordinal_click_plan(selector, index, description="Click ordinal item")
-
-    return None
-
-
-def _detect_ordinal_intent(instruction: str) -> Optional[Dict[str, int | str]]:
-    text = str(instruction or "").strip().lower()
-    if not text:
-        return None
-
-    first_n = re.search(r"\bfirst\s+(\d+)\b", text) or re.search(r"前\s*([0-9一二三四五六七八九十两]+)", text)
-    if first_n:
-        limit = _parse_ordinal_number(first_n.group(1))
-        if limit is not None:
-            return {"kind": "first_n", "limit": limit}
-
-    nth = re.search(r"\b(?:number|item|row)\s+(\d+)\b", text) or re.search(r"第\s*([0-9一二三四五六七八九十两]+)\s*(?:个|项|条|行)?", text)
-    if nth:
-        number = _parse_ordinal_number(nth.group(1))
-        if number is not None:
-            return {"kind": "nth", "index": max(number - 1, 0)}
-
-    if any(token in text for token in ("第一个", "第一项", "第一条", "第一行", "first")):
-        return {"kind": "nth", "index": 0}
-    if any(token in text for token in ("第二个", "第二项", "第二条", "第二行", "second")):
-        return {"kind": "nth", "index": 1}
-    if any(token in text for token in ("最后一个", "最后一项", "最后一条", "最后一行", "last")):
-        return {"kind": "last", "index": -1}
-    return None
-
-
-def _parse_ordinal_number(value: str) -> Optional[int]:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    if text.isdigit():
-        return int(text)
-    digits = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
-    if text in digits:
-        return digits[text]
-    if text == "十":
-        return 10
-    if text.startswith("十") and len(text) == 2 and text[1] in digits:
-        return 10 + digits[text[1]]
-    if text.endswith("十") and len(text) == 2 and text[0] in digits:
-        return digits[text[0]] * 10
-    if "十" in text and len(text) == 3 and text[0] in digits and text[2] in digits:
-        return digits[text[0]] * 10 + digits[text[2]]
-    return None
-
-
-def _detect_ordinal_action(instruction: str) -> str:
-    text = str(instruction or "").strip().lower()
-    semantic_terms = (
-        "most related",
-        "best match",
-        "highest",
-        "most relevant",
-        "compare",
-        "summarize",
-        "summary",
-        "最相关",
-        "最高",
-        "最多",
-        "最佳",
-        "比较",
-        "总结",
-    )
-    if any(term in text for term in semantic_terms):
-        return ""
-    if any(term in text for term in ("download", "下载")):
-        return "click_secondary"
-    if any(term in text for term in ("click", "open", "visit", "go to", "点击", "打开", "进入")):
-        return "click_primary"
-    if any(term in text for term in ("name", "title", "text", "名称", "名字", "标题", "获取", "抓取", "提取")):
-        return "extract_title"
-    return ""
-
-
-def _extract_repeated_candidate_collection(snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    grouped: Dict[str, List[Dict[str, Any]]] = {}
-    for node in snapshot.get("actionable_nodes") or []:
-        selector = str(node.get("collection_item_selector") or "").strip()
-        count = int(node.get("collection_item_count") or 0)
-        label = _node_label(node)
-        if not selector or count < 2 or not label:
-            continue
-        if _looks_like_secondary_action_label(label):
-            continue
-        if str(node.get("role") or "").strip().lower() not in {"link", "button"}:
-            continue
-        grouped.setdefault(selector, []).append(node)
-
-    if not grouped:
-        return _extract_repeated_candidate_collection_from_frames(snapshot)
-
-    grouped = {
-        selector: nodes
-        for selector, nodes in grouped.items()
-        if len({_node_label(node).lower() for node in nodes}) >= 2
-        and any(_looks_like_primary_item_label(_node_label(node)) for node in nodes)
-    }
-    if not grouped:
-        return _extract_repeated_candidate_collection_from_frames(snapshot)
-
-    selector, nodes = max(
-        grouped.items(),
-        key=lambda item: _score_ordinal_primary_collection(
-            item[0],
-            [_node_label(node) for node in item[1]],
-            len(item[1]),
-        ),
-    )
-    items = []
-    for index, node in enumerate(_sort_snapshot_nodes(nodes)):
-        label = _node_label(node)
-        if not label:
-            continue
-        items.append(
-            {
-                "index": index,
-                "title": label,
-                "container_id": str(node.get("container_id") or ""),
-                "primary_selector": selector,
-            }
-        )
-    if len(items) < 2:
-        return None
-
-    secondary = _extract_secondary_action_selectors(snapshot, items)
-    return {
-        "kind": "repeated_candidates",
-        "source": "raw_snapshot",
-        "primary_selector": selector,
-        "items": items,
-        "secondary_selectors": secondary,
-    }
-
-
-def _extract_repeated_candidate_collection_from_frames(snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    candidates: List[Dict[str, Any]] = []
-    for frame in snapshot.get("frames") or []:
-        collections = list(frame.get("collections") or [])
-        for collection in collections:
-            if str(collection.get("kind") or "") != "repeated_items":
-                continue
-            selector = _collection_item_css_selector(collection)
-            if not selector:
-                continue
-            role = str((collection.get("item_hint") or {}).get("role") or "").strip().lower()
-            if role and role not in {"link", "button"}:
-                continue
-
-            items: List[Dict[str, Any]] = []
-            labels: List[str] = []
-            for item in collection.get("items") or []:
-                label = _node_label(item)
-                if not _looks_like_primary_item_label(label):
-                    continue
-                labels.append(label)
-                items.append(
-                    {
-                        "index": len(items),
-                        "title": label,
-                        "container_id": "",
-                        "primary_selector": selector,
-                    }
-                )
-
-            if len(items) < 2 or len({label.lower() for label in labels}) < 2:
-                continue
-
-            candidates.append(
-                {
-                    "kind": "repeated_candidates",
-                    "source": "raw_snapshot.frames.collections",
-                    "primary_selector": selector,
-                    "items": items,
-                    "secondary_selectors": _extract_frame_secondary_action_selectors(collections, collection),
-                    "_score": _score_ordinal_primary_collection(
-                        selector,
-                        labels,
-                        int(collection.get("item_count") or len(items)),
-                    ),
-                }
-            )
-
-    if not candidates:
-        return None
-
-    selected = max(candidates, key=lambda item: item["_score"])
-    selected.pop("_score", None)
-    return selected
-
-
-def _collection_item_css_selector(collection: Dict[str, Any]) -> str:
-    item_hint = collection.get("item_hint") if isinstance(collection, dict) else {}
-    locator = item_hint.get("locator") if isinstance(item_hint, dict) else {}
-    if not isinstance(locator, dict) or locator.get("method") != "css":
-        return ""
-    return str(locator.get("value") or "").strip()
-
-
-def _extract_frame_secondary_action_selectors(
-    collections: List[Dict[str, Any]],
-    primary_collection: Dict[str, Any],
-) -> Dict[str, str]:
-    primary_container = _collection_container_css_selector(primary_collection)
-    if not primary_container:
-        return {}
-
-    selectors: Dict[str, str] = {}
-    for collection in collections:
-        if collection is primary_collection:
-            continue
-        if _collection_container_css_selector(collection) != primary_container:
-            continue
-        selector = _collection_item_css_selector(collection)
-        if not selector:
-            continue
-        labels = [_node_label(item) for item in collection.get("items") or []]
-        if sum(1 for label in labels if "download" in label.lower() or "下载" in label) >= 2:
-            selectors["download"] = selector
-    return selectors
-
-
-def _collection_container_css_selector(collection: Dict[str, Any]) -> str:
-    container_hint = collection.get("container_hint") if isinstance(collection, dict) else {}
-    locator = container_hint.get("locator") if isinstance(container_hint, dict) else {}
-    if not isinstance(locator, dict) or locator.get("method") != "css":
-        return ""
-    return str(locator.get("value") or "").strip()
-
-
-def _extract_secondary_action_selectors(
-    snapshot: Dict[str, Any],
-    items: List[Dict[str, Any]],
-) -> Dict[str, str]:
-    item_container_ids = {str(item.get("container_id") or "") for item in items if item.get("container_id")}
-    grouped: Dict[str, List[Dict[str, Any]]] = {}
-    for node in snapshot.get("actionable_nodes") or []:
-        container_id = str(node.get("container_id") or "")
-        if container_id not in item_container_ids:
-            continue
-        label = _node_label(node).lower()
-        selector = str(node.get("collection_item_selector") or "").strip()
-        if not selector:
-            continue
-        if "download" in label or "下载" in label:
-            grouped.setdefault("download", []).append(node)
-
-    selectors: Dict[str, str] = {}
-    for action, nodes in grouped.items():
-        by_selector: Dict[str, int] = {}
-        for node in nodes:
-            selector = str(node.get("collection_item_selector") or "").strip()
-            by_selector[selector] = by_selector.get(selector, 0) + 1
-        selector, count = max(by_selector.items(), key=lambda item: item[1])
-        if count >= min(2, len(items)):
-            selectors[action] = selector
-    return selectors
-
-
-def _select_secondary_action_selector(collection: Dict[str, Any], instruction: str) -> str:
-    text = str(instruction or "").lower()
-    secondary = collection.get("secondary_selectors") if isinstance(collection, dict) else {}
-    if ("download" in text or "下载" in text) and isinstance(secondary, dict):
-        return str(secondary.get("download") or "")
-    return ""
-
-
-def _ordinal_extract_title_plan(selector: str, index: int) -> Dict[str, Any]:
-    code = (
-        "async def run(page, results):\n"
-        f"    _item = page.locator({selector!r}).nth({index})\n"
-        "    return (await _item.inner_text()).strip()"
-    )
-    return {
-        "description": "Extract ordinal item title",
-        "action_type": "run_python",
-        "expected_effect": "extract",
-        "output_key": "ordinal_item_name",
-        "code": code,
-        "ordinal_overlay": True,
-    }
-
-
-def _ordinal_first_n_titles_plan(selector: str, limit: int) -> Dict[str, Any]:
-    code = (
-        "async def run(page, results):\n"
-        f"    _items = page.locator({selector!r})\n"
-        f"    _limit = min({limit}, await _items.count())\n"
-        "    _result = []\n"
-        "    for _index in range(_limit):\n"
-        "        _result.append((await _items.nth(_index).inner_text()).strip())\n"
-        "    return _result"
-    )
-    return {
-        "description": "Extract first ordinal item titles",
-        "action_type": "run_python",
-        "expected_effect": "extract",
-        "output_key": "ordinal_item_names",
-        "code": code,
-        "ordinal_overlay": True,
-    }
-
-
-def _ordinal_click_plan(selector: str, index: int, *, description: str) -> Dict[str, Any]:
-    code = (
-        "async def run(page, results):\n"
-        f"    await page.locator({selector!r}).nth({index}).click()\n"
-        "    return {'action_performed': True}"
-    )
-    return {
-        "description": description,
-        "action_type": "run_python",
-        "expected_effect": "click",
-        "output_key": "ordinal_item_action",
-        "code": code,
-        "ordinal_overlay": True,
-    }
-
-
-def _node_label(node: Dict[str, Any]) -> str:
-    return " ".join(str(node.get(key) or "").strip() for key in ("name", "text") if str(node.get(key) or "").strip()).strip()
-
-
-def _looks_like_primary_item_label(label: str) -> bool:
-    text = str(label or "").strip()
-    if not text or _looks_like_secondary_action_label(text):
-        return False
-    return bool(re.search(r"[A-Za-z\u4e00-\u9fff]", text))
-
-
-def _score_ordinal_primary_collection(selector: str, labels: List[str], item_count: int) -> tuple[int, int, int, int, int, int]:
-    meaningful_labels = [label for label in labels if _looks_like_primary_item_label(label)]
-    distinct_count = len({label.lower() for label in meaningful_labels})
-    heading_selector = 1 if re.search(r"(^|\s)h[1-6](\.|\s|$)", selector) else 0
-    slash_pair_count = sum(1 for label in meaningful_labels if re.search(r"\S+\s*/\s*\S+", label))
-    average_length = int(sum(len(label) for label in meaningful_labels) / max(len(meaningful_labels), 1))
-    return (
-        heading_selector,
-        slash_pair_count,
-        min(int(item_count or 0), 25),
-        distinct_count,
-        min(average_length, 80),
-        len(meaningful_labels),
-    )
-
-
-def _sort_snapshot_nodes(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return sorted(
-        nodes,
-        key=lambda node: (
-            int((node.get("bbox") or {}).get("y", 0) or 0),
-            int((node.get("bbox") or {}).get("x", 0) or 0),
-            int(node.get("index") or 0),
-            str(node.get("node_id") or ""),
-        ),
-    )
-
-
-def _looks_like_secondary_action_label(label: str) -> bool:
-    text = str(label or "").strip().lower()
-    if not text:
-        return True
-    return any(token in text for token in ("download", "下载", "star", "fork", "signed in"))
 
 
 def _cache_generated_code_for_traceback(code: str) -> None:

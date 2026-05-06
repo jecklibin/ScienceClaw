@@ -51,6 +51,13 @@ async def _ensure_expected_effect(
             "success": False,
             "error": "Generated command returned visible error or validation output instead of terminal success evidence.",
         }
+    source_conflict = _filled_value_conflicts_with_source_output(result.get("output"))
+    if source_conflict:
+        return {
+            **result,
+            "success": False,
+            "error": source_conflict,
+        }
 
     if expected_effect in {"navigate", "mixed"}:
         if _url_changed(before.url, after.url):
@@ -223,6 +230,40 @@ def _run_python_code_contains_effect(plan: Dict[str, Any], expected_effect: str)
     if expected_effect == "fill":
         return any(token in code for token in (".fill(", ".type(", ".press_sequentially(", ".select_option("))
     return False
+
+
+def _filled_value_conflicts_with_source_output(output: Any) -> str:
+    if not isinstance(output, dict):
+        return ""
+    filled = output.get("filled_value")
+    if not isinstance(filled, dict):
+        return ""
+    source_values = {
+        _normalize_field_key(str(key)[len("source_") :]): str(value).strip()
+        for key, value in output.items()
+        if str(key).startswith("source_") and isinstance(value, (str, int, float)) and str(value).strip()
+    }
+    if not source_values:
+        return ""
+    for field_name, raw_value in filled.items():
+        field_key = _normalize_field_key(str(field_name))
+        if not field_key:
+            continue
+        value = str(raw_value).strip()
+        if not value:
+            continue
+        for source_key, source_value in source_values.items():
+            if field_key == source_key or source_key.endswith(field_key) or field_key.endswith(source_key):
+                if value != source_value:
+                    return (
+                        "Generated command filled a field with a value that conflicts with its "
+                        f"declared source output: field={field_name!r}, filled={value!r}, source={source_value!r}."
+                    )
+    return ""
+
+
+def _normalize_field_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", str(value or "").lower())
 
 
 def _generic_effect_evidence(result: Dict[str, Any]) -> str:

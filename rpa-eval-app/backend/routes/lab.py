@@ -27,6 +27,29 @@ EMPTY_AUDIT_RECORDS = [
     {"record_id": "AUD-2026-002", "status": "passed", "summary": "Contract snapshot check"},
 ]
 
+DYNAMIC_FIRST_ITEM_DEFAULT = [
+    {"project_id": "DYN-REC-A", "project_name": "Recorded first project"},
+    {"project_id": "DYN-REC-C", "project_name": "Recorded second project"},
+]
+
+DYNAMIC_FIRST_ITEM_REORDERED = [
+    {"project_id": "DYN-REPLAY-B", "project_name": "Replay current first project"},
+    {"project_id": "DYN-REC-A", "project_name": "Recorded first project"},
+]
+
+_fixture_variant: str | None = None
+
+
+def set_fixture_variant(variant: str | None) -> None:
+    global _fixture_variant
+    _fixture_variant = variant or None
+
+
+def _dynamic_first_items() -> list[dict[str, str]]:
+    if _fixture_variant == "dynamic_first_item_reordered":
+        return DYNAMIC_FIRST_ITEM_REORDERED
+    return DYNAMIC_FIRST_ITEM_DEFAULT
+
 
 def event_to_out(event: LabEvent) -> LabEventOut:
     try:
@@ -95,6 +118,29 @@ def create_event(
 @router.get("/split-grid/files")
 def list_split_grid_files(_: User = Depends(get_current_user)) -> list[dict[str, str]]:
     return SPLIT_GRID_FILES
+
+
+@router.get("/dynamic-first-items")
+def list_dynamic_first_items(_: User = Depends(get_current_user)) -> list[dict[str, str]]:
+    return _dynamic_first_items()
+
+
+@router.post("/dynamic-first-items/open/{project_id}", response_model=LabEventOut)
+def open_dynamic_first_item(
+    project_id: str,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> LabEventOut:
+    project = next((item for item in _dynamic_first_items() if item["project_id"] == project_id), None)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    event = record_event(
+        db,
+        event_key="dynamic_first_item_opened",
+        entity_id=project["project_id"],
+        payload=project,
+    )
+    return event_to_out(event)
 
 
 @router.post("/split-grid/open/{file_id}", response_model=LabEventOut)

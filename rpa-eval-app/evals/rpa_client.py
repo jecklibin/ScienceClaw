@@ -5,6 +5,7 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Iterable
+from urllib.parse import urlparse
 from urllib import error, request
 
 
@@ -84,6 +85,35 @@ class RpaClawClient:
 
     def navigate(self, session_id: str, url: str) -> None:
         self._json_request("POST", f"/api/v1/rpa/session/{session_id}/navigate", {"url": url})
+
+    def navigate_and_wait(self, session_id: str, url: str, *, timeout_s: float = 10.0) -> None:
+        """Navigate the active recording tab and wait until tab metadata reflects it.
+
+        RPA recording evals need a deterministic starting browser state. The
+        backend navigate call waits for domcontentloaded, but app-level auth or
+        client routing can still update the active tab shortly after navigation.
+        Polling tab metadata here keeps that synchronization concern in the eval
+        harness instead of leaking start-page assumptions into the recorder.
+        """
+
+        self.navigate(session_id, url)
+        deadline = time.perf_counter() + max(timeout_s, 0.1)
+        last_url = ""
+        while time.perf_counter() < deadline:
+            try:
+                tabs = self.get_tabs(session_id)
+            except RpaClawError:
+                tabs = {}
+            active_url = active_tab_url(tabs)
+            if active_url:
+                last_url = active_url
+            if urls_match(active_url, url):
+                return
+            time.sleep(0.25)
+        raise RpaClawError(f"RPA tab did not reach {url!r}; last active url was {last_url!r}")
+
+    def get_tabs(self, session_id: str) -> dict[str, Any]:
+        return self._json_request("GET", f"/api/v1/rpa/session/{session_id}/tabs")
 
     def chat(
         self,
@@ -261,6 +291,33 @@ class RpaClawClient:
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         return request.Request(f"{self.base_url}{path}", data=body, headers=headers, method=method)
+
+
+def active_tab_url(tabs_response: dict[str, Any]) -> str:
+    tabs = tabs_response.get("tabs") if isinstance(tabs_response, dict) else None
+    active_tab_id = str(tabs_response.get("active_tab_id") or "") if isinstance(tabs_response, dict) else ""
+    if not isinstance(tabs, list):
+        return ""
+    for tab in tabs:
+        if not isinstance(tab, dict):
+            continue
+        tab_id = str(tab.get("id") or tab.get("tab_id") or "")
+        if active_tab_id and tab_id != active_tab_id:
+            continue
+        return str(tab.get("url") or "")
+    return ""
+
+
+def urls_match(actual: str, expected: str) -> bool:
+    if not actual or not expected:
+        return False
+    actual_parts = urlparse(actual)
+    expected_parts = urlparse(expected)
+    return (
+        actual_parts.scheme == expected_parts.scheme
+        and actual_parts.netloc == expected_parts.netloc
+        and actual_parts.path.rstrip("/") == expected_parts.path.rstrip("/")
+    )
 
 
 def parse_sse_lines(lines: Iterable[str], *, stop_on_terminal: bool = False) -> Iterable[dict[str, Any]]:
