@@ -1,11 +1,28 @@
 from __future__ import annotations
 
+try:
+    from .assistant_snapshot_adapters import MODAL_VIEW_ADAPTERS_JS, TABLE_VIEW_ADAPTERS_JS
+except ImportError:  # pragma: no cover - supports direct spec loading in tests
+    import importlib.util
+    from pathlib import Path
 
-SNAPSHOT_V2_JS = r"""() => {
+    _ADAPTERS_SPEC = importlib.util.spec_from_file_location(
+        "assistant_snapshot_adapters",
+        Path(__file__).with_name("assistant_snapshot_adapters.py"),
+    )
+    if _ADAPTERS_SPEC is None or _ADAPTERS_SPEC.loader is None:
+        raise
+    _ADAPTERS_MODULE = importlib.util.module_from_spec(_ADAPTERS_SPEC)
+    _ADAPTERS_SPEC.loader.exec_module(_ADAPTERS_MODULE)
+    MODAL_VIEW_ADAPTERS_JS = _ADAPTERS_MODULE.MODAL_VIEW_ADAPTERS_JS
+    TABLE_VIEW_ADAPTERS_JS = _ADAPTERS_MODULE.TABLE_VIEW_ADAPTERS_JS
+
+
+SNAPSHOT_V2_TEMPLATE = r"""() => {
     const ACTIONABLE = 'a,button,input,textarea,select,[role=button],[role=link],[role=menuitem],[role=menuitemradio],[role=tab],[role=checkbox],[role=radio],[contenteditable=true]';
     const CONTENT = 'h1,h2,h3,h4,h5,h6,th,td,dt,dd,li,p,span,label,[data-field],[data-label],[data-value],[role=heading],[role=cell],[role=rowheader],[role=columnheader]';
     const recorder = globalThis.__rpaPlaywrightRecorder || null;
-    const result = { actionable_nodes: [], content_nodes: [], containers: [], table_views: [], detail_views: [] };
+    const result = { actionable_nodes: [], content_nodes: [], containers: [], table_views: [], detail_views: [], modal_dialogs: [] };
     const containerMap = new Map();
     let actionableIndex = 1;
     let contentIndex = 1;
@@ -399,7 +416,7 @@ SNAPSHOT_V2_JS = r"""() => {
             return 'number';
         if (/^\d{4}-\d{2}-\d{2}/.test(value))
             return 'date';
-        if (/^(finish|success|failed|approved|pending)$/i.test(value))
+        if (/^(finish|success|failed|pending)$/i.test(value))
             return 'status';
         return 'text';
     }
@@ -411,9 +428,9 @@ SNAPSHOT_V2_JS = r"""() => {
     function headingText(el) {
         if (!el)
             return '';
-        if (el.matches && el.matches('h1,h2,h3,h4,h5,h6,[role=heading],.title,.panel-title,.card-title,.aui-title'))
+        if (el.matches && el.matches('h1,h2,h3,h4,h5,h6,[role=heading],.title,.panel-title,.card-title'))
             return textOf(el, 120);
-        const heading = el.querySelector && el.querySelector('h1,h2,h3,h4,h5,h6,[role=heading],.title,.panel-title,.card-title,.aui-title');
+        const heading = el.querySelector && el.querySelector('h1,h2,h3,h4,h5,h6,[role=heading],.title,.panel-title,.card-title');
         return textOf(heading, 120);
     }
 
@@ -441,135 +458,22 @@ SNAPSHOT_V2_JS = r"""() => {
         return { title: '', source: '' };
     }
 
-    function collectJalorGridTableView(root) {
-        const headerCells = Array.from(root.querySelectorAll('.jalor-igrid-head tbody.igrid-head td'));
-        const bodyRows = Array.from(root.querySelectorAll('.jalor-igrid-body tbody.igrid-data tr.grid-row'))
-            .filter(row => !row.matches('tr.grid-row-group') && row.querySelector('td'));
-        if (!headerCells.length || !bodyRows.length)
-            return null;
-
-        const headerByField = new Map();
-        const headerByCol = new Map();
-        const headers = [];
-        headerCells.forEach((cell, index) => {
-            const fieldName = attr(cell, 'field', 80);
-            const colNumber = attr(cell, '_col', 40);
-            const header = textOf(cell, 120);
-            const columnId = fieldName || colNumber || `index:${index}`;
-            const record = {
-                index,
-                column_id: columnId,
-                field: fieldName,
-                col: colNumber,
-                header,
-                role: '',
-            };
-            headers.push(record);
-            if (fieldName)
-                headerByField.set(fieldName, record);
-            if (colNumber)
-                headerByCol.set(colNumber, record);
-        });
-
-        const bodyTable = root.querySelector('.jalor-igrid-body table');
-        const bodyTableId = attr(bodyTable, 'id', 120);
-        const rowSelector = bodyTableId ? `#${escapeCssIdentifier(bodyTableId)} tbody.igrid-data tr.grid-row` : '.jalor-igrid-body tbody.igrid-data tr.grid-row';
-        const rows = [];
-        const columnSamples = new Map();
-        for (const row of bodyRows.slice(0, 10)) {
-            const rowIndex = rows.length;
-            const cells = [];
-            const cellEls = Array.from(row.querySelectorAll('td')).filter(cell => !cell.closest('tr.grid-row-group'));
-            cellEls.forEach((cell, cellIndex) => {
-                const fieldName = attr(cell, 'field', 80);
-                const colNumber = attr(cell, '_col', 40);
-                const columnKey = fieldName || colNumber || `index:${cellIndex}`;
-                const headerRecord = (fieldName ? headerByField.get(fieldName) : null) || (colNumber ? headerByCol.get(colNumber) : null) || headers[cellIndex];
-                const text = textOf(cell, 200);
-                const actions = Array.from(cell.querySelectorAll('a,button,input[type=checkbox],[role=button],[role=link]')).slice(0, 4).map(action => {
-                    const tag = action.tagName.toLowerCase();
-                    const role = getRole(action) || tag;
-                    const label = getAccessibleName(action) || textOf(action, 120) || role;
-                    const selector = fieldName
-                        ? `td[field="${escapeCssAttributeValue(fieldName)}"] ${tag}`
-                        : (colNumber ? `td[_col="${escapeCssAttributeValue(colNumber)}"] ${tag}` : `td:nth-child(${cellIndex + 1}) ${tag}`);
-                    return {
-                        kind: role,
-                        label,
-                        locator: { method: 'relative_css', scope: 'row', value: selector },
-                    };
-                });
-                cells.push({
-                    column_id: headerRecord ? headerRecord.column_id : columnKey,
-                    field: fieldName,
-                    col: colNumber,
-                    column_index: cellIndex,
-                    column_header: headerRecord ? headerRecord.header : '',
-                    text,
-                    value_kind: valueKind(text),
-                    row_local_actions: actions,
-                    actions,
-                });
-                if (!columnSamples.has(columnKey))
-                    columnSamples.set(columnKey, { texts: [], hasCheckbox: false, hasLink: false });
-                const sample = columnSamples.get(columnKey);
-                if (text)
-                    sample.texts.push(text);
-                sample.hasCheckbox = sample.hasCheckbox || Boolean(cell.querySelector('input[type=checkbox]'));
-                sample.hasLink = sample.hasLink || Boolean(cell.querySelector('a,[role=link]'));
-            });
-            rows.push({
-                index: rowIndex,
-                source_row_index: attr(row, '_row', 40),
-                cells,
-                locator_hints: [
-                    {
-                        kind: 'playwright',
-                        expression: "page.locator('" + rowSelector + "').nth(" + rowIndex + ")",
-                    },
-                ],
-            });
-        }
-
-        const columns = headers.map((header, index) => {
-            const sample = columnSamples.get(header.field || header.col || `index:${index}`) || { texts: [], hasCheckbox: false, hasLink: false };
-            return {
-                index,
-                column_id: header.column_id,
-                field: header.field,
-                col: header.col,
-                header: header.header,
-                role: columnRole(header.header, header.column_id, sample.texts.slice(0, 5), sample.hasCheckbox, sample.hasLink),
-                sample_values: sample.texts.slice(0, 3),
-            };
-        });
-
-        const explicitTitle = attr(root, 'aria-label', 120) || attr(root, 'title', 120);
-        const nearbyTitle = nearestTableTitle(root);
-        const title = explicitTitle || nearbyTitle.title;
-        return {
-            kind: 'table_view',
-            framework_hint: 'jalor-igrid',
-            title,
-            title_source: explicitTitle ? 'root_attribute' : nearbyTitle.source,
-            nearby_headings: nearbyTitle.title ? [nearbyTitle.title] : [],
-            row_count_observed: bodyRows.length,
-            columns,
-            rows,
-            auxiliary_text: [],
-        };
+    __RPA_TABLE_VIEW_ADAPTERS__
+    function matchesTableViewAdapterRoot(el) {
+        return tableViewAdapters.some(adapter => adapter.rootSelector && el.closest(adapter.rootSelector));
     }
 
     function collectTableViews() {
         const views = [];
-        const jalorViews = Array.from(document.querySelectorAll('.jalor-igrid'))
-            .map(root => collectJalorGridTableView(root))
-            .filter(Boolean);
-        views.push(...jalorViews);
+        for (const adapter of tableViewAdapters) {
+            const adapterViews = Array.from(document.querySelectorAll(adapter.rootSelector))
+                .map(root => adapter.collect(root))
+                .filter(Boolean);
+            views.push(...adapterViews);
+        }
 
-        const gridRoots = Array.from(document.querySelectorAll('.aui-grid, [role=grid], table'))
-            .map(el => el.closest('.aui-grid') || el)
-            .filter((el, index, arr) => el && !el.closest('.jalor-igrid') && arr.indexOf(el) === index);
+        const gridRoots = Array.from(document.querySelectorAll('[role=grid], table'))
+            .filter((el, index, arr) => el && !matchesTableViewAdapterRoot(el) && arr.indexOf(el) === index);
 
         for (const root of gridRoots.slice(0, 8)) {
             const headerCells = Array.from(root.querySelectorAll('thead th,[role=columnheader]'));
@@ -612,12 +516,31 @@ SNAPSHOT_V2_JS = r"""() => {
                             locator: { method: 'relative_css', scope: 'row', value: selector },
                         };
                     });
+                    const controls = Array.from(cell.querySelectorAll('input,textarea,select,[contenteditable=true],[role=textbox],[role=spinbutton],[role=combobox]')).slice(0, 6).map(control => {
+                        const tag = control.tagName.toLowerCase();
+                        const role = getRole(control) || (tag === 'input' && attr(control, 'type', 40) === 'number' ? 'spinbutton' : tag);
+                        const label = getAccessibleName(control) || attr(control, 'aria-label', 120) || attr(control, 'placeholder', 120) || textOf(control, 120) || role;
+                        const nth = Array.from(cell.querySelectorAll(tag)).indexOf(control);
+                        const selector = colId
+                            ? `td[data-colid="${escapeCssAttributeValue(colId)}"] ${tag}${nth > 0 ? `:nth-of-type(${nth + 1})` : ''}`
+                            : `td:nth-child(${cellIndex + 1}) ${tag}${nth > 0 ? `:nth-of-type(${nth + 1})` : ''}`;
+                        return {
+                            kind: role,
+                            label,
+                            placeholder: attr(control, 'placeholder', 120),
+                            test_id: attr(control, 'data-testid', 120) || attr(control, 'data-test', 120),
+                            input_type: tag === 'input' ? attr(control, 'type', 40) : '',
+                            value: 'value' in control ? normalizeText(control.value || '', 120) : textOf(control, 120),
+                            locator: { method: 'relative_css', scope: 'row', value: selector },
+                        };
+                    });
                     const record = {
                         column_id: colId,
                         column_index: cellIndex,
                         column_header: headerRecord ? headerRecord.header : '',
                         text,
                         value_kind: valueKind(text),
+                        controls,
                         row_local_actions: actions,
                         actions,
                     };
@@ -660,7 +583,7 @@ SNAPSHOT_V2_JS = r"""() => {
             }
 
             const auxiliaryText = [];
-            for (const empty of Array.from(root.querySelectorAll('.aui-grid__empty-text')).slice(0, 3)) {
+            for (const empty of Array.from(root.querySelectorAll('[data-empty],[role=status],.empty,.empty-state')).slice(0, 3)) {
                 const text = textOf(empty, 120);
                 if (text)
                     auxiliaryText.push({ kind: 'empty_state', text, outside_rows: true });
@@ -677,7 +600,7 @@ SNAPSHOT_V2_JS = r"""() => {
 
             views.push({
                 kind: 'table_view',
-                framework_hint: classText(root).includes('aui-grid') ? 'aui-grid' : '',
+                framework_hint: '',
                 title,
                 title_source: explicitTitle ? 'root_attribute' : nearbyTitle.source,
                 nearby_headings: nearbyTitle.title ? [nearbyTitle.title] : [],
@@ -692,29 +615,63 @@ SNAPSHOT_V2_JS = r"""() => {
 
     function collectDetailViews() {
         const views = [];
-        const sections = Array.from(document.querySelectorAll('.aui-collapse-item, section, article, form, fieldset,[role=region],[role=group]'));
-        for (const section of sections.slice(0, 12)) {
-            const titleEl = section.querySelector('.aui-collapse-item__word-overflow,legend,h1,h2,h3,h4,[role=heading]');
-            const sectionTitle = textOf(titleEl, 120) || attr(section, 'aria-label', 120) || attr(section, 'title', 120);
-            const fieldEls = Array.from(section.querySelectorAll('.aui-form-item,[data-prop],dt'))
-                .filter((field, index, arr) => arr.indexOf(field) === index);
-            if (!sectionTitle && fieldEls.length < 2)
-                continue;
+        const looksLikeFieldLabel = (text) => {
+            const value = normalizeText(text || '', 80);
+            if (!value || value.length > 40)
+                return false;
+            if (/https?:\/\//i.test(value) || /@/.test(value))
+                return false;
+            if (/^[A-Z]{2,}[-_0-9A-Z]+$/.test(value))
+                return false;
+            if (/^\d/.test(value) || /^\d{4}[-/]/.test(value))
+                return false;
+            return /[\u4e00-\u9fffA-Za-z]/.test(value);
+        };
+        const detailViewAdapters = [
+            {
+                name: 'semantic',
+                sectionSelector: 'section,article,form,fieldset,[role=region],[role=group]',
+                titleSelector: 'legend,h1,h2,h3,h4,[role=heading]',
+                fieldSelector: '[data-prop],dl > div,dt',
+                labelSelector: '.field-header .label,label,dt,[data-label]',
+                contentSelector: 'dd,[data-value]',
+                valueSelector: 'input,textarea,select,[data-value]',
+            },
+        ];
+        const seenSections = new Set();
+        for (const adapter of detailViewAdapters) {
+            const sections = Array.from(document.querySelectorAll(adapter.sectionSelector));
+            for (const section of sections.slice(0, 12)) {
+                if (seenSections.has(section) && adapter.name !== 'semantic')
+                    continue;
+                seenSections.add(section);
+                const titleEl = section.querySelector(adapter.titleSelector);
+                const sectionTitle = textOf(titleEl, 120) || attr(section, 'aria-label', 120) || attr(section, 'title', 120);
+                const fieldEls = Array.from(section.querySelectorAll(adapter.fieldSelector))
+                    .filter((field, index, arr) => arr.indexOf(field) === index);
+                if (!sectionTitle && fieldEls.length < 2)
+                    continue;
 
-            const fields = [];
-            for (const field of fieldEls.slice(0, 40)) {
-                const labelEl = field.querySelector('.aui-form-item__label,.field-header .label,label,dt');
-                const contentEl = field.querySelector('.aui-form-item__content,dd') || field;
-                const label = textOf(labelEl, 120).replace(/^\*\s*/, '');
+                const fields = [];
+                for (const field of fieldEls.slice(0, 40)) {
+                    const labelEl = field.matches('label,dt,[data-label]') ? field : field.querySelector(adapter.labelSelector);
+                    let contentEl = field.querySelector(adapter.contentSelector);
+                    if (!contentEl && field.matches('dt') && field.nextElementSibling && field.nextElementSibling.matches('dd'))
+                        contentEl = field.nextElementSibling;
+                    contentEl = contentEl || field;
+                    const label = textOf(labelEl, 120).replace(/^\*\s*/, '');
                 if (!label)
                     continue;
                 const visible = !isHiddenByStyle(field);
                 const dataProp = attr(field, 'data-prop', 120) || attr(contentEl, 'prop', 120);
                 const required = classText(field).includes('is-required') || Boolean(field.querySelector('.required'));
-                const displayValueEl = contentEl.querySelector('.aui-input-display-only__content,.aui-numeric-display-only__value,.aui-range-editor-display-only,.aui-input-display-only,.no-value,input,textarea,select');
+                const displayValueEl = contentEl.querySelector(adapter.valueSelector) || contentEl;
                 let value = textOf(displayValueEl, 200);
                 if (!value && displayValueEl && ('value' in displayValueEl))
                     value = normalizeText(displayValueEl.value || '', 200);
+                const fieldLocator = buildLocatorBundle(field, getRole(field) || '', getAccessibleName(field), textOf(field, 120), '', attr(field, 'title', 120)).primary || {};
+                const labelLocator = labelEl ? (buildLocatorBundle(labelEl, getRole(labelEl) || '', getAccessibleName(labelEl), textOf(labelEl, 120), '', attr(labelEl, 'title', 120)).primary || {}) : {};
+                const valueLocator = displayValueEl ? (buildLocatorBundle(displayValueEl, getRole(displayValueEl) || '', getAccessibleName(displayValueEl), textOf(displayValueEl, 120), attr(displayValueEl, 'placeholder', 120), attr(displayValueEl, 'title', 120)).primary || {}) : {};
                 fields.push({
                     label,
                     value,
@@ -723,12 +680,16 @@ SNAPSHOT_V2_JS = r"""() => {
                     visible,
                     hidden_reason: visible ? '' : 'hidden',
                     value_kind: valueKind(value),
+                    field_locator: fieldLocator,
+                    label_locator: labelLocator,
+                    value_locator: valueLocator,
                     locator_hints: dataProp ? [
                         {
                             kind: 'field_container',
                             expression: `page.locator('[data-prop="${escapeCssAttributeValue(dataProp)}"]')`,
                         },
                     ] : [],
+                    adapter: adapter.name,
                 });
             }
             if (fields.length) {
@@ -736,6 +697,53 @@ SNAPSHOT_V2_JS = r"""() => {
                     kind: 'detail_view',
                     section_title: sectionTitle,
                     section_locator: sectionTitle ? { method: 'text', value: sectionTitle } : {},
+                    framework_hint: adapter.name === 'semantic' ? '' : adapter.name,
+                    fields,
+                });
+            }
+            }
+        }
+        for (const table of Array.from(document.querySelectorAll('table')).slice(0, 12)) {
+            const bodyRows = Array.from(table.querySelectorAll('tbody tr'))
+                .filter(row => row.querySelectorAll('td,[role=cell]').length >= 2);
+            if (!bodyRows.length)
+                continue;
+            const headerCells = Array.from(table.querySelectorAll('thead th,[role=columnheader]')).map(cell => textOf(cell, 80)).filter(Boolean);
+            if (headerCells.length > 2)
+                continue;
+            const fields = [];
+            for (const row of bodyRows.slice(0, 40)) {
+                const cells = Array.from(row.querySelectorAll('td,[role=cell]'));
+                if (cells.length < 2)
+                    continue;
+                for (let index = 0; index + 1 < cells.length; index += 2) {
+                    const labelCell = cells[index];
+                    const valueCell = cells[index + 1];
+                    const label = textOf(labelCell, 120).replace(/^\*\s*/, '');
+                    const value = textOf(valueCell, 200);
+                    if (!looksLikeFieldLabel(label) || !value)
+                        continue;
+                    fields.push({
+                        label,
+                        value,
+                        data_prop: attr(row, 'data-prop', 120) || attr(labelCell, 'data-field', 120) || '',
+                        required: false,
+                        visible: !isHiddenByStyle(row),
+                        hidden_reason: isHiddenByStyle(row) ? 'hidden' : '',
+                        value_kind: valueKind(value),
+                        field_locator: buildLocatorBundle(row, getRole(row) || '', getAccessibleName(row), textOf(row, 120), '', attr(row, 'title', 120)).primary || {},
+                        label_locator: buildLocatorBundle(labelCell, getRole(labelCell) || '', getAccessibleName(labelCell), label, '', attr(labelCell, 'title', 120)).primary || {},
+                        value_locator: buildLocatorBundle(valueCell, getRole(valueCell) || '', getAccessibleName(valueCell), value, '', attr(valueCell, 'title', 120)).primary || {},
+                        locator_hints: [],
+                    });
+                }
+            }
+            if (fields.length >= 2) {
+                const nearbyTitle = nearestTableTitle(table);
+                views.push({
+                    kind: 'detail_view',
+                    section_title: nearbyTitle.title || attr(table, 'aria-label', 120) || attr(table, 'title', 120) || 'key_value_table',
+                    section_locator: nearbyTitle.title ? { method: 'text', value: nearbyTitle.title } : {},
                     fields,
                 });
             }
@@ -743,6 +751,85 @@ SNAPSHOT_V2_JS = r"""() => {
         return views;
     }
 
+    __RPA_MODAL_VIEW_ADAPTERS__
+    function collectModalDialogs() {
+        const seen = new Set();
+        const dialogs = [];
+        for (const adapter of modalViewAdapters) {
+            const roots = Array.from(document.querySelectorAll(adapter.rootSelector));
+            for (const root of roots) {
+                if (seen.has(root))
+                    continue;
+                seen.add(root);
+                const rect = root.getBoundingClientRect();
+                let visibleRect = rect;
+                if (!isVisible(root, rect)) {
+                    const visibleChild = Array.from(root.querySelectorAll('div,section,form,header,main,footer')).find(child => {
+                        const childRect = child.getBoundingClientRect();
+                        return isVisible(child, childRect);
+                    });
+                    if (!visibleChild)
+                        continue;
+                    visibleRect = visibleChild.getBoundingClientRect();
+                }
+                if (!isVisible(root, visibleRect) && visibleRect.width <= 0 && visibleRect.height <= 0)
+                    continue;
+                const role = attr(root, 'role', 40) || 'dialog';
+                const title = attr(root, 'aria-label', 160) || attr(root, 'title', 160) || textOf(root.querySelector(adapter.titleSelector), 160);
+                const fields = [];
+                for (const input of Array.from(root.querySelectorAll('input,textarea,select,[contenteditable=true],[role=textbox],[role=combobox]')).slice(0, 20)) {
+                    const inputRect = input.getBoundingClientRect();
+                    if (!isVisible(input, inputRect))
+                        continue;
+                    const inputRole = getRole(input) || 'textbox';
+                    const name = getAccessibleName(input);
+                    const placeholder = attr(input, 'placeholder', 120);
+                    const titleAttr = attr(input, 'title', 120);
+                    const testId = attr(input, 'data-testid', 120);
+                    const locatorBundle = buildLocatorBundle(input, inputRole, name, textOf(input, 120), placeholder, titleAttr);
+                    fields.push({
+                        label: name || placeholder || titleAttr || testId,
+                        value: 'value' in input ? normalizeText(input.value || '', 200) : textOf(input, 200),
+                        role: inputRole,
+                        placeholder,
+                        test_id: testId,
+                        locator: locatorBundle.primary || {},
+                    });
+                }
+                const actions = [];
+                for (const action of Array.from(root.querySelectorAll('button,a,[role=button],[role=link],input[type=button],input[type=submit]')).slice(0, 20)) {
+                    const actionRect = action.getBoundingClientRect();
+                    if (!isVisible(action, actionRect))
+                        continue;
+                    const actionRole = getRole(action) || 'button';
+                    const label = getAccessibleName(action) || textOf(action, 120) || attr(action, 'value', 120) || attr(action, 'title', 120);
+                    const testId = attr(action, 'data-testid', 120);
+                    const locatorBundle = buildLocatorBundle(action, actionRole, label, textOf(action, 120), '', attr(action, 'title', 120));
+                    actions.push({
+                        label,
+                        role: actionRole,
+                        test_id: testId,
+                        locator: locatorBundle.primary || {},
+                    });
+                }
+                dialogs.push({
+                    title,
+                    role,
+                    modal: attr(root, 'aria-modal', 20) === 'true' || classText(root).includes('modal') || classText(root).includes('overlay'),
+                    framework_hint: adapter.frameworkHint,
+                    bbox: bbox(visibleRect),
+                    fields,
+                    actions,
+                    text_excerpt: textOf(root, 500),
+                });
+                if (dialogs.length >= 4)
+                    return dialogs;
+            }
+        }
+        return dialogs;
+    }
+
+    result.modal_dialogs = collectModalDialogs();
     const actionableSeen = new Set();
     for (const el of Array.from(document.querySelectorAll(ACTIONABLE))) {
         const rect = el.getBoundingClientRect();
@@ -844,3 +931,10 @@ SNAPSHOT_V2_JS = r"""() => {
     result.detail_views = collectDetailViews();
     return JSON.stringify(result);
 }"""
+
+
+SNAPSHOT_V2_JS = (
+    SNAPSHOT_V2_TEMPLATE
+    .replace("    __RPA_TABLE_VIEW_ADAPTERS__", TABLE_VIEW_ADAPTERS_JS.rstrip())
+    .replace("    __RPA_MODAL_VIEW_ADAPTERS__", MODAL_VIEW_ADAPTERS_JS.rstrip())
+)

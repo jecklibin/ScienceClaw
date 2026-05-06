@@ -35,6 +35,42 @@ def test_ai_operation_trace_serializes_execution_and_page_state():
     assert payload["accepted"] is True
 
 
+def test_trace_preserves_dynamic_binding_metadata():
+    input_bindings = {
+        "invoice_number": {
+            "source": "user_param",
+            "default": "INV-001",
+            "classification": "user_param",
+        }
+    }
+    output_bindings = {
+        "supplier_name": {
+            "source": "trace_output",
+            "path": "supplier.name",
+            "classification": "derived_data",
+        }
+    }
+    postcondition = {
+        "kind": "table_row_exists",
+        "table_headers": ["Invoice", "Status"],
+        "key": {"Invoice": "{{invoice_number}}"},
+        "expect": {"Status": "Submitted"},
+    }
+
+    trace = RPAAcceptedTrace(
+        trace_type=RPATraceType.AI_OPERATION,
+        input_bindings=input_bindings,
+        output_bindings=output_bindings,
+        postcondition=postcondition,
+    )
+
+    payload = trace.model_dump()
+
+    assert payload["input_bindings"] == input_bindings
+    assert payload["output_bindings"] == output_bindings
+    assert payload["postcondition"] == postcondition
+
+
 def test_runtime_results_resolves_dotted_refs_and_list_indexes():
     results = RPARuntimeResults(
         values={

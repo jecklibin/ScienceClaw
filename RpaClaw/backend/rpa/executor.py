@@ -3,6 +3,7 @@ import logging
 import asyncio
 import inspect
 import re
+from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Any, Callable, Optional
 
 if TYPE_CHECKING:
@@ -16,6 +17,29 @@ logger = logging.getLogger(__name__)
 
 RPA_PAGE_TIMEOUT_MS = 60000
 TRACE_LOG_RE = re.compile(r"^TRACE_(START|DONE|ERROR)\s+(\d+):")
+
+
+async def _collect_page_telemetry(page: Any, downloads_dir: Optional[str]) -> Dict[str, Any]:
+    telemetry: Dict[str, Any] = {"final_url": "", "visible_text": "", "downloads": []}
+    if page is not None:
+        try:
+            telemetry["final_url"] = str(getattr(page, "url", "") or "")
+        except Exception:
+            pass
+        try:
+            telemetry["visible_text"] = await page.locator("body").inner_text(timeout=2000)
+        except Exception:
+            pass
+    if downloads_dir:
+        try:
+            for path in Path(downloads_dir).glob("*"):
+                if path.is_file():
+                    telemetry["downloads"].append(
+                        {"filename": path.name, "path": str(path), "size": path.stat().st_size}
+                    )
+        except Exception:
+            pass
+    return telemetry
 
 
 def _accepts_kwarg(func: Callable[..., Any], name: str) -> bool:
@@ -52,6 +76,7 @@ class ScriptExecutor:
         session_manager: Optional[Any] = None,
         kwargs: Optional[Dict[str, Any]] = None,
         downloads_dir: Optional[str] = None,
+        setup_navigation: Optional[list[str]] = None,
         pw_loop_runner: Optional[Callable] = None,
     ) -> Dict[str, Any]:
         """Execute script in a new BrowserContext.
@@ -95,6 +120,7 @@ class ScriptExecutor:
 
         async def _run():
             context = None
+            page = None
             try:
                 _emit_log("Creating browser context...")
                 context = await browser.new_context(**get_context_kwargs())
@@ -119,6 +145,14 @@ class ScriptExecutor:
 
                     context.on("page", on_context_page)
 
+                for setup_url in setup_navigation or []:
+                    url = str(setup_url or "").strip()
+                    if not url:
+                        continue
+                    _emit_log(f"Setup navigation: {url}")
+                    await page.goto(url, wait_until="domcontentloaded")
+                    await page.wait_for_load_state("domcontentloaded")
+
                 _emit_log("Executing script...")
 
                 _result = await asyncio.wait_for(
@@ -131,18 +165,21 @@ class ScriptExecutor:
                     output = "SKILL_DATA:" + json.dumps(_result, ensure_ascii=False, default=str) + "\nSKILL_SUCCESS"
                 else:
                     output = "SKILL_SUCCESS"
+                telemetry = await _collect_page_telemetry(page, downloads_dir)
                 _emit_log("Execution completed successfully")
-                return {"success": True, "output": output, "data": _result or {}}
+                return {"success": True, "output": output, "data": _result or {}, "telemetry": telemetry}
 
             except asyncio.TimeoutError:
                 output = f"SKILL_ERROR: Script did not complete within {timeout}s"
                 _emit_log(output)
                 failed_step_index = _current_failed_trace_index(trace_state)
+                telemetry = await _collect_page_telemetry(page, downloads_dir)
                 return {
                     "success": False,
                     "output": output,
                     "error": f"Timeout after {timeout}s",
                     "failed_step_index": failed_step_index,
+                    "telemetry": telemetry,
                 }
 
             except Exception as e:
@@ -165,11 +202,13 @@ class ScriptExecutor:
                     _emit_log(f"Step {failed_step_index + 1} failed: {original_error}")
                 else:
                     _emit_log(f"Execution failed: {original_error}")
+                telemetry = await _collect_page_telemetry(page, downloads_dir)
                 return {
                     "success": False,
                     "output": output,
                     "error": original_error,
                     "failed_step_index": failed_step_index,
+                    "telemetry": telemetry,
                 }
 
             finally:

@@ -1,3 +1,5 @@
+from typing import Any
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import Depends
@@ -7,7 +9,7 @@ from auth import verify_reset_token
 from database import SessionLocal
 from database import ensure_app_dirs, recreate_database
 from fixtures import load_fixtures, reset_downloads_dir
-from routes import approvals, auth, contracts, purchase_orders, purchase_requests, reports, suppliers
+from routes import approvals, auth, contracts, lab, purchase_orders, purchase_requests, reports, suppliers
 
 
 app = FastAPI(title="RPA Golden Evaluation Backend", version="0.1.0")
@@ -38,15 +40,22 @@ def health() -> dict[str, str]:
 
 
 @app.post("/api/eval/reset", dependencies=[Depends(verify_reset_token)])
-def reset_eval() -> dict[str, str]:
+def reset_eval(payload: dict[str, Any] | None = None) -> dict[str, str]:
     recreate_database()
     reset_downloads_dir()
+    fixture_variant = str((payload or {}).get("fixture_variant") or "")
+    lab.set_fixture_variant(fixture_variant or None)
     db = SessionLocal()
     try:
         load_fixtures(db)
     finally:
         db.close()
-    return {"status": "reset", "database": "reloaded", "downloads": "cleared"}
+    return {
+        "status": "reset",
+        "database": "reloaded",
+        "downloads": "cleared",
+        "fixture_variant": fixture_variant or "default",
+    }
 
 
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
@@ -64,3 +73,4 @@ app.include_router(
 )
 app.include_router(approvals.router, prefix="/api/approvals", tags=["approvals"])
 app.include_router(reports.router, prefix="/api/reports", tags=["reports"])
+app.include_router(lab.router, prefix="/api/lab", tags=["regression lab"])

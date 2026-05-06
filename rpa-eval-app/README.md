@@ -131,6 +131,12 @@ python rpa-eval-app\evals\runner.py --tag smoke
 python rpa-eval-app\evals\runner.py --all
 ```
 
+运行历史坑位回归用例：
+
+```powershell
+python rpa-eval-app\evals\runner.py --tag regression
+```
+
 运行指定用例：
 
 ```powershell
@@ -174,6 +180,17 @@ runner 执行时会打印当前进度，例如 `[3/12] START ...`、`[3/12] PASS
 - `report_contract_export_001`：导出合同报表，并通过业务系统下载审计确认导出接口被真实触发。
 - `report_async_download_001`：生成、轮询并下载异步报表，并通过下载审计确认报表下载被真实触发。
 - `empty_result_contract_001`：处理空结果检索场景。
+
+新增历史坑位回归用例位于同一目录，统一使用 `regression` 标签：
+
+- `lab_body_click_export_001`：防止行选择后的 `body/html` 弱点击污染导出菜单录制。
+- `lab_split_grid_first_file_001`：验证 header/body 分离表格的第一行文件打开。
+- `lab_collection_row_action_001`：验证 collection/row scoped locator 不应在编译回放时被改坏。
+- `lab_empty_audit_extract_001`：验证显式空结果抽取是合法输出。
+- `lab_dataflow_cost_center_001`：验证前一步读取值能驱动后一步表单填写。
+- `lab_parameterized_contract_001`：验证回放目标应使用参数化合同号，而不是录制现场默认值。
+- `lab_modal_supplier_contact_001`：验证弹窗内表单填写不会落到背景同名字段。
+- `lab_popup_report_download_001`：验证 popup/tab 下载信号归属。
 
 这些用例使用固定业务编号，例如 `CT-2026-RPA-001`、`SUP-2026-002`、`PR-2026-RPA-NEW-001`、`PO-2026-RPA-NEW-001`、`RPT-2026-RPA-001`。
 

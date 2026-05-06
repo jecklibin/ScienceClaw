@@ -22,11 +22,13 @@ class EvalAppClient:
         self.base_url = base_url.rstrip("/")
         self.timeout_s = timeout_s
 
-    def reset(self, reset_token: str) -> dict[str, Any]:
+    def reset(self, reset_token: str, *, fixture_variant: str | None = None) -> dict[str, Any]:
+        payload = {"fixture_variant": fixture_variant} if fixture_variant else None
         return self._request(
             "POST",
             "/api/eval/reset",
             headers={"X-RPA-Eval-Reset-Token": reset_token},
+            json_body=payload,
         )
 
     def login(self, username: str, password: str) -> EvalAppUserSession:

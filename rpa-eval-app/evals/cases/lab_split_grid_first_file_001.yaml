@@ -1,0 +1,29 @@
+id: lab_split_grid_first_file_001
+name: Open first file from split header body grid
+tags: [regression, snapshot, table, split_grid]
+user:
+  username: buyer
+  password: buyer123
+start_path: /regression-lab
+timeout_s: 120
+instruction: >
+  在 Split header/body grid 区域，忽略左侧的导航表格，只操作右侧的导出结果表格。
+  请打开导出结果表格第一行的文件链接，目标文件名是 split-grid-first-row.csv。
+pre_api_assertions:
+  - name: split_grid_file_not_opened_before_run
+    path: /api/lab/events
+    find:
+      event_key: split_grid_file_opened
+    absent: true
+api_assertions:
+  - name: split_grid_first_file_opened
+    path: /api/lab/events
+    find:
+      event_key: split_grid_file_opened
+      entity_id: FILE-2026-001
+    expect:
+      status: completed
+      payload:
+        file_name: split-grid-first-row.csv
+assertions:
+  accepted_trace_min: 1

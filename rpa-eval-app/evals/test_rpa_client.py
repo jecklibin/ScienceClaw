@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from rpa_client import RpaClawClient, RpaClawTimeoutError, parse_sse_lines
+from rpa_client import RpaClawClient, RpaClawTimeoutError, active_tab_url, parse_sse_lines, urls_match
 
 
 class FakeResponse:
@@ -65,6 +65,73 @@ class RpaClawClientTests(unittest.TestCase):
         self.assertEqual(requests[0].get_method(), "POST")
         self.assertEqual(requests[0].full_url, "http://rpaclaw/api/v1/rpa/session/session-1/stop")
 
+    def test_generate_script_posts_params_to_generate_endpoint(self):
+        requests = []
+
+        def fake_urlopen(req, timeout):
+            requests.append((req, timeout))
+            return FakeResponse({"status": "success", "script": "async def execute_skill(page): pass"})
+
+        with patch("rpa_client.request.urlopen", fake_urlopen):
+            client = RpaClawClient("http://rpaclaw")
+            response = client.generate_script("session-1", {"contract_number": "CT-001"})
+
+        self.assertEqual(response["status"], "success")
+        self.assertEqual(requests[0][0].full_url, "http://rpaclaw/api/v1/rpa/session/session-1/generate")
+        self.assertEqual(json.loads(requests[0][0].data.decode("utf-8")), {"params": {"contract_number": "CT-001"}})
+
+    def test_test_script_uses_replay_timeout(self):
+        requests = []
+
+        def fake_urlopen(req, timeout):
+            requests.append((req, timeout))
+            return FakeResponse({"status": "success", "result": {"success": True}})
+
+        with patch("rpa_client.request.urlopen", fake_urlopen):
+            client = RpaClawClient("http://rpaclaw")
+            client.test_script("session-1", timeout_s=123)
+
+        self.assertEqual(requests[0][0].full_url, "http://rpaclaw/api/v1/rpa/session/session-1/test")
+        self.assertEqual(requests[0][1], 123)
+        self.assertEqual(json.loads(requests[0][0].data.decode("utf-8")), {"params": {}})
+
+    def test_test_script_sends_optional_setup_navigation(self):
+        requests = []
+
+        def fake_urlopen(req, timeout):
+            requests.append((req, timeout))
+            return FakeResponse({"status": "success", "result": {"success": True}})
+
+        with patch("rpa_client.request.urlopen", fake_urlopen):
+            client = RpaClawClient("http://rpaclaw")
+            client.test_script(
+                "session-1",
+                {"q": "abc"},
+                timeout_s=123,
+                setup_navigation=["http://eval/eval-auth.html?token=t", "http://eval/start"],
+            )
+
+        self.assertEqual(
+            json.loads(requests[0][0].data.decode("utf-8")),
+            {
+                "params": {"q": "abc"},
+                "setup_navigation": ["http://eval/eval-auth.html?token=t", "http://eval/start"],
+            },
+        )
+
+    def test_active_tab_url_and_url_match_ignore_query(self):
+        tabs = {
+            "active_tab_id": "tab-2",
+            "tabs": [
+                {"id": "tab-1", "url": "http://eval/dashboard"},
+                {"id": "tab-2", "url": "http://eval/regression-lab?x=1"},
+            ],
+        }
+
+        self.assertEqual(active_tab_url(tabs), "http://eval/regression-lab?x=1")
+        self.assertTrue(urls_match("http://eval/regression-lab?x=1", "http://eval/regression-lab"))
+        self.assertFalse(urls_match("http://eval/dashboard", "http://eval/regression-lab"))
+
     def test_run_instruction_times_out_and_stops_session(self):
         client = RpaClawClient("http://rpaclaw")
         stopped = []
@@ -73,7 +140,7 @@ class RpaClawClientTests(unittest.TestCase):
         client.navigate = lambda _session_id, _url: None
         client.stop_session = lambda session_id, ignore_errors=False: stopped.append((session_id, ignore_errors))
 
-        def slow_events(_session_id, _instruction):
+        def slow_events(_session_id, _instruction, *, business_instruction=None):
             yield {"event": "agent_thought", "data": {"message": "started"}}
             time.sleep(0.2)
             yield {"event": "agent_done", "data": {}}
@@ -90,6 +157,24 @@ class RpaClawClientTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.session_id, "session-1")
         self.assertEqual(raised.exception.raw_events[0]["event"], "agent_thought")
+        self.assertIn(("session-1", True), stopped)
+
+    def test_chat_wall_timeout_returns_after_terminal_event_even_if_stream_hangs(self):
+        client = RpaClawClient("http://rpaclaw")
+        stopped = []
+        client.stop_session = lambda session_id, ignore_errors=False: stopped.append((session_id, ignore_errors))
+
+        def terminal_then_hang(_session_id, _instruction, *, business_instruction=None):
+            yield {"event": "error", "data": {"message": "page closed"}}
+            time.sleep(2)
+
+        client.iter_chat_events = terminal_then_hang
+
+        started = time.perf_counter()
+        events = client.chat_with_wall_timeout("session-1", "do it", timeout_s=10)
+
+        self.assertLess(time.perf_counter() - started, 7)
+        self.assertEqual(events[0]["event"], "error")
         self.assertIn(("session-1", True), stopped)
 
     def test_parse_sse_lines_stops_after_agent_aborted(self):

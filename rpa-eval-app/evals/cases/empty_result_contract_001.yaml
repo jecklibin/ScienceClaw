@@ -15,7 +15,7 @@ expected:
     query: CT-2026-RPA-NOT-FOUND
     should_open_record: false
   output_text:
-    - 没有匹配结果
+    - [没有匹配结果, 未找到匹配结果]
 assertions:
   accepted_trace_min: 1
   diagnostics_max: 0

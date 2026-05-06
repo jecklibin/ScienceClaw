@@ -78,6 +78,9 @@ class RPAAcceptedTrace(BaseModel):
     ai_execution: Optional[RPAAIExecution] = None
     locator_stability: Optional[RPALocatorStabilityMetadata] = None
     dataflow: Optional[RPADataflowMapping] = None
+    input_bindings: Dict[str, Any] = Field(default_factory=dict)
+    output_bindings: Dict[str, Any] = Field(default_factory=dict)
+    postcondition: Dict[str, Any] = Field(default_factory=dict)
     diagnostics_ref: Optional[str] = None
     accepted: bool = True
     started_at: datetime = Field(default_factory=datetime.now)

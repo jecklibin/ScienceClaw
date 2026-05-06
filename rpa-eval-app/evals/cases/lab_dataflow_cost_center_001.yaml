@@ -1,0 +1,33 @@
+id: lab_dataflow_cost_center_001
+name: Reuse extracted supplier number in a later form field
+tags: [regression, data_flow, output_key]
+user:
+  username: buyer
+  password: buyer123
+start_path: /regression-lab
+timeout_s: 150
+instruction: >
+  在 Cross-step dataflow form 区域，先从详情卡片读取 Supplier number 和
+  Owner department。然后填写下方表单：Request number 填 PR-2026-RPA-DATAFLOW，
+  Supplier number 使用刚才读取到的供应商编号，Department 使用刚才读取到的部门，
+  Cost center 使用“供应商编号-RPA-2026”的格式。填写完成后提交 dataflow 表单。
+pre_api_assertions:
+  - name: dataflow_form_not_submitted_before_run
+    path: /api/lab/events
+    find:
+      event_key: dataflow_form_submitted
+    absent: true
+api_assertions:
+  - name: dataflow_form_submitted
+    path: /api/lab/events
+    find:
+      event_key: dataflow_form_submitted
+      entity_id: PR-2026-RPA-DATAFLOW
+    expect:
+      status: completed
+      payload:
+        supplier_number: SUP-2026-001
+        department: Procurement Automation
+        cost_center: SUP-2026-001-RPA-2026
+assertions:
+  accepted_trace_min: 1

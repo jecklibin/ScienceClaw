@@ -13,6 +13,7 @@
         <el-menu-item index="/purchase-orders">采购订单</el-menu-item>
         <el-menu-item index="/approvals">审批待办</el-menu-item>
         <el-menu-item index="/reports">报表中心</el-menu-item>
+        <el-menu-item index="/regression-lab">Regression Lab</el-menu-item>
       </el-menu>
     </el-aside>
     <el-container>
@@ -49,7 +50,9 @@ const titles: Record<string, string> = {
   '/purchase-requests': '采购申请',
   '/purchase-orders': '采购订单',
   '/approvals': '审批待办',
-  '/reports': '报表中心'
+  '/reports': '报表中心',
+  '/regression-lab': 'Regression Lab',
+  '/regression-lab/popup-report': 'Popup Report'
 }
 const routeTitle = computed(() => titles[route.path] || '业务详情')
 

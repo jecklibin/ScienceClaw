@@ -27,7 +27,7 @@ def _structured_view_snapshot() -> dict:
                 "title": "EDM Request",
                 "title_source": "nearest_preceding_heading",
                 "nearby_headings": ["EDM Request"],
-                "framework_hint": "aui-grid",
+                "framework_hint": "structured-grid",
                 "row_count_observed": 10,
                 "columns": [
                     {"index": 0, "column_id": "col_23", "header": "", "role": "row_index", "sample_values": ["1", "2"]},
@@ -52,6 +52,17 @@ def _structured_view_snapshot() -> dict:
                                 "column_header": "文件名称",
                                 "text": "File_189.xlsx",
                                 "value_kind": "text",
+                                "controls": [
+                                    {
+                                        "kind": "textbox",
+                                        "label": "editable file name",
+                                        "locator": {
+                                            "method": "relative_css",
+                                            "scope": "row",
+                                            "value": "td[data-colid='col_25'] input",
+                                        },
+                                    }
+                                ],
                                 "actions": [
                                     {
                                         "kind": "link",
@@ -108,6 +119,7 @@ def test_compact_recording_snapshot_preserves_structured_views():
     assert compact["table_views"][0]["nearby_headings"] == ["EDM Request"]
     assert compact["table_views"][0]["columns"][2]["header"] == "文件名称"
     assert compact["table_views"][0]["rows"][0]["cells"][1]["actions"][0]["locator"]["scope"] == "row"
+    assert compact["table_views"][0]["rows"][0]["cells"][1]["controls"][0]["locator"]["scope"] == "row"
     assert compact["table_views"][0]["auxiliary_text"][0]["outside_rows"] is True
     assert compact["detail_views"][0]["section_title"] == "采购信息"
     assert compact["detail_views"][0]["fields"][0]["data_prop"] == "amount"

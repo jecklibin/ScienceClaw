@@ -1179,7 +1179,7 @@ def test_actionable_tab_creates_sectioned_label_value_region_from_nearby_fields(
                 "text": "100.00",
                 "bbox": {"x": 80, "y": 596, "width": 41, "height": 19},
                 "locator": {"method": "text", "value": "100.00"},
-                "element_snapshot": {"tag": "span", "text": "100.00", "class": "aui-numeric-display-only"},
+                "element_snapshot": {"tag": "span", "text": "100.00", "class": "numeric-display-value"},
             },
             {
                 "node_id": "label-currency-full",
@@ -1189,7 +1189,7 @@ def test_actionable_tab_creates_sectioned_label_value_region_from_nearby_fields(
                 "text": "* 币种",
                 "bbox": {"x": 455, "y": 574, "width": 37, "height": 24},
                 "locator": {"method": "text", "value": "* 币种"},
-                "element_snapshot": {"tag": "label", "text": "* 币种", "class": "aui-form-item__label"},
+                "element_snapshot": {"tag": "label", "text": "* 币种", "class": "form-field-label"},
             },
             {
                 "node_id": "required-currency",
@@ -1219,7 +1219,7 @@ def test_actionable_tab_creates_sectioned_label_value_region_from_nearby_fields(
                 "text": "USD",
                 "bbox": {"x": 455, "y": 598, "width": 27, "height": 19},
                 "locator": {"method": "text", "value": "USD"},
-                "element_snapshot": {"tag": "span", "text": "USD", "class": "aui-input-display-only"},
+                "element_snapshot": {"tag": "span", "text": "USD", "class": "input-display-value"},
             },
             {
                 "node_id": "label-type",
@@ -1239,7 +1239,7 @@ def test_actionable_tab_creates_sectioned_label_value_region_from_nearby_fields(
                 "text": "服务",
                 "bbox": {"x": 831, "y": 598, "width": 28, "height": 19},
                 "locator": {"method": "text", "value": "服务"},
-                "element_snapshot": {"tag": "span", "text": "服务", "class": "aui-input-display-only"},
+                "element_snapshot": {"tag": "span", "text": "服务", "class": "input-display-value"},
             },
         ],
         "actionable_nodes": [

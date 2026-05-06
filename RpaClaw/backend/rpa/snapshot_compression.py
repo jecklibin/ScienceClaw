@@ -130,6 +130,7 @@ def compact_recording_snapshot(snapshot: Dict[str, Any], instruction: str, *, ch
         "table_views": _compact_table_views(snapshot),
         "detail_views": _compact_detail_views(snapshot),
         "form_views": _compact_form_views(snapshot),
+        "modal_dialogs": _compact_modal_dialogs(snapshot),
         "expanded_regions": expanded_regions,
         "sampled_regions": sampled_regions,
         "region_catalogue": tiers["region_catalogue"],
@@ -147,6 +148,7 @@ def _build_clean_payload(
         "table_views": _compact_table_views(snapshot),
         "detail_views": _compact_detail_views(snapshot),
         "form_views": _compact_form_views(snapshot),
+        "modal_dialogs": _compact_modal_dialogs(snapshot),
         "expanded_regions": [_expanded_region(region) for region in regions],
         "sampled_regions": [],
         "region_catalogue": list(region_catalogue),
@@ -167,6 +169,7 @@ def _compact_table_views(snapshot: Dict[str, Any], *, row_limit: int = 10, cell_
                         "column_header": cell.get("column_header", ""),
                         "text": cell.get("text", ""),
                         "value_kind": cell.get("value_kind", ""),
+                        "controls": list(cell.get("controls") or [])[:4],
                         "actions": list(cell.get("actions") or cell.get("row_local_actions") or [])[:4],
                     }
                 )
@@ -209,6 +212,12 @@ def _compact_detail_views(snapshot: Dict[str, Any], *, field_limit: int = 40) ->
                     "hidden_reason": field.get("hidden_reason", ""),
                     "value_kind": field.get("value_kind", ""),
                     "locator_hints": list(field.get("locator_hints") or [])[:2],
+                    "field_locator": field.get("field_locator") or {},
+                    "label_locator": field.get("label_locator") or {},
+                    "value_locator": field.get("value_locator") or {},
+                    "adapter": field.get("adapter", ""),
+                    "value_selector": field.get("value_selector", ""),
+                    "value_selectors": list(field.get("value_selectors") or [])[:6],
                 }
             )
         views.append(
@@ -216,6 +225,7 @@ def _compact_detail_views(snapshot: Dict[str, Any], *, field_limit: int = 40) ->
                 "kind": "detail_view",
                 "section_title": view.get("section_title", ""),
                 "section_locator": view.get("section_locator") or {},
+                "framework_hint": view.get("framework_hint", ""),
                 "frame_path": list(view.get("frame_path") or []),
                 "fields": fields,
             }
@@ -361,6 +371,51 @@ def _form_field_confidence(label_node: Dict[str, Any], control: Dict[str, Any]) 
     ):
         return "high"
     return "medium"
+
+
+def _compact_modal_dialogs(
+    snapshot: Dict[str, Any],
+    *,
+    dialog_limit: int = 3,
+    field_limit: int = 12,
+    action_limit: int = 8,
+) -> List[Dict[str, Any]]:
+    dialogs: List[Dict[str, Any]] = []
+    for dialog in list(snapshot.get("modal_dialogs") or [])[:dialog_limit]:
+        fields = []
+        for field in list(dialog.get("fields") or [])[:field_limit]:
+            fields.append(
+                {
+                    "label": field.get("label", ""),
+                    "value": field.get("value", ""),
+                    "role": field.get("role", ""),
+                    "placeholder": field.get("placeholder", ""),
+                    "test_id": field.get("test_id", ""),
+                    "locator": field.get("locator") or {},
+                }
+            )
+        actions = []
+        for action in list(dialog.get("actions") or [])[:action_limit]:
+            actions.append(
+                {
+                    "label": action.get("label", ""),
+                    "role": action.get("role", ""),
+                    "test_id": action.get("test_id", ""),
+                    "locator": action.get("locator") or {},
+                }
+            )
+        dialogs.append(
+            {
+                "title": dialog.get("title", ""),
+                "role": dialog.get("role", ""),
+                "modal": bool(dialog.get("modal")),
+                "bbox": dialog.get("bbox") or {},
+                "fields": fields,
+                "actions": actions,
+                "text_excerpt": dialog.get("text_excerpt", ""),
+            }
+        )
+    return dialogs
 
 
 def _build_region(

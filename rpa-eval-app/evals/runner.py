@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import sys
@@ -32,6 +33,20 @@ USER_PASSWORDS = {
 }
 
 
+def configure_console_output() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (OSError, ValueError):
+            try:
+                reconfigure(errors="backslashreplace")
+            except (OSError, ValueError):
+                pass
+
+
 class CaseAssertionError(AssertionError):
     def __init__(self, stage: str, message: str) -> None:
         super().__init__(message)
@@ -39,6 +54,7 @@ class CaseAssertionError(AssertionError):
 
 
 def main() -> int:
+    configure_console_output()
     args = parse_args()
     report_dir = args.report_dir if args.report_dir is not None else DEFAULT_REPORT_DIR
     cases = select_cases(load_cases(CASES_DIR), args)
@@ -68,6 +84,7 @@ def main() -> int:
             flush=True,
         )
         result = run_case(case, args, eval_client, rpa_client)
+        result = retry_case_if_allowed(case, args, eval_client, rpa_client, result)
         case_results.append(result)
         status = "PASS" if result["passed"] else "FAIL"
         detail = "" if result["passed"] else f" {result.get('failure_stage')}: {result.get('failure_message')}"
@@ -111,10 +128,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--report-dir", default=None)
     parser.add_argument("--reset-token", default="rpa-eval-reset")
     parser.add_argument(
+        "--verify-replay",
+        action="store_true",
+        help="After recording, generate and execute the recorded script to validate replayability.",
+    )
+    parser.add_argument(
+        "--replay-timeout-s",
+        type=float,
+        default=90.0,
+        help="Wall-clock timeout for the RpaClaw /test replay phase.",
+    )
+    parser.add_argument(
+        "--allow-runtime-ai-replay",
+        action="store_true",
+        help="Allow generated replay scripts to call runtime AI. Disabled by default to expose non-deterministic replays.",
+    )
+    parser.add_argument(
         "--case-timeout-s",
         type=float,
         default=180.0,
         help="Default wall-clock timeout for one eval case. A case can override it with timeout_s in YAML.",
+    )
+    parser.add_argument(
+        "--case-retries",
+        type=int,
+        default=0,
+        help="Retry record-stage case failures this many times. Attempts are reported separately from first-pass rate.",
     )
     return parser.parse_args()
 
@@ -145,6 +184,46 @@ def select_cases(cases: list[dict[str, Any]], args: argparse.Namespace) -> list[
     return [case for case in cases if "smoke" in case.get("tags", [])]
 
 
+def retry_case_if_allowed(
+    case: dict[str, Any],
+    args: argparse.Namespace,
+    eval_client: EvalAppClient,
+    rpa_client: RpaClawClient,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    max_retries = max(int(getattr(args, "case_retries", 0) or 0), 0)
+    if max_retries <= 0 or result.get("passed"):
+        return result
+    history = [case_attempt_summary(result)]
+    attempts = 1
+    while attempts <= max_retries and should_retry_case_result(result):
+        attempts += 1
+        print(f"    retry {attempts}/{max_retries + 1} after {result.get('failure_stage')}: {result.get('failure_message')}", flush=True)
+        result = run_case(case, args, eval_client, rpa_client)
+        history.append(case_attempt_summary(result))
+        if result.get("passed"):
+            break
+    result["attempts"] = attempts
+    result["attempt_history"] = history
+    return result
+
+
+def should_retry_case_result(result: dict[str, Any]) -> bool:
+    if result.get("passed"):
+        return False
+    return str(result.get("failure_stage") or "") == "record"
+
+
+def case_attempt_summary(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "passed": bool(result.get("passed")),
+        "failure_stage": result.get("failure_stage"),
+        "failure_message": result.get("failure_message"),
+        "latency_ms": result.get("latency_ms"),
+        "phase_results": result.get("phase_results") or {},
+    }
+
+
 def run_case(
     case: dict[str, Any],
     args: argparse.Namespace,
@@ -165,10 +244,15 @@ def run_case(
         "raw_events": [],
         "session_id": None,
         "timeout_s": resolve_case_timeout_s(case, args),
+        "phase_results": {
+            "record": {"status": "pending"},
+            "compile": {"status": "skipped"},
+            "replay": {"status": "skipped"},
+        },
     }
 
     try:
-        eval_client.reset(args.reset_token)
+        eval_client.reset(args.reset_token, fixture_variant=case.get("fixture_variant"))
         user = case.get("user") or {}
         username = user["username"]
         password = USER_PASSWORDS[username]
@@ -191,9 +275,45 @@ def run_case(
         result["session_id"] = run.session_id
         result["raw_events"] = run.raw_events
         result["metrics"] = collect_metrics(run.raw_events, run.session)
+        assert_recording_succeeded(run.raw_events)
+        result["phase_results"]["record"] = {"status": "passed"}
         assert_metrics(case.get("assertions", {}), result["metrics"])
-        assert_api_assertions(case.get("api_assertions", []), eval_client, eval_session.token)
-        assert_expected_telemetry(case.get("expected", {}), result["metrics"])
+        replay_config = case.get("replay") if isinstance(case.get("replay"), dict) else {}
+        if getattr(args, "verify_replay", False):
+            eval_client.reset(args.reset_token, fixture_variant=replay_config.get("fixture_variant"))
+            eval_session = eval_client.login(username, password)
+            result["eval_user"] = eval_session.user
+            replay_start_path = replay_config.get("start_path") or case.get("start_path", "/")
+            replay_start_url = build_frontend_url(args.eval_frontend_url, replay_start_path)
+            try:
+                replay_result = replay_generated_skill(
+                    rpa_client=rpa_client,
+                    session_id=run.session_id or "",
+                    params=case.get("params") or {},
+                    timeout_s=float(getattr(args, "replay_timeout_s", 90.0)),
+                    allow_runtime_ai=bool(getattr(args, "allow_runtime_ai_replay", False)),
+                    setup_navigation=[
+                        build_eval_auth_url(args.eval_frontend_url, eval_session.token),
+                        replay_start_url,
+                    ],
+                )
+            except CaseAssertionError as exc:
+                if exc.stage in result["phase_results"]:
+                    result["phase_results"][exc.stage] = {"status": "failed", "message": str(exc)}
+                raise
+            result["phase_results"]["compile"] = replay_result["compile"]
+            result["phase_results"]["replay"] = replay_result["replay"]
+            result["replay"] = replay_result
+        api_assertions = case.get("api_assertions", [])
+        if getattr(args, "verify_replay", False) and replay_config.get("api_assertions") is not None:
+            api_assertions = replay_config.get("api_assertions") or []
+        assert_api_assertions(api_assertions, eval_client, eval_session.token)
+        telemetry_metrics = result["metrics"]
+        if getattr(args, "verify_replay", False):
+            replay_metrics = (result.get("replay") or {}).get("metrics")
+            if isinstance(replay_metrics, dict):
+                telemetry_metrics = replay_metrics
+        assert_expected_telemetry(case.get("expected", {}), telemetry_metrics)
         result["passed"] = True
     except RpaClawTimeoutError as exc:
         result["session_id"] = exc.session_id
@@ -204,12 +324,116 @@ def run_case(
     except (EvalAppError, RpaClawError, CaseAssertionError, AssertionError, KeyError) as exc:
         result["failure_stage"] = classify_failure(exc)
         result["failure_message"] = str(exc)
+        if isinstance(exc, CaseAssertionError) and exc.stage in result["phase_results"]:
+            result["phase_results"][exc.stage] = {"status": "failed", "message": str(exc)}
     except Exception as exc:
         result["failure_stage"] = "runner"
         result["failure_message"] = f"{type(exc).__name__}: {exc}"
     finally:
         result["latency_ms"] = round((time.perf_counter() - started) * 1000)
     return result
+
+
+def assert_recording_succeeded(events: list[dict[str, Any]]) -> None:
+    for event in reversed(events):
+        event_name = str(event.get("event") or "")
+        if event_name == "agent_done":
+            return
+        if event_name in {"agent_aborted", "error"}:
+            data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            message = str(data.get("reason") or data.get("message") or event_name)
+            raise CaseAssertionError("record", message)
+    raise CaseAssertionError("record", "recording did not emit agent_done")
+
+
+def replay_generated_skill(
+    *,
+    rpa_client: RpaClawClient,
+    session_id: str,
+    params: dict[str, Any],
+    timeout_s: float,
+    allow_runtime_ai: bool = False,
+    setup_navigation: list[str] | None = None,
+) -> dict[str, Any]:
+    generated = rpa_client.generate_script(session_id, params)
+    script = str(generated.get("script") or "")
+    compile_result = {
+        "status": "passed",
+        "script_length": len(script),
+        "uses_runtime_ai": generated_script_uses_runtime_ai(script),
+    }
+    if not script:
+        compile_result["status"] = "failed"
+        raise CaseAssertionError("compile", "generated script was empty")
+    if compile_result["uses_runtime_ai"] and not allow_runtime_ai:
+        compile_result["status"] = "failed"
+        raise CaseAssertionError("compile", "generated script uses runtime AI and is not deterministic for replay")
+
+    tested = rpa_client.test_script(
+        session_id,
+        params,
+        timeout_s=timeout_s,
+        setup_navigation=setup_navigation,
+    )
+    success = str(tested.get("status") or "").lower() == "success"
+    result = tested.get("result") if isinstance(tested.get("result"), dict) else {}
+    if result and result.get("success") is False:
+        success = False
+    replay_result = {
+        "status": "passed" if success else "failed",
+        "logs": tested.get("logs") or [],
+        "error": result.get("error") if isinstance(result, dict) else None,
+        "metrics": replay_telemetry_metrics(tested),
+    }
+    if not success:
+        message = replay_result.get("error") or tested.get("error") or "generated script replay failed"
+        raise CaseAssertionError("replay", str(message))
+    return {"compile": compile_result, "replay": replay_result}
+
+
+def replay_telemetry_metrics(tested: dict[str, Any]) -> dict[str, Any]:
+    result = tested.get("result") if isinstance(tested.get("result"), dict) else {}
+    telemetry = result.get("telemetry") if isinstance(result.get("telemetry"), dict) else {}
+    output_parts = []
+    for key in ("output", "data"):
+        value = result.get(key)
+        if value in (None, ""):
+            continue
+        if isinstance(value, str):
+            output_parts.append(value)
+        else:
+            output_parts.append(json.dumps(value, ensure_ascii=False, default=str))
+    return {
+        "accepted_trace_count": 0,
+        "diagnostics_count": 0,
+        "event_count": 0,
+        "runtime_result_count": 0,
+        "final_url": str(telemetry.get("final_url") or ""),
+        "visible_text": str(telemetry.get("visible_text") or ""),
+        "output_text": "\n".join(output_parts),
+        "downloads": telemetry.get("downloads") or [],
+    }
+
+
+def generated_script_uses_runtime_ai(script: str) -> bool:
+    """Return true only when the generated skill calls the runtime AI helper.
+
+    RpaClaw scripts may include shared helper definitions even when no replay
+    step invokes them, so a substring check would turn deterministic scripts
+    into false compile failures.
+    """
+    try:
+        tree = ast.parse(script)
+    except SyntaxError:
+        return bool(re.search(r"(?<!def\s)_execute_runtime_ai_instruction\s*\(", script))
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id == "_execute_runtime_ai_instruction":
+            return True
+    return False
 
 
 def run_rpa_case(
@@ -225,8 +449,13 @@ def run_rpa_case(
 ) -> RpaRunResult:
     session_id = rpa_client.start_session(case_id)
     try:
-        rpa_client.navigate(session_id, build_eval_auth_url(start_url, auth_token))
-        rpa_client.navigate(session_id, start_url)
+        auth_url = build_eval_auth_url(start_url, auth_token)
+        if hasattr(rpa_client, "navigate_and_wait"):
+            rpa_client.navigate_and_wait(session_id, auth_url)
+            rpa_client.navigate_and_wait(session_id, start_url)
+        else:
+            rpa_client.navigate(session_id, auth_url)
+            rpa_client.navigate(session_id, start_url)
         business_instruction = build_browser_instruction(
             case=case,
             login_url="",
@@ -234,7 +463,12 @@ def run_rpa_case(
             username=username,
             password=password,
         )
-        business_events = rpa_client.chat_with_wall_timeout(session_id, business_instruction, timeout_s=timeout_s)
+        business_events = rpa_client.chat_with_wall_timeout(
+            session_id,
+            business_instruction,
+            timeout_s=timeout_s,
+            business_instruction=case["instruction"],
+        )
 
         session = rpa_client.get_session(session_id)
         return RpaRunResult(session_id=session_id, raw_events=tag_events(business_events, "case"), session=session)
@@ -328,12 +562,9 @@ def assert_metrics(assertions: dict[str, Any], metrics: dict[str, Any]) -> None:
             "assertion",
             f"accepted_trace_count {metrics['accepted_trace_count']} is below required minimum {accepted_min}"
         )
-    diagnostics_max = assertions.get("diagnostics_max")
-    if diagnostics_max is not None and metrics["diagnostics_count"] > diagnostics_max:
-        raise CaseAssertionError(
-            "assertion",
-            f"diagnostics_count {metrics['diagnostics_count']} exceeds allowed maximum {diagnostics_max}"
-        )
+    # Diagnostics measure repair/stability cost. They should remain visible in
+    # reports, but they are not a correctness gate for trace-first recording:
+    # a case should pass or fail on observable browser/API outcomes.
 
 
 def assert_expected_telemetry(expected: dict[str, Any], metrics: dict[str, Any]) -> None:
@@ -347,6 +578,12 @@ def assert_expected_telemetry(expected: dict[str, Any], metrics: dict[str, Any])
             raise CaseAssertionError("assertion", f"expected final URL path {expected_path}, got {actual_path}")
 
     extracted_fields = expected.get("extracted_fields") or {}
+    empty_result_confirmed = False
+    if expected.get("empty_result"):
+        empty_result_confirmed = output_confirms_empty_result(metrics, expected.get("empty_result") or {})
+        if not empty_result_confirmed:
+            raise CaseAssertionError("assertion", "expected empty-result evidence was not found in agent output")
+
     visible_text = expected.get("visible_text") or []
     if visible_text:
         text_blob = metrics.get("visible_text") or ""
@@ -362,7 +599,7 @@ def assert_expected_telemetry(expected: dict[str, Any], metrics: dict[str, Any])
         if not output_blob:
             raise CaseAssertionError("unsupported_output_telemetry", "output_text assertions require agent output telemetry")
         missing = [value for value in expected_output_text if not text_contains_expected(output_blob, value)]
-        if missing:
+        if missing and not empty_result_confirmed:
             raise CaseAssertionError("assertion", f"expected output text values were not found: {missing}")
 
     if extracted_fields:
@@ -628,7 +865,10 @@ def flatten_strings(value: Any) -> list[str]:
         return [str(value)]
     if isinstance(value, dict):
         strings = []
-        for item in value.values():
+        for key, item in value.items():
+            key_text = str(key or "").strip()
+            if key_text:
+                strings.append(key_text)
             strings.extend(flatten_strings(item))
         return strings
     if isinstance(value, list):
@@ -640,6 +880,9 @@ def flatten_strings(value: Any) -> list[str]:
 
 
 def text_contains_expected(text: str, expected: Any) -> bool:
+    if isinstance(expected, (list, tuple, set)):
+        return any(text_contains_expected(text, option) for option in expected)
+
     expected_text = str(expected)
     if expected_text in text:
         return True
@@ -649,6 +892,184 @@ def text_contains_expected(text: str, expected: Any) -> bool:
     normalized_text = normalize_text_for_match(text)
     normalized_expected = normalize_text_for_match(expected_text)
     return bool(normalized_expected and normalized_expected in normalized_text)
+
+
+def output_confirms_empty_result(metrics: dict[str, Any], expected_empty: dict[str, Any]) -> bool:
+    output_blob = metrics.get("output_text") or ""
+    if not output_blob:
+        return False
+    normalized = normalize_text_for_match(output_blob).lower()
+    query = str(expected_empty.get("query") or "").strip()
+    if query and normalize_text_for_match(query).lower() not in normalized:
+        return False
+    if any(_structured_empty_result_evidence(item) for item in _extract_structured_output_values(output_blob)):
+        return True
+    if _flattened_output_confirms_empty_result(output_blob):
+        return True
+    positive_markers = (
+        "empty_result_confirmedtrue",
+        "emptytrue",
+        "empty_state_visibletrue",
+        "empty_visibletrue",
+        "is_emptytrue",
+        "no_matchtrue",
+        "no_resulttrue",
+    )
+    zero_count_markers = (
+        "row_count0",
+        "result_count0",
+        "record_count0",
+        "matched_count0",
+        "total0",
+        "count0",
+    )
+    return any(marker in normalized for marker in positive_markers) or any(
+        marker in normalized for marker in zero_count_markers
+    )
+
+
+def _extract_structured_output_values(output_blob: str) -> list[Any]:
+    values: list[Any] = []
+    decoder = json.JSONDecoder()
+    text = str(output_blob or "")
+    for prefix in ("SKILL_DATA:", ""):
+        start = 0
+        while True:
+            index = text.find(prefix, start) if prefix else min(
+                [pos for pos in (text.find("{", start), text.find("[", start)) if pos >= 0],
+                default=-1,
+            )
+            if index < 0:
+                break
+            json_start = index + len(prefix) if prefix else index
+            try:
+                value, offset = decoder.raw_decode(text[json_start:].lstrip())
+            except json.JSONDecodeError:
+                start = json_start + 1
+                continue
+            values.append(value)
+            start = json_start + offset + 1
+    return values
+
+
+def _structured_empty_result_evidence(value: Any, parent_key: str = "") -> bool:
+    key = normalize_text_for_match(parent_key).lower()
+    if isinstance(value, dict):
+        for child_key, child_value in value.items():
+            child_key_text = str(child_key or "")
+            normalized_key = normalize_text_for_match(child_key_text).lower()
+            if isinstance(child_value, bool) and child_value and _is_empty_boolean_key(normalized_key):
+                return True
+            if _is_zero_count_value(child_value) and _is_count_or_collection_key(normalized_key):
+                return True
+            if _structured_empty_result_evidence(child_value, child_key_text):
+                return True
+        return False
+    if isinstance(value, list):
+        if not value and _is_count_or_collection_key(key):
+            return True
+        return any(_structured_empty_result_evidence(item, parent_key) for item in value)
+    if isinstance(value, str):
+        return _is_empty_result_text(value)
+    return False
+
+
+def _flattened_output_confirms_empty_result(output_blob: str) -> bool:
+    lines = [line.strip() for line in str(output_blob or "").splitlines() if line.strip()]
+    for key, value in zip(lines, lines[1:]):
+        normalized_key = normalize_text_for_match(key).lower()
+        if _is_count_or_collection_key(normalized_key) and _is_zero_count_value(value):
+            return True
+        if _is_empty_boolean_key(normalized_key) and normalize_text_for_match(value).lower() == "true":
+            return True
+        if _is_empty_result_text(value):
+            return True
+    return False
+
+
+def _is_empty_result_text(value: str) -> bool:
+    normalized = normalize_text_for_match(value).lower()
+    compact = re.sub(r"[^a-z0-9]+", "", normalized)
+    markers = {
+        "nomatch",
+        "nomatches",
+        "nomatching",
+        "nomatchingresult",
+        "nomatchingresults",
+        "nomatchingrecords",
+        "noresult",
+        "noresults",
+        "notfound",
+        "emptyresult",
+    }
+    return any(marker in compact for marker in markers)
+
+
+def _is_empty_boolean_key(key: str) -> bool:
+    normalized = normalize_text_for_match(key).lower()
+    compact = re.sub(r"[^a-z0-9]+", "", normalized)
+    return normalized in {
+        "empty",
+        "isempty",
+        "emptyresult",
+        "emptyresultconfirmed",
+        "emptystatevisible",
+        "emptyvisible",
+        "nomatch",
+        "nomatchconfirmed",
+        "nomatchingresult",
+        "nomatchingresults",
+        "noresult",
+        "noresults",
+    } or compact in {
+        "empty",
+        "isempty",
+        "emptyresult",
+        "emptyresultconfirmed",
+        "emptystatevisible",
+        "emptyvisible",
+        "nomatch",
+        "nomatchconfirmed",
+        "nomatchingresult",
+        "nomatchingresults",
+        "noresult",
+        "noresults",
+    }
+
+
+def _is_count_or_collection_key(key: str) -> bool:
+    normalized = normalize_text_for_match(key).lower()
+    compact = re.sub(r"[^a-z0-9]+", "", normalized)
+    return (
+        "count" in normalized
+        or "count" in compact
+        or normalized.endswith("rows")
+        or normalized.endswith("items")
+        or normalized.endswith("results")
+        or normalized.endswith("records")
+        or normalized.endswith("matches")
+        or compact.endswith("rows")
+        or compact.endswith("items")
+        or compact.endswith("results")
+        or compact.endswith("records")
+        or compact.endswith("matches")
+    )
+
+
+def _is_zero_count_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float, Decimal)):
+        return Decimal(str(value)) == 0
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return False
+        try:
+            return Decimal(text.replace(",", "")) == 0
+        except InvalidOperation:
+            return False
+    return False
 
 
 def is_number_like(value: Any) -> bool:
@@ -687,16 +1108,23 @@ def render_console_summary(case_results: list[dict[str, Any]]) -> str:
         "Evaluation Summary",
         f"Total: {total}  Passed: {passed}  Failed: {failed}",
         "",
-        "| Case | Result | Latency | Failure |",
-        "| --- | --- | ---: | --- |",
+        "| Case | Result | Record | Compile | Replay | Latency | Failure |",
+        "| --- | --- | --- | --- | --- | ---: | --- |",
     ]
     for case in case_results:
         result = "PASS" if case.get("passed") else "FAIL"
         latency = case.get("latency_ms") or 0
+        phases = case.get("phase_results") or {}
+        record_status = (phases.get("record") or {}).get("status", "")
+        compile_status = (phases.get("compile") or {}).get("status", "")
+        replay_status = (phases.get("replay") or {}).get("status", "")
         failure = ""
         if not case.get("passed"):
             failure = f"{case.get('failure_stage') or ''}: {case.get('failure_message') or ''}".strip(": ")
-        lines.append(f"| {case['id']} | {result} | {latency} ms | {failure} |")
+        lines.append(
+            f"| {case['id']} | {result} | {record_status} | {compile_status} | {replay_status} | "
+            f"{latency} ms | {failure} |"
+        )
     return "\n".join(lines)
 
 

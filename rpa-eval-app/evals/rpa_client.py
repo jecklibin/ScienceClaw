@@ -5,6 +5,7 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Iterable
+from urllib.parse import urlparse
 from urllib import error, request
 
 
@@ -85,11 +86,54 @@ class RpaClawClient:
     def navigate(self, session_id: str, url: str) -> None:
         self._json_request("POST", f"/api/v1/rpa/session/{session_id}/navigate", {"url": url})
 
-    def chat(self, session_id: str, instruction: str) -> list[dict[str, Any]]:
-        return list(self.iter_chat_events(session_id, instruction))
+    def navigate_and_wait(self, session_id: str, url: str, *, timeout_s: float = 10.0) -> None:
+        """Navigate the active recording tab and wait until tab metadata reflects it.
 
-    def iter_chat_events(self, session_id: str, instruction: str) -> Iterable[dict[str, Any]]:
+        RPA recording evals need a deterministic starting browser state. The
+        backend navigate call waits for domcontentloaded, but app-level auth or
+        client routing can still update the active tab shortly after navigation.
+        Polling tab metadata here keeps that synchronization concern in the eval
+        harness instead of leaking start-page assumptions into the recorder.
+        """
+
+        self.navigate(session_id, url)
+        deadline = time.perf_counter() + max(timeout_s, 0.1)
+        last_url = ""
+        while time.perf_counter() < deadline:
+            try:
+                tabs = self.get_tabs(session_id)
+            except RpaClawError:
+                tabs = {}
+            active_url = active_tab_url(tabs)
+            if active_url:
+                last_url = active_url
+            if urls_match(active_url, url):
+                return
+            time.sleep(0.25)
+        raise RpaClawError(f"RPA tab did not reach {url!r}; last active url was {last_url!r}")
+
+    def get_tabs(self, session_id: str) -> dict[str, Any]:
+        return self._json_request("GET", f"/api/v1/rpa/session/{session_id}/tabs")
+
+    def chat(
+        self,
+        session_id: str,
+        instruction: str,
+        *,
+        business_instruction: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return list(self.iter_chat_events(session_id, instruction, business_instruction=business_instruction))
+
+    def iter_chat_events(
+        self,
+        session_id: str,
+        instruction: str,
+        *,
+        business_instruction: str | None = None,
+    ) -> Iterable[dict[str, Any]]:
         payload = {"message": instruction, "mode": "chat"}
+        if business_instruction:
+            payload["business_instruction"] = business_instruction
         if self.model_config_id:
             payload["model_config_id"] = self.model_config_id
         req = self._request(
@@ -117,16 +161,17 @@ class RpaClawClient:
         instruction: str,
         *,
         timeout_s: float | None,
+        business_instruction: str | None = None,
     ) -> list[dict[str, Any]]:
         if timeout_s is None:
-            return self.chat(session_id, instruction)
+            return self.chat(session_id, instruction, business_instruction=business_instruction)
 
         events: list[dict[str, Any]] = []
         errors: list[BaseException] = []
 
         def consume_events() -> None:
             try:
-                for event in self.iter_chat_events(session_id, instruction):
+                for event in self.iter_chat_events(session_id, instruction, business_instruction=business_instruction):
                     events.append(event)
             except BaseException as exc:
                 errors.append(exc)
@@ -134,7 +179,17 @@ class RpaClawClient:
         worker = threading.Thread(target=consume_events, name=f"rpa-eval-chat-{session_id}", daemon=True)
         started = time.perf_counter()
         worker.start()
-        worker.join(timeout_s)
+        deadline = started + timeout_s
+        while worker.is_alive() and time.perf_counter() < deadline:
+            worker.join(min(1.0, max(0.0, deadline - time.perf_counter())))
+            if any(str(event.get("event") or "") in TERMINAL_EVENTS for event in events):
+                self.stop_session(session_id, ignore_errors=True)
+                worker.join(5)
+                return events
+        if any(str(event.get("event") or "") in TERMINAL_EVENTS for event in events):
+            self.stop_session(session_id, ignore_errors=True)
+            worker.join(5)
+            return events
         if worker.is_alive():
             elapsed = round(time.perf_counter() - started, 1)
             self.stop_session(session_id, ignore_errors=True)
@@ -151,6 +206,27 @@ class RpaClawClient:
     def get_session(self, session_id: str) -> dict[str, Any]:
         response = self._json_request("GET", f"/api/v1/rpa/session/{session_id}")
         return response.get("session", response)
+
+    def generate_script(self, session_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self._json_request("POST", f"/api/v1/rpa/session/{session_id}/generate", {"params": params or {}})
+
+    def test_script(
+        self,
+        session_id: str,
+        params: dict[str, Any] | None = None,
+        *,
+        timeout_s: float | None = None,
+        setup_navigation: list[str] | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"params": params or {}}
+        if setup_navigation is not None:
+            payload["setup_navigation"] = list(setup_navigation)
+        return self._json_request(
+            "POST",
+            f"/api/v1/rpa/session/{session_id}/test",
+            payload,
+            timeout_s=timeout_s,
+        )
 
     def stop_session(self, session_id: str, *, ignore_errors: bool = False) -> None:
         try:
@@ -184,10 +260,17 @@ class RpaClawClient:
         )
         raise RpaClawError(f"Model '{model_name}' was not found. Available models: {available}")
 
-    def _json_request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _json_request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        timeout_s: float | None = None,
+    ) -> dict[str, Any]:
         req = self._request(method, path, payload)
         try:
-            with request.urlopen(req, timeout=self.timeout_s) as response:
+            with request.urlopen(req, timeout=timeout_s or self.timeout_s) as response:
                 raw = response.read().decode("utf-8")
         except error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
@@ -195,7 +278,7 @@ class RpaClawClient:
         except error.URLError as exc:
             raise RpaClawError(f"{method} {path} failed: {exc.reason}") from exc
         except TimeoutError as exc:
-            raise RpaClawError(f"{method} {path} timed out after {self.timeout_s}s") from exc
+            raise RpaClawError(f"{method} {path} timed out after {timeout_s or self.timeout_s}s") from exc
         return json.loads(raw or "{}")
 
     def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> request.Request:
@@ -208,6 +291,33 @@ class RpaClawClient:
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         return request.Request(f"{self.base_url}{path}", data=body, headers=headers, method=method)
+
+
+def active_tab_url(tabs_response: dict[str, Any]) -> str:
+    tabs = tabs_response.get("tabs") if isinstance(tabs_response, dict) else None
+    active_tab_id = str(tabs_response.get("active_tab_id") or "") if isinstance(tabs_response, dict) else ""
+    if not isinstance(tabs, list):
+        return ""
+    for tab in tabs:
+        if not isinstance(tab, dict):
+            continue
+        tab_id = str(tab.get("id") or tab.get("tab_id") or "")
+        if active_tab_id and tab_id != active_tab_id:
+            continue
+        return str(tab.get("url") or "")
+    return ""
+
+
+def urls_match(actual: str, expected: str) -> bool:
+    if not actual or not expected:
+        return False
+    actual_parts = urlparse(actual)
+    expected_parts = urlparse(expected)
+    return (
+        actual_parts.scheme == expected_parts.scheme
+        and actual_parts.netloc == expected_parts.netloc
+        and actual_parts.path.rstrip("/") == expected_parts.path.rstrip("/")
+    )
 
 
 def parse_sse_lines(lines: Iterable[str], *, stop_on_terminal: bool = False) -> Iterable[dict[str, Any]]:
