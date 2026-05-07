@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import base64
+import copy
 import logging
 import os
 import secrets
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from dotenv import dotenv_values, set_key
@@ -97,18 +98,22 @@ class CredentialVault:
         from backend.storage import get_repository
 
         repo = get_repository("credentials")
+        kind = data.kind or "basic"
 
         cred = Credential(
+            kind=kind,
             name=data.name,
-            username=data.username,
-            encrypted_password=self.encrypt(data.password),
-            domain=data.domain,
+            description=data.description,
+            username=data.username if kind == "basic" else "",
+            encrypted_password=self.encrypt(data.password) if kind == "basic" else "",
+            domain=data.domain if kind == "basic" else "",
+            model_auth=self._prepare_model_auth_for_storage(data.model_auth) if kind == "model_auth" else None,
             user_id=user_id,
         )
         doc = cred.model_dump()
         doc["_id"] = doc.pop("id")
         await repo.insert_one(doc)
-        return CredentialResponse(**{**doc, "id": doc["_id"]})
+        return self._response_from_doc(doc)
 
     async def list_for_user(self, user_id: str) -> List[CredentialResponse]:
         from backend.storage import get_repository
@@ -119,7 +124,7 @@ class CredentialVault:
             {"user_id": user_id},
             sort=[("created_at", -1)],
         )
-        return [CredentialResponse(**{**d, "id": d["_id"]}) for d in docs]
+        return [self._response_from_doc(d) for d in docs]
 
     async def update(
         self, user_id: str, cred_id: str, data: CredentialUpdate
@@ -135,16 +140,21 @@ class CredentialVault:
         updates: dict = {"updated_at": datetime.now()}
         if data.name is not None:
             updates["name"] = data.name
+        if data.description is not None:
+            updates["description"] = data.description
         if data.username is not None:
             updates["username"] = data.username
         if data.password:
             updates["encrypted_password"] = self.encrypt(data.password)
         if data.domain is not None:
             updates["domain"] = data.domain
+        if data.model_auth is not None:
+            updates["kind"] = "model_auth"
+            updates["model_auth"] = self._prepare_model_auth_for_storage(data.model_auth, existing.get("model_auth"))
 
         await repo.update_one({"_id": cred_id}, {"$set": updates})
         doc = await repo.find_one({"_id": cred_id})
-        return CredentialResponse(**{**doc, "id": doc["_id"]}) if doc else None
+        return self._response_from_doc(doc) if doc else None
 
     async def delete(self, user_id: str, cred_id: str) -> bool:
         from backend.storage import get_repository
@@ -176,6 +186,98 @@ class CredentialVault:
             "password": self.decrypt(doc["encrypted_password"]),
             "domain": str(doc.get("domain") or ""),
         }
+
+    async def resolve_model_auth(self, user_id: str, cred_id: str) -> Optional[dict[str, Any]]:
+        """Return a model_auth credential with sensitive variables decrypted."""
+        from backend.storage import get_repository
+
+        repo = get_repository("credentials")
+        doc = await repo.find_one({"_id": cred_id, "user_id": user_id})
+        if not doc or doc.get("kind", "basic") != "model_auth":
+            return None
+        model_auth = copy.deepcopy(doc.get("model_auth") or {})
+        variables = model_auth.get("variables") or {}
+        resolved_variables: dict[str, dict[str, Any]] = {}
+        for name, raw in variables.items():
+            item = raw if isinstance(raw, dict) else {}
+            if item.get("sensitive"):
+                encrypted_value = str(item.get("encrypted_value") or "")
+                resolved_variables[str(name)] = {
+                    "sensitive": True,
+                    "value": self.decrypt(encrypted_value) if encrypted_value else "",
+                    "has_value": bool(encrypted_value),
+                }
+            else:
+                resolved_variables[str(name)] = {
+                    "sensitive": False,
+                    "value": str(item.get("value") or ""),
+                    "has_value": True,
+                }
+        model_auth["variables"] = resolved_variables
+        return model_auth
+
+    def _response_from_doc(self, doc: dict) -> CredentialResponse:
+        payload = {**doc, "id": doc["_id"]}
+        if payload.get("kind", "basic") == "model_auth":
+            payload["model_auth"] = self._public_model_auth(payload.get("model_auth") or {})
+            payload["username"] = payload.get("username") or ""
+            payload["domain"] = payload.get("domain") or ""
+        return CredentialResponse(**payload)
+
+    def _prepare_model_auth_for_storage(
+        self,
+        model_auth: dict[str, Any] | None,
+        existing: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        prepared = copy.deepcopy(model_auth or {})
+        existing_variables = (existing or {}).get("variables") or {}
+        variables = prepared.get("variables") or {}
+        stored_variables: dict[str, dict[str, Any]] = {}
+        for name, raw in variables.items():
+            key = str(name).strip()
+            if not key:
+                continue
+            item = raw if isinstance(raw, dict) else {"value": raw}
+            sensitive = bool(item.get("sensitive"))
+            if sensitive:
+                value = item.get("value")
+                if value is not None and str(value) != "":
+                    encrypted_value = self.encrypt(str(value))
+                else:
+                    existing_item = existing_variables.get(key) if isinstance(existing_variables, dict) else None
+                    encrypted_value = str((existing_item or {}).get("encrypted_value") or "")
+                stored_variables[key] = {
+                    "sensitive": True,
+                    "encrypted_value": encrypted_value,
+                    "has_value": bool(encrypted_value),
+                }
+            else:
+                stored_variables[key] = {
+                    "sensitive": False,
+                    "value": str(item.get("value") or ""),
+                }
+        prepared["variables"] = stored_variables
+        return prepared
+
+    def _public_model_auth(self, model_auth: dict[str, Any]) -> dict[str, Any]:
+        public = copy.deepcopy(model_auth or {})
+        variables = public.get("variables") or {}
+        public_variables: dict[str, dict[str, Any]] = {}
+        for name, raw in variables.items():
+            item = raw if isinstance(raw, dict) else {}
+            if item.get("sensitive"):
+                public_variables[str(name)] = {
+                    "sensitive": True,
+                    "has_value": bool(item.get("encrypted_value") or item.get("has_value")),
+                }
+            else:
+                public_variables[str(name)] = {
+                    "sensitive": False,
+                    "value": str(item.get("value") or ""),
+                    "has_value": True,
+                }
+        public["variables"] = public_variables
+        return public
 
 
 async def inject_credentials(user_id: str, params: dict, kwargs: dict) -> dict:

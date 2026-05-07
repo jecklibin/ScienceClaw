@@ -17,7 +17,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from backend.config import settings
-from backend.deepagent.engine import get_llm_model
+from backend.deepagent.engine import get_llm_model_for_user
 from backend.deepagent.runner import arun_science_task_stream
 from backend.deepagent.sessions import async_create_science_session
 from backend.models import resolve_default_model_config
@@ -262,7 +262,12 @@ async def parse_schedule(
         llm_config = None if "_use_default" in model_cfg else model_cfg
 
     try:
-        llm = get_llm_model(config=llm_config, max_tokens_override=200, streaming=False)
+        llm = await get_llm_model_for_user(
+            config=llm_config,
+            user_id=(llm_config or {}).get("user_id") if llm_config else None,
+            max_tokens_override=200,
+            streaming=False,
+        )
         response = await llm.ainvoke([
             SystemMessage(content=PARSE_SCHEDULE_SYSTEM),
             HumanMessage(content=desc),

@@ -1,4 +1,4 @@
-from typing import Optional, List, Any, Dict
+from typing import Any, Dict, Literal, Optional, List, Union
 from pydantic import BaseModel, Field
 from datetime import datetime
 import uuid
@@ -7,6 +7,78 @@ from loguru import logger
 
 from backend.storage import get_repository
 from backend.config import settings
+
+
+class ModelAuthCredentialRef(BaseModel):
+    alias: str
+    credential_id: str
+    owned_by_model: bool = False
+
+
+class StaticHeadersAuthConfig(BaseModel):
+    version: int = 1
+    type: Literal["static_headers"] = "static_headers"
+    credentials: List[ModelAuthCredentialRef] = Field(default_factory=list)
+    headers: dict[str, str] = Field(default_factory=dict)
+    query: dict[str, str] = Field(default_factory=dict)
+
+
+class TokenRequestConfig(BaseModel):
+    method: Literal["GET", "POST", "PUT", "PATCH"] = "POST"
+    url: str
+    headers: dict[str, str] = Field(default_factory=dict)
+    query: dict[str, str] = Field(default_factory=dict)
+    body_type: Literal["json", "form", "raw"] = "json"
+    body: Any = Field(default_factory=dict)
+
+
+class TokenInjectConfig(BaseModel):
+    headers: dict[str, str] = Field(default_factory=dict)
+    query: dict[str, str] = Field(default_factory=dict)
+    body: dict[str, Any] = Field(default_factory=dict)
+
+
+class DynamicTokenAuthConfig(BaseModel):
+    version: int = 1
+    type: Literal["dynamic_token"] = "dynamic_token"
+    credentials: List[ModelAuthCredentialRef] = Field(default_factory=list)
+    token_request: TokenRequestConfig
+    inject: TokenInjectConfig = Field(default_factory=TokenInjectConfig)
+
+
+ModelAuthConfig = Union[StaticHeadersAuthConfig, DynamicTokenAuthConfig]
+
+
+class StaticHeaderSaveInput(BaseModel):
+    name: str
+    value: Optional[str] = None
+    credential_id: Optional[str] = None
+
+
+class DynamicTokenCredentialSaveInput(BaseModel):
+    alias: str
+    username: Optional[str] = None
+    password: Optional[str] = None
+    domain: Optional[str] = None
+    credential_id: Optional[str] = None
+    name: Optional[str] = None
+
+
+class DynamicTokenSaveInput(BaseModel):
+    credentials: List[DynamicTokenCredentialSaveInput] = Field(default_factory=list)
+    token_request: TokenRequestConfig
+    inject: TokenInjectConfig = Field(default_factory=TokenInjectConfig)
+
+
+class DynamicTokenTestRequest(BaseModel):
+    dynamic_token: DynamicTokenSaveInput
+
+
+class ModelAuthSaveRequest(BaseModel):
+    type: Literal["none", "static_headers", "dynamic_token"] = "none"
+    static_headers: List[StaticHeaderSaveInput] = Field(default_factory=list)
+    dynamic_token: Optional[DynamicTokenSaveInput] = None
+
 
 class ModelConfig(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -22,6 +94,9 @@ class ModelConfig(BaseModel):
     is_system: bool = False
     user_id: Optional[str] = None
     is_active: bool = True
+    auth_credential_id: Optional[str] = None
+    # Legacy inline auth config. New saves should prefer auth_credential_id.
+    auth_config: Optional[ModelAuthConfig] = None
     created_at: int = Field(default_factory=lambda: int(time.time()))
     updated_at: int = Field(default_factory=lambda: int(time.time()))
 
@@ -36,6 +111,8 @@ class CreateModelRequest(BaseModel):
         ge=1024, le=10_000_000,
         description="Model context window in tokens. Leave empty for auto-detection.",
     )
+    auth_config: Optional[ModelAuthSaveRequest] = None
+    auth_credential_id: Optional[str] = None
 
 class UpdateModelRequest(BaseModel):
     name: Optional[str] = None
@@ -48,6 +125,8 @@ class UpdateModelRequest(BaseModel):
         description="Model context window in tokens. Leave empty for auto-detection.",
     )
     is_active: Optional[bool] = None
+    auth_config: Optional[ModelAuthSaveRequest] = None
+    auth_credential_id: Optional[str] = None
 
 async def init_system_models():
     """
@@ -108,10 +187,14 @@ async def resolve_default_model_config(user_id: Optional[str] = None) -> Optiona
     repo = get_repository("models")
     filter_doc: Dict[str, Any] = {
         "is_active": True,
-        "api_key": {"$nin": ["", None]},
+        "$or": [
+            {"api_key": {"$nin": ["", None]}},
+            {"auth_credential_id": {"$nin": ["", None]}},
+            {"auth_config": {"$ne": None}},
+        ],
     }
     if user_id:
-        filter_doc["$or"] = [{"user_id": user_id}, {"is_system": True}]
+        filter_doc["$and"] = [{"$or": [{"user_id": user_id}, {"is_system": True}]}]
     else:
         filter_doc["is_system"] = True
     docs = await repo.find_many(
@@ -129,6 +212,8 @@ async def resolve_default_model_config(user_id: Optional[str] = None) -> Optiona
         "base_url": doc.get("base_url"),
         "api_key": doc.get("api_key"),
         "context_window": doc.get("context_window"),
+        "auth_credential_id": doc.get("auth_credential_id"),
+        "auth_config": doc.get("auth_config"),
         "is_system": bool(doc.get("is_system", False)),
         "user_id": doc.get("user_id"),
         "requested_user_id": user_id,

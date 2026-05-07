@@ -19,9 +19,30 @@ const showModal = ref(false);
 const editingId = ref<string | null>(null);
 const filterText = ref('');
 const showPassword = ref(false);
+const credentialKind = ref<'basic' | 'model_auth'>('basic');
+const modelAuthJson = ref('');
+const modelAuthJsonError = ref('');
+
+const defaultModelAuthJson = `{
+  "type": "static_headers",
+  "config": {
+    "headers": {
+      "Authorization": "Bearer {{ api_key }}"
+    },
+    "query": {}
+  },
+  "variables": {
+    "api_key": {
+      "sensitive": true,
+      "value": ""
+    }
+  }
+}`;
 
 const form = ref<CredentialCreate>({
+  kind: 'basic',
   name: '',
+  description: '',
   username: '',
   password: '',
   domain: '',
@@ -53,7 +74,10 @@ const lastUpdated = computed(() => {
 });
 
 const resetForm = () => {
-  form.value = { name: '', username: '', password: '', domain: '' };
+  credentialKind.value = 'basic';
+  form.value = { kind: 'basic', name: '', description: '', username: '', password: '', domain: '' };
+  modelAuthJson.value = defaultModelAuthJson;
+  modelAuthJsonError.value = '';
   editingId.value = null;
   showModal.value = false;
   showPassword.value = false;
@@ -75,16 +99,35 @@ const load = async () => {
 
 const save = async () => {
   if (!form.value.name) return;
+  let modelAuthPayload = null;
+  if (credentialKind.value === 'model_auth') {
+    try {
+      modelAuthPayload = JSON.parse(modelAuthJson.value || '{}');
+      if (!modelAuthPayload || typeof modelAuthPayload !== 'object' || Array.isArray(modelAuthPayload)) {
+        throw new Error('invalid');
+      }
+      modelAuthJsonError.value = '';
+    } catch {
+      modelAuthJsonError.value = t('Dynamic Token JSON invalid');
+      return;
+    }
+  }
   if (editingId.value) {
     await updateCredential(editingId.value, {
       name: form.value.name,
+      description: form.value.description,
       username: form.value.username,
       password: form.value.password || undefined,
       domain: form.value.domain,
+      model_auth: credentialKind.value === 'model_auth' ? modelAuthPayload : undefined,
     });
   } else {
-    if (!form.value.password) return;
-    await createCredential(form.value);
+    if (credentialKind.value === 'basic' && !form.value.password) return;
+    await createCredential({
+      ...form.value,
+      kind: credentialKind.value,
+      model_auth: credentialKind.value === 'model_auth' ? modelAuthPayload : undefined,
+    });
   }
   resetForm();
   await load();
@@ -92,12 +135,17 @@ const save = async () => {
 
 const startEdit = (cred: Credential) => {
   editingId.value = cred.id;
+  credentialKind.value = cred.kind || 'basic';
   form.value = {
+    kind: cred.kind || 'basic',
     name: cred.name,
+    description: cred.description || '',
     username: cred.username,
     password: '',
     domain: cred.domain,
   };
+  modelAuthJson.value = JSON.stringify(cred.model_auth || JSON.parse(defaultModelAuthJson), null, 2);
+  modelAuthJsonError.value = '';
   showModal.value = true;
 };
 
@@ -189,6 +237,7 @@ onMounted(load);
             <thead>
               <tr class="bg-slate-50/50 dark:bg-white/5">
                 <th class="px-8 py-4 text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-[0.1em]">{{ t('Credential Name') }}</th>
+                <th class="px-8 py-4 text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-[0.1em]">Type</th>
                 <th class="px-8 py-4 text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-[0.1em]">{{ t('Username') }}</th>
                 <th class="px-8 py-4 text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-[0.1em]">{{ t('Domain') }}</th>
                 <th class="px-8 py-4 text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-[0.1em] text-right">{{ t('Actions') }}</th>
@@ -205,8 +254,14 @@ onMounted(load);
                     <div class="w-9 h-9 rounded-lg bg-[#831bd7]/5 flex items-center justify-center text-[#831bd7] group-hover:bg-[#831bd7]/10 transition-colors">
                       <Globe :size="16" />
                     </div>
-                    <span class="font-bold text-gray-900 dark:text-gray-100">{{ cred.name }}</span>
+                    <div>
+                      <div class="font-bold text-gray-900 dark:text-gray-100">{{ cred.name }}</div>
+                      <div v-if="cred.description" class="mt-0.5 text-xs text-slate-400">{{ cred.description }}</div>
+                    </div>
                   </div>
+                </td>
+                <td class="px-8 py-5 text-gray-500 dark:text-gray-400 font-medium">
+                  {{ cred.kind === 'model_auth' ? 'Model Auth' : 'Basic' }}
                 </td>
                 <td class="px-8 py-5 text-gray-500 dark:text-gray-400 font-medium">{{ cred.username }}</td>
                 <td class="px-8 py-5 text-slate-400 dark:text-slate-500 italic">{{ cred.domain || '-' }}</td>
@@ -239,6 +294,17 @@ onMounted(load);
           </div>
           <div class="p-8 space-y-6">
             <div>
+              <label class="block text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2">Type</label>
+              <select
+                v-model="credentialKind"
+                :disabled="!!editingId"
+                class="w-full bg-[#eff1f2] dark:bg-[#2a2a2a] border-none rounded-lg p-3 text-sm focus:ring-2 focus:ring-[#831bd7]/20 outline-none text-gray-900 dark:text-gray-100 transition-colors disabled:opacity-60"
+              >
+                <option value="basic">Basic Credential</option>
+                <option value="model_auth">Model Auth</option>
+              </select>
+            </div>
+            <div>
               <label class="block text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2">{{ t('Credential Name') }}</label>
               <input
                 v-model="form.name"
@@ -246,7 +312,14 @@ onMounted(load);
                 :placeholder="t('Credential name placeholder')"
               />
             </div>
-            <div class="grid grid-cols-2 gap-4">
+            <div v-if="credentialKind === 'model_auth'">
+              <label class="block text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2">Description</label>
+              <input
+                v-model="form.description"
+                class="w-full bg-[#eff1f2] dark:bg-[#2a2a2a] border-none rounded-lg p-3 text-sm focus:ring-2 focus:ring-[#831bd7]/20 outline-none text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 transition-colors"
+              />
+            </div>
+            <div v-if="credentialKind === 'basic'" class="grid grid-cols-2 gap-4">
               <div>
                 <label class="block text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2">{{ t('Username') }}</label>
                 <input
@@ -263,7 +336,7 @@ onMounted(load);
                 />
               </div>
             </div>
-            <div>
+            <div v-if="credentialKind === 'basic'">
               <label class="block text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2">{{ t('Password') }} / Token</label>
               <div class="relative">
                 <input
@@ -281,6 +354,15 @@ onMounted(load);
                   <Eye v-else :size="16" />
                 </button>
               </div>
+            </div>
+            <div v-else>
+              <label class="block text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2">Model Auth JSON</label>
+              <textarea
+                v-model="modelAuthJson"
+                rows="14"
+                class="w-full min-h-[320px] bg-[#eff1f2] dark:bg-[#2a2a2a] border-none rounded-lg p-3 font-mono text-xs focus:ring-2 focus:ring-[#831bd7]/20 outline-none text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 transition-colors"
+              ></textarea>
+              <p v-if="modelAuthJsonError" class="mt-2 text-xs text-red-500">{{ modelAuthJsonError }}</p>
             </div>
           </div>
           <div class="px-8 py-6 bg-slate-50/50 dark:bg-black/20 border-t border-slate-100 dark:border-gray-800 flex justify-end gap-4 transition-colors">

@@ -436,12 +436,13 @@ class RecordingRuntimeAgent:
 
     async def _default_planner(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         from backend.config import settings
-        from backend.deepagent.engine import get_llm_model
+        from backend.deepagent.engine import get_llm_model_for_user
         from langchain_core.messages import HumanMessage, SystemMessage
 
         planner_max_tokens = max(int(getattr(settings, "max_tokens", 0) or 0), _RECORDING_PLANNER_MIN_OUTPUT_TOKENS)
-        model = get_llm_model(
+        model = await get_llm_model_for_user(
             config=self.model_config,
+            user_id=(self.model_config or {}).get("user_id") if self.model_config else None,
             max_tokens_override=planner_max_tokens,
             streaming=False,
         )
@@ -2337,4 +2338,3 @@ def _safe_jsonable(value: Any) -> Any:
         return value
     except Exception:
         return str(value)
-

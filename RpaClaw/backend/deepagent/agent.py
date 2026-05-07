@@ -32,7 +32,7 @@ from loguru import logger
 from backend.deepagent.create_agent import create_rpaclaw_deep_agent
 from deepagents.backends import CompositeBackend, FilesystemBackend
 from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT, DEFAULT_SUBAGENT_PROMPT
-from backend.deepagent.engine import get_llm_model
+from backend.deepagent.engine import get_llm_model, get_llm_model_for_user
 from backend.deepagent.local_preview_backend import LocalPreviewShellBackend
 from backend.deepagent.local_path_backend import LocalPathBackend
 from backend.deepagent.mcp_registry import build_effective_mcp_servers
@@ -505,7 +505,11 @@ async def deep_agent(
     """
     from backend.task_settings import TaskSettings as _TS
     ts: _TS = task_settings or _TS()
-    model = get_llm_model(model_config, max_tokens_override=ts.max_tokens)
+    model = await get_llm_model_for_user(
+        model_config,
+        user_id=user_id,
+        max_tokens_override=ts.max_tokens,
+    )
     context_window = getattr(model, "profile", {}).get("max_input_tokens", 131_072)
 
     blocked_skills = set()

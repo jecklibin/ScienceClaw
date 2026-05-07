@@ -9,7 +9,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from backend.config import settings
-from backend.deepagent.engine import get_llm_model
+from backend.deepagent.engine import get_llm_model_for_user
 from backend.models import resolve_default_model_config
 
 
@@ -78,9 +78,14 @@ class RpaMcpSemanticInferer:
             return None, ""
         model_config = await self._resolve_configured_model(user_id)
         if model_config:
-            return get_llm_model(config=model_config, max_tokens_override=2000, streaming=False), str(model_config.get("model_name") or "")
+            return await get_llm_model_for_user(
+                config=model_config,
+                user_id=user_id or model_config.get("user_id"),
+                max_tokens_override=2000,
+                streaming=False,
+            ), str(model_config.get("model_name") or "")
         if settings.model_ds_api_key:
-            return get_llm_model(config=None, max_tokens_override=2000, streaming=False), settings.model_ds_name
+            return await get_llm_model_for_user(config=None, max_tokens_override=2000, streaming=False), settings.model_ds_name
         return None, ""
 
     async def _resolve_configured_model(self, user_id: str) -> dict[str, Any] | None:
