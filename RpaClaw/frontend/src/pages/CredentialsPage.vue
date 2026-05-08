@@ -284,7 +284,7 @@ onMounted(load);
 
     <!-- Modal Overlay -->
     <Teleport to="body">
-      <div v-if="showModal" class="fixed inset-0 z-[60] bg-slate-900/40 dark:bg-black/60 backdrop-blur-sm flex items-center justify-center p-6" @click.self="resetForm">
+      <div v-if="showModal" class="fixed inset-0 z-[60] bg-slate-900/40 dark:bg-black/60 backdrop-blur-sm flex items-center justify-center p-6">
         <div class="bg-white dark:bg-[#1e1e1e] w-full max-w-xl rounded-2xl shadow-2xl overflow-hidden border border-transparent dark:border-gray-800">
           <div class="p-8 border-b border-slate-100 dark:border-gray-800 flex items-center justify-between">
             <h3 class="text-2xl font-extrabold text-gray-900 dark:text-gray-100">{{ editingId ? t('Edit Credential') : t('New Credential') }}</h3>
