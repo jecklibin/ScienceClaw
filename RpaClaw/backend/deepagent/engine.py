@@ -277,6 +277,7 @@ def _flatten_content(msg: BaseMessage) -> BaseMessage:
 
 
 _THINKING_MODEL_PATTERNS = ("minimax", "kimi", "moonshot")
+_MODEL_AUTH_REFRESH_RETRIES = 3
 
 
 class _SafeChatOpenAI(ChatOpenAI):
@@ -288,6 +289,12 @@ class _SafeChatOpenAI(ChatOpenAI):
        (MiniMax, Kimi, etc.) receive reasoning_content in all assistant
        messages, which they require for multi-turn tool-calling flows.
     """
+
+    auth_refresh_config: Optional[Dict[str, Any]] = None
+    auth_refresh_user_id: Optional[str] = None
+    auth_refresh_max_tokens: Optional[int] = None
+    auth_refresh_streaming: bool = True
+    auth_retry_enabled: bool = False
 
     @property
     def _is_thinking_model(self) -> bool:
@@ -326,6 +333,55 @@ class _SafeChatOpenAI(ChatOpenAI):
             )
         return args, kwargs
 
+    def _is_auth_failure(self, exc: Exception) -> bool:
+        status = getattr(exc, "status_code", None)
+        response = getattr(exc, "response", None)
+        if status is None and response is not None:
+            status = getattr(response, "status_code", None)
+        try:
+            if int(status) in {401, 403}:
+                return True
+        except Exception:
+            pass
+        message = str(exc).lower()
+        return any(
+            marker in message
+            for marker in (
+                "401",
+                "403",
+                "unauthorized",
+                "forbidden",
+                "invalid api key",
+                "invalid_api_key",
+            )
+        )
+
+    def _auth_retry_error(self, attempts: int) -> ValueError:
+        return ValueError(
+            f"模型认证失败，已刷新 Token 并重试 {attempts} 次仍失败，请检查动态 Token 或模型请求认证配置。"
+        )
+
+    async def _fresh_model_for_auth_retry(self, attempt: int) -> Optional[BaseChatModel]:
+        if not self.auth_retry_enabled or not self.auth_refresh_config or not self.auth_refresh_user_id:
+            return None
+        from backend.model_auth import ModelAuthResolver
+
+        retry_config = dict(self.auth_refresh_config)
+        ModelAuthResolver.invalidate_cache_for_model(self.auth_refresh_user_id, retry_config)
+        retry_config["_disable_auth_retry"] = True
+        logger.warning(
+            "[Engine] Model auth failed for model={}, clearing cached token and retrying ({}/{})",
+            retry_config.get("model_name") or getattr(self, "model_name", "?"),
+            attempt,
+            _MODEL_AUTH_REFRESH_RETRIES,
+        )
+        return await get_llm_model_for_user(
+            config=retry_config,
+            user_id=self.auth_refresh_user_id,
+            max_tokens_override=self.auth_refresh_max_tokens,
+            streaming=self.auth_refresh_streaming,
+        )
+
     def _generate(self, messages: List[BaseMessage], stop: Optional[List[str]] = None, run_manager: Any = None, **kwargs: Any):  # type: ignore[override]
         messages = self._ensure_reasoning_content([_flatten_content(m) for m in messages])
         try:
@@ -347,7 +403,22 @@ class _SafeChatOpenAI(ChatOpenAI):
         messages = self._ensure_reasoning_content([_flatten_content(m) for m in messages])
         try:
             return await super()._agenerate(messages, stop=stop, run_manager=run_manager, **kwargs)
-        except ValueError as e:
+        except Exception as e:
+            if self._is_auth_failure(e):
+                last_error: Exception = e
+                for attempt in range(1, _MODEL_AUTH_REFRESH_RETRIES + 1):
+                    fresh_model = await self._fresh_model_for_auth_retry(attempt)
+                    if not fresh_model or not hasattr(fresh_model, "_agenerate"):
+                        break
+                    try:
+                        result = await fresh_model._agenerate(messages, stop=stop, run_manager=run_manager, **kwargs)  # type: ignore[attr-defined]
+                        logger.info("[Engine] Model auth retry succeeded on attempt {}", attempt)
+                        return result
+                    except Exception as retry_error:
+                        last_error = retry_error
+                        if not self._is_auth_failure(retry_error):
+                            raise
+                raise self._auth_retry_error(_MODEL_AUTH_REFRESH_RETRIES) from last_error
             if "No generations found in stream" in str(e):
                 logger.warning(
                     "LLM API returned empty stream (model={}, base_url={}). "
@@ -369,8 +440,27 @@ class _SafeChatOpenAI(ChatOpenAI):
         args, kwargs = self._sanitize_messages(args, kwargs)
         if "stream_options" not in kwargs:
             kwargs["stream_options"] = {"include_usage": True}
-        async for chunk in super()._astream(*args, **kwargs):
-            yield chunk
+        try:
+            async for chunk in super()._astream(*args, **kwargs):
+                yield chunk
+        except Exception as e:
+            if self._is_auth_failure(e):
+                last_error: Exception = e
+                for attempt in range(1, _MODEL_AUTH_REFRESH_RETRIES + 1):
+                    fresh_model = await self._fresh_model_for_auth_retry(attempt)
+                    if not fresh_model or not hasattr(fresh_model, "_astream"):
+                        break
+                    try:
+                        async for chunk in fresh_model._astream(*args, **kwargs):  # type: ignore[attr-defined]
+                            yield chunk
+                        logger.info("[Engine] Model auth stream retry succeeded on attempt {}", attempt)
+                        return
+                    except Exception as retry_error:
+                        last_error = retry_error
+                        if not self._is_auth_failure(retry_error):
+                            raise
+                raise self._auth_retry_error(_MODEL_AUTH_REFRESH_RETRIES) from last_error
+            raise
 
 
 def _apply_profile(model: BaseChatModel, context_window: int) -> BaseChatModel:
@@ -397,6 +487,41 @@ def get_llm_model(
         streaming: 是否用于流式调用。为 True 时附带 stream_options 以获取 token 统计，
                    为 False 时不传 stream_options（某些 API 在非流式调用时不接受该参数）。
     """
+    return _build_llm_model(
+        config=config,
+        max_tokens_override=max_tokens_override,
+        streaming=streaming,
+        resolved_auth=None,
+    )
+
+
+async def get_llm_model_for_user(
+    config: Optional[Dict[str, Any]] = None,
+    user_id: Optional[str] = None,
+    max_tokens_override: Optional[int] = None,
+    streaming: bool = True,
+) -> BaseChatModel:
+    """Build a model client after resolving per-user model auth credentials."""
+    from backend.model_auth import ModelAuthResolver
+
+    effective_config = dict(config or {})
+    if user_id and not effective_config.get("user_id"):
+        effective_config["user_id"] = user_id
+    resolved_auth = await ModelAuthResolver().resolve(effective_config, user_id)
+    return _build_llm_model(
+        config=effective_config,
+        max_tokens_override=max_tokens_override,
+        streaming=streaming,
+        resolved_auth=resolved_auth.model_dump(),
+    )
+
+
+def _build_llm_model(
+    config: Optional[Dict[str, Any]] = None,
+    max_tokens_override: Optional[int] = None,
+    streaming: bool = True,
+    resolved_auth: Optional[Dict[str, Any]] = None,
+) -> BaseChatModel:
     effective_max_tokens = max_tokens_override or settings.max_tokens
 
     # stream_options 仅在流式调用时传递，非流式调用时 API 会拒绝该参数
@@ -413,7 +538,7 @@ def get_llm_model(
         )
 
         if provider == "gemini":
-            api_key = config.get("api_key") or settings.model_ds_api_key
+            api_key = (resolved_auth or {}).get("api_key") or config.get("api_key") or settings.model_ds_api_key
             model = _create_gemini_model(
                 model_name=model_name,
                 api_key=api_key,
@@ -423,14 +548,36 @@ def get_llm_model(
             )
             return _apply_profile(model, ctx_window)
 
+        auth_kwargs: Dict[str, Any] = {}
+        if resolved_auth:
+            default_headers = resolved_auth.get("default_headers") or {}
+            default_query = resolved_auth.get("default_query") or {}
+            default_body = resolved_auth.get("default_body") or {}
+            if default_headers:
+                auth_kwargs["default_headers"] = default_headers
+            if default_query:
+                auth_kwargs["default_query"] = default_query
+            if default_body:
+                auth_kwargs["extra_body"] = default_body
+
         model = _SafeChatOpenAI(
             model=model_name,
             base_url=config.get("base_url") or settings.model_ds_base_url,
-            api_key=config.get("api_key") or settings.model_ds_api_key,
+            api_key=(resolved_auth or {}).get("api_key") or config.get("api_key") or settings.model_ds_api_key or "not-needed",
             max_tokens=effective_max_tokens,
             max_retries=3,
             request_timeout=120,
             model_kwargs=extra_kwargs,
+            auth_refresh_config=dict(config),
+            auth_refresh_user_id=config.get("user_id"),
+            auth_refresh_max_tokens=max_tokens_override,
+            auth_refresh_streaming=streaming,
+            auth_retry_enabled=bool(
+                config.get("user_id")
+                and not config.get("_disable_auth_retry")
+                and (config.get("auth_credential_id") or config.get("auth_config"))
+            ),
+            **auth_kwargs,
         )
         return _apply_profile(model, ctx_window)
 
@@ -441,7 +588,7 @@ def get_llm_model(
     model = _SafeChatOpenAI(
         model=settings.model_ds_name,
         base_url=settings.model_ds_base_url,
-        api_key=settings.model_ds_api_key,
+        api_key=(resolved_auth or {}).get("api_key") or settings.model_ds_api_key or "not-needed",
         max_tokens=effective_max_tokens,
         max_retries=3,
         request_timeout=120,

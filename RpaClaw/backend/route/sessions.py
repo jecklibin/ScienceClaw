@@ -38,7 +38,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from backend.deepagent.engine import get_llm_model
+from backend.deepagent.engine import get_llm_model_for_user
 from backend.deepagent.runner import arun_science_task_stream
 from backend.deepagent.sessions import (
     ScienceSessionNotFoundError,
@@ -220,7 +220,12 @@ def _count_user_messages(events: List[Dict[str, Any]]) -> int:
     )
 
 
-async def _generate_session_title(first_message: str, model_config: Optional[Dict[str, Any]] = None) -> str:
+async def _generate_session_title(
+    first_message: str,
+    *,
+    model_config: Optional[Dict[str, Any]] = None,
+    user_id: Optional[str] = None,
+) -> str:
     """
     Use LLM to generate a short, descriptive chat title from the first user message.
     Returns a fallback if generation fails.
@@ -237,7 +242,12 @@ async def _generate_session_title(first_message: str, model_config: Optional[Dic
         "Output only the title, no quotes, no explanation, no prefix."
     )
     try:
-        llm = get_llm_model(config=model_config, max_tokens_override=60, streaming=False)
+        llm = await get_llm_model_for_user(
+            config=model_config,
+            user_id=user_id,
+            max_tokens_override=60,
+            streaming=False,
+        )
         response = await llm.ainvoke([
             SystemMessage(content=system),
             HumanMessage(content=prompt),
@@ -2002,7 +2012,11 @@ async def _agent_background_worker(
         events = getattr(session, "events", []) or []
         if _count_user_messages(events) <= 1:
             try:
-                gen_title = await _generate_session_title(message, getattr(session, "model_config", None))
+                gen_title = await _generate_session_title(
+                    message,
+                    model_config=getattr(session, "model_config", None),
+                    user_id=str(getattr(session, "user_id", "") or "") or None,
+                )
                 if gen_title:
                     setattr(session, "title", gen_title)
                     await session.save()

@@ -5,7 +5,7 @@ import asyncio
 from typing import Dict, List, Any, AsyncGenerator, Optional, Callable
 
 from playwright.async_api import Page
-from backend.deepagent.engine import get_llm_model
+from backend.deepagent.engine import get_llm_model_for_user
 from backend.rpa.assistant_runtime import (
     build_frame_path_from_frame,
     build_page_snapshot,
@@ -533,7 +533,11 @@ Return the next JSON action."""
         model_config: Optional[Dict[str, Any]] = None,
     ) -> AsyncGenerator[str, None]:
         from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
-        model = get_llm_model(config=model_config, streaming=True)
+        model = await get_llm_model_for_user(
+            config=model_config,
+            user_id=(model_config or {}).get("user_id") if model_config else None,
+            streaming=True,
+        )
         lc_messages = [SystemMessage(content=REACT_SYSTEM_PROMPT)]
         for m in history:
             if m["role"] == "user":
@@ -750,7 +754,11 @@ class RPAAssistant:
         messages: List[Dict[str, str]],
         model_config: Optional[Dict[str, Any]] = None,
     ) -> AsyncGenerator[str, None]:
-        model = get_llm_model(config=model_config, streaming=True)
+        model = await get_llm_model_for_user(
+            config=model_config,
+            user_id=(model_config or {}).get("user_id") if model_config else None,
+            streaming=True,
+        )
         from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
         lc_messages = []
@@ -831,6 +839,5 @@ class RPAAssistant:
 
     async def _execute_on_page(self, page: Page, code: str) -> Dict[str, Any]:
         return await _execute_on_page(page, code)
-
 
 
