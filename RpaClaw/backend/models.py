@@ -95,6 +95,7 @@ class ModelConfig(BaseModel):
     user_id: Optional[str] = None
     is_active: bool = True
     auth_credential_id: Optional[str] = None
+    auth_credential_owned: bool = False
     # Legacy inline auth config. New saves should prefer auth_credential_id.
     auth_config: Optional[ModelAuthConfig] = None
     created_at: int = Field(default_factory=lambda: int(time.time()))

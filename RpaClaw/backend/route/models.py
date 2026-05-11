@@ -265,6 +265,16 @@ def _model_auth_owned_credential_ids(auth_config: Mapping[str, Any] | None) -> s
     return result
 
 
+def _owned_model_auth_credential_ids(model_doc: Mapping[str, Any] | None) -> set[str]:
+    if not model_doc:
+        return set()
+    result = _model_auth_owned_credential_ids(model_doc.get("auth_config"))
+    credential_id = str(model_doc.get("auth_credential_id") or "")
+    if credential_id and model_doc.get("auth_credential_owned"):
+        result.add(credential_id)
+    return result
+
+
 async def _cleanup_credentials(user_id: str, credential_ids: set[str]) -> None:
     vault = get_vault()
     for credential_id in credential_ids:
@@ -670,6 +680,7 @@ async def create_model(body: CreateModelRequest, current_user: User = Depends(re
     auth_config: dict[str, Any] | None = None
     auth_credential_id = (body.auth_credential_id or "").strip() or None
     created_credential_ids: set[str] = set()
+    auth_credential_owned = False
     try:
         if auth_credential_id:
             if not await get_vault().resolve_model_auth(user_id, auth_credential_id):
@@ -683,6 +694,7 @@ async def create_model(body: CreateModelRequest, current_user: User = Depends(re
                 api_key=body.api_key,
                 requested=body.auth_config,
             )
+            auth_credential_owned = bool(auth_credential_id and auth_credential_id in created_credential_ids)
         await verify_model_connection(
             body.provider,
             body.base_url,
@@ -708,6 +720,7 @@ async def create_model(body: CreateModelRequest, current_user: User = Depends(re
         user_id=user_id,
         is_active=True,
         auth_credential_id=auth_credential_id,
+        auth_credential_owned=auth_credential_owned,
         auth_config=auth_config,
         created_at=now,
         updated_at=now
@@ -784,14 +797,18 @@ async def _probe_context_window_via_api(
     default_query: Mapping[str, str] | None = None,
 ) -> int | None:
     """Try to retrieve context window from the provider's /models/{model} endpoint."""
-    if not api_key:
+    headers = dict(default_headers or {})
+    query = dict(default_query or {})
+    if not api_key and not headers and not query:
         return None
     import httpx
     url = (base_url or "https://api.openai.com/v1").rstrip("/")
-    headers = {"Authorization": f"Bearer {api_key}", **dict(default_headers or {})}
+    has_authorization = any(key.lower() == "authorization" for key in headers)
+    if api_key and not has_authorization:
+        headers["Authorization"] = f"Bearer {api_key}"
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(f"{url}/models/{model_name}", headers=headers, params=dict(default_query or {}))
+            resp = await client.get(f"{url}/models/{model_name}", headers=headers, params=query)
             if resp.status_code != 200:
                 return None
             data = resp.json()
@@ -908,6 +925,9 @@ async def update_model(model_id: str, body: UpdateModelRequest, current_user: Us
     merged_provider = existing.get("provider")
     merged_auth_config = existing.get("auth_config")
     merged_auth_credential_id = existing.get("auth_credential_id")
+    existing_auth_credential_id = existing.get("auth_credential_id")
+    existing_auth_credential_owned = bool(existing.get("auth_credential_owned"))
+    merged_auth_credential_owned = existing_auth_credential_owned
     created_credential_ids: set[str] = set()
 
     if auth_credential_was_set:
@@ -916,7 +936,9 @@ async def update_model(model_id: str, body: UpdateModelRequest, current_user: Us
             raise HTTPException(status_code=400, detail="模型认证凭据不存在，请重新选择认证配置")
         merged_auth_credential_id = requested_auth_credential_id
         merged_auth_config = None
+        merged_auth_credential_owned = False
         update_data["auth_credential_id"] = merged_auth_credential_id
+        update_data["auth_credential_owned"] = False
         update_data["auth_config"] = None
     elif auth_config_was_set:
         requested_model = body.auth_config
@@ -929,7 +951,11 @@ async def update_model(model_id: str, body: UpdateModelRequest, current_user: Us
             requested=requested_model,
         )
         merged_auth_config = None
+        merged_auth_credential_owned = bool(
+            merged_auth_credential_id and merged_auth_credential_id in created_credential_ids
+        )
         update_data["auth_credential_id"] = merged_auth_credential_id
+        update_data["auth_credential_owned"] = merged_auth_credential_owned
         update_data["auth_config"] = None
 
     if merged_provider != "gemini" and merged_auth_credential_id:
@@ -958,10 +984,20 @@ async def update_model(model_id: str, body: UpdateModelRequest, current_user: Us
         {"$set": update_data}
     )
 
-    if auth_config_was_set:
-        old_ids = _model_auth_owned_credential_ids(existing.get("auth_config"))
-        new_ids = _model_auth_owned_credential_ids(merged_auth_config)
-        await _cleanup_credentials(user_id, old_ids - new_ids)
+    replaced_auth_credential = (
+        existing_auth_credential_id
+        and existing_auth_credential_owned
+        and (
+            str(existing_auth_credential_id) != str(merged_auth_credential_id or "")
+            or not merged_auth_credential_owned
+        )
+    )
+    if auth_config_was_set or auth_credential_was_set or replaced_auth_credential:
+        cleanup_ids = _model_auth_owned_credential_ids(existing.get("auth_config"))
+        if replaced_auth_credential:
+            cleanup_ids.add(str(existing_auth_credential_id))
+        cleanup_ids -= _model_auth_owned_credential_ids(merged_auth_config)
+        await _cleanup_credentials(user_id, cleanup_ids)
     
     return ApiResponse(data={"id": model_id})
 
@@ -982,5 +1018,5 @@ async def delete_model(model_id: str, current_user: User = Depends(require_user)
             raise HTTPException(status_code=403, detail="Cannot delete this model")
 
     await get_repository("models").delete_one({"_id": model_id})
-    await _cleanup_credentials(user_id, _model_auth_owned_credential_ids(existing.get("auth_config")))
+    await _cleanup_credentials(user_id, _owned_model_auth_credential_ids(existing))
     return ApiResponse(data={"ok": True})

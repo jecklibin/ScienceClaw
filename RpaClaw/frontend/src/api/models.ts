@@ -12,6 +12,7 @@ export interface ModelConfig {
   user_id?: string;
   is_active: boolean;
   auth_credential_id?: string | null;
+  auth_credential_owned?: boolean;
   auth_config?: ModelAuthConfig | null;
   created_at: number;
   updated_at: number;

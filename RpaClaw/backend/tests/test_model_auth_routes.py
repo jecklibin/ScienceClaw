@@ -45,6 +45,9 @@ class FakeRepo:
         self.update_filter = query
         self.update_doc = update
 
+    async def delete_one(self, query):
+        self.delete_filter = query
+
 
 def test_prepare_auth_config_stores_static_header_values_in_vault(monkeypatch):
     vault = FakeVault()
@@ -263,6 +266,7 @@ def test_update_model_replaces_static_header_and_cleans_removed_credentials(monk
     assert [item["data"].kind for item in vault.created] == ["model_auth"]
     assert set(vault.deleted) == {("user-1", "cred-old"), ("user-1", "cred-remove")}
     assert repo.update_doc["$set"]["auth_credential_id"] == "cred-new-1"
+    assert repo.update_doc["$set"]["auth_credential_owned"] is True
     assert repo.update_doc["$set"]["auth_config"] is None
     saved_model_auth = vault.created[0]["data"].model_auth
     assert saved_model_auth["config"]["headers"] == {"Authorization": "{{ authorization }}"}
@@ -312,7 +316,148 @@ def test_update_model_none_auth_converts_existing_api_key_to_model_auth(monkeypa
 
     assert repo.update_doc["$set"]["auth_config"] is None
     assert repo.update_doc["$set"]["auth_credential_id"] == "cred-new-1"
+    assert repo.update_doc["$set"]["auth_credential_owned"] is True
     assert vault.created[0]["data"].model_auth["config"]["headers"] == {
         "Authorization": "Bearer {{ api_key }}"
     }
     assert vault.deleted == [("user-1", "cred-old")]
+
+
+def test_update_model_replaces_owned_model_auth_credential_and_keeps_shared_credentials(monkeypatch):
+    vault = FakeVault()
+    repo = FakeRepo(
+        {
+            "_id": "model-1",
+            "name": "Company GPT",
+            "provider": "openai",
+            "base_url": "https://model.example/v1",
+            "api_key": None,
+            "model_name": "company-gpt",
+            "is_system": False,
+            "user_id": "user-1",
+            "auth_credential_id": "cred-owned-old",
+            "auth_credential_owned": True,
+            "auth_config": None,
+        }
+    )
+
+    async def fake_verify(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(model_routes, "get_vault", lambda: vault)
+    monkeypatch.setattr(model_routes, "get_repository", lambda name: repo)
+    monkeypatch.setattr(model_routes, "verify_model_connection", fake_verify)
+
+    run(
+        model_routes.update_model(
+            "model-1",
+            UpdateModelRequest(auth_credential_id="cred-shared"),
+            current_user=SimpleNamespace(id="user-1", role="user"),
+        )
+    )
+
+    assert repo.update_doc["$set"]["auth_credential_id"] == "cred-shared"
+    assert repo.update_doc["$set"]["auth_credential_owned"] is False
+    assert vault.deleted == [("user-1", "cred-owned-old")]
+
+
+def test_update_model_does_not_delete_existing_shared_model_auth_credential(monkeypatch):
+    vault = FakeVault()
+    repo = FakeRepo(
+        {
+            "_id": "model-1",
+            "name": "Company GPT",
+            "provider": "openai",
+            "base_url": "https://model.example/v1",
+            "api_key": None,
+            "model_name": "company-gpt",
+            "is_system": False,
+            "user_id": "user-1",
+            "auth_credential_id": "cred-shared-old",
+            "auth_credential_owned": False,
+            "auth_config": None,
+        }
+    )
+
+    async def fake_verify(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(model_routes, "get_vault", lambda: vault)
+    monkeypatch.setattr(model_routes, "get_repository", lambda name: repo)
+    monkeypatch.setattr(model_routes, "verify_model_connection", fake_verify)
+
+    run(
+        model_routes.update_model(
+            "model-1",
+            UpdateModelRequest(auth_credential_id="cred-shared-new"),
+            current_user=SimpleNamespace(id="user-1", role="user"),
+        )
+    )
+
+    assert repo.update_doc["$set"]["auth_credential_id"] == "cred-shared-new"
+    assert repo.update_doc["$set"]["auth_credential_owned"] is False
+    assert vault.deleted == []
+
+
+def test_delete_model_cleans_only_owned_model_auth_credential(monkeypatch):
+    vault = FakeVault()
+    repo = FakeRepo(
+        {
+            "_id": "model-1",
+            "name": "Company GPT",
+            "provider": "openai",
+            "base_url": "https://model.example/v1",
+            "api_key": None,
+            "model_name": "company-gpt",
+            "is_system": False,
+            "user_id": "user-1",
+            "auth_credential_id": "cred-owned",
+            "auth_credential_owned": True,
+            "auth_config": None,
+        }
+    )
+
+    monkeypatch.setattr(model_routes, "get_vault", lambda: vault)
+    monkeypatch.setattr(model_routes, "get_repository", lambda name: repo)
+
+    run(
+        model_routes.delete_model(
+            "model-1",
+            current_user=SimpleNamespace(id="user-1", role="user"),
+        )
+    )
+
+    assert repo.delete_filter == {"_id": "model-1"}
+    assert vault.deleted == [("user-1", "cred-owned")]
+
+
+def test_delete_model_keeps_shared_model_auth_credential(monkeypatch):
+    vault = FakeVault()
+    repo = FakeRepo(
+        {
+            "_id": "model-1",
+            "name": "Company GPT",
+            "provider": "openai",
+            "base_url": "https://model.example/v1",
+            "api_key": None,
+            "model_name": "company-gpt",
+            "is_system": False,
+            "user_id": "user-1",
+            "auth_credential_id": "cred-shared",
+            "auth_credential_owned": False,
+            "auth_config": None,
+        }
+    )
+
+    monkeypatch.setattr(model_routes, "get_vault", lambda: vault)
+    monkeypatch.setattr(model_routes, "get_repository", lambda name: repo)
+
+    run(
+        model_routes.delete_model(
+            "model-1",
+            current_user=SimpleNamespace(id="user-1", role="user"),
+        )
+    )
+
+    assert repo.delete_filter == {"_id": "model-1"}
+    assert vault.deleted == []

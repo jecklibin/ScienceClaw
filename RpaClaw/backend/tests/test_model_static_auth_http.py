@@ -46,8 +46,30 @@ def test_context_window_probe_sends_static_auth_headers_over_http(monkeypatch):
     assert result == 8192
     assert server.requests[0]["method"] == "GET"
     assert server.requests[0]["path"] == f"/v1/models/{MOCK_STATIC_MODEL}"
-    assert server.requests[0]["headers"]["Authorization"] == "Bearer static-token"
-    assert server.requests[0]["headers"]["X-Tenant"] == "tenant-a"
+    assert server.requests[0]["headers"]["Authorization"] == STATIC_AUTH_HEADERS["Authorization"]
+    assert server.requests[0]["headers"]["X-Gateway-Token"] == STATIC_AUTH_HEADERS["X-Gateway-Token"]
+    assert server.requests[0]["headers"]["X-Tenant"] == STATIC_AUTH_HEADERS["X-Tenant"]
+
+
+def test_context_window_probe_allows_resolved_auth_without_api_key(monkeypatch):
+    disable_proxy_env(monkeypatch)
+
+    with ModelAuthMockServer() as server:
+        result = run(
+            _probe_context_window_via_api(
+                server.base_url,
+                None,
+                MOCK_STATIC_MODEL,
+                default_headers=STATIC_AUTH_HEADERS,
+            )
+        )
+
+    assert result == 8192
+    assert server.requests[0]["method"] == "GET"
+    assert server.requests[0]["path"] == f"/v1/models/{MOCK_STATIC_MODEL}"
+    assert server.requests[0]["headers"]["Authorization"] == STATIC_AUTH_HEADERS["Authorization"]
+    assert server.requests[0]["headers"]["X-Gateway-Token"] == STATIC_AUTH_HEADERS["X-Gateway-Token"]
+    assert server.requests[0]["headers"]["X-Tenant"] == STATIC_AUTH_HEADERS["X-Tenant"]
 
 
 def test_chat_model_sends_static_auth_headers_over_http(monkeypatch):
@@ -75,5 +97,6 @@ def test_chat_model_sends_static_auth_headers_over_http(monkeypatch):
     post_requests = [item for item in server.requests if item["method"] == "POST"]
     assert len(post_requests) == 1
     assert post_requests[0]["path"] == "/v1/chat/completions"
-    assert post_requests[0]["headers"]["Authorization"] == "Bearer static-token"
-    assert post_requests[0]["headers"]["X-Tenant"] == "tenant-a"
+    assert post_requests[0]["headers"]["Authorization"] == STATIC_AUTH_HEADERS["Authorization"]
+    assert post_requests[0]["headers"]["X-Gateway-Token"] == STATIC_AUTH_HEADERS["X-Gateway-Token"]
+    assert post_requests[0]["headers"]["X-Tenant"] == STATIC_AUTH_HEADERS["X-Tenant"]
