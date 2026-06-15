@@ -174,6 +174,7 @@ class RPASessionManager:
         self._manual_harness_checkpoint_candidates: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self._harness_page_baselines: Dict[str, Dict[str, HarnessCapturedPageState]] = {}
         self._suppressed_navigation_events: Dict[str, Dict[str, str]] = {}
+        self._explicit_navigation_trace_ids: Dict[str, Dict[str, str]] = {}
 
     def touch_session(self, session_id: str) -> None:
         session = self.sessions.get(session_id)
@@ -270,6 +271,7 @@ class RPASessionManager:
         self._manual_harness_checkpoint_candidates.pop(session_id, None)
         self._harness_page_baselines.pop(session_id, None)
         self._suppressed_navigation_events.pop(session_id, None)
+        self._explicit_navigation_trace_ids.pop(session_id, None)
 
         session = self.sessions.get(session_id)
         if session:
@@ -715,9 +717,17 @@ class RPASessionManager:
                 else after_page
             ),
             value=normalized_url,
-            signals={"tab": {"tab_id": session.active_tab_id}},
+            signals={
+                "tab": {"tab_id": session.active_tab_id},
+                "navigation": {
+                    "target_url": normalized_url,
+                    "observed_url": after_page.url,
+                    "redirected": not self._navigation_urls_match(after_page.url, normalized_url),
+                },
+            },
         )
         await self.append_trace(session_id, trace)
+        self._explicit_navigation_trace_ids.setdefault(session_id, {})[session.active_tab_id] = trace.trace_id
         if harness_before_state is not None and after_state is not None:
             await self.capture_harness_step_checkpoint(
                 session_id,
@@ -740,6 +750,50 @@ class RPASessionManager:
     @staticmethod
     def _navigation_urls_match(left: str, right: str) -> bool:
         return str(left or "").rstrip("/") == str(right or "").rstrip("/")
+
+    def _fold_explicit_navigation_redirect(self, session_id: str, evt: Dict[str, Any]) -> bool:
+        tab_id = evt.get("tab_id")
+        event_url = str(evt.get("url") or "")
+        if not tab_id or not event_url:
+            return False
+
+        trace_id = self._explicit_navigation_trace_ids.get(session_id, {}).get(str(tab_id))
+        if not trace_id:
+            return False
+
+        session = self.sessions.get(session_id)
+        if not session:
+            return False
+
+        trace = next((candidate for candidate in reversed(session.traces) if candidate.trace_id == trace_id), None)
+        if not trace or trace.trace_type != RPATraceType.NAVIGATION or trace.action != "navigate":
+            self._clear_explicit_navigation_trace(session_id, tab_id)
+            return False
+
+        trace.after_page = RPAPageState(
+            url=event_url,
+            title=trace.after_page.title,
+            snapshot_summary=trace.after_page.snapshot_summary,
+        )
+        signals = dict(trace.signals or {})
+        navigation_signal = dict(signals.get("navigation") or {})
+        target_url = str(navigation_signal.get("target_url") or trace.value or "")
+        navigation_signal["target_url"] = target_url
+        navigation_signal["observed_url"] = event_url
+        navigation_signal["redirected"] = not self._navigation_urls_match(event_url, target_url)
+        signals["navigation"] = navigation_signal
+        trace.signals = signals
+        return True
+
+    def _clear_explicit_navigation_trace(self, session_id: str, tab_id: Any) -> None:
+        if not tab_id:
+            return
+        pending = self._explicit_navigation_trace_ids.get(session_id)
+        if not pending:
+            return
+        pending.pop(str(tab_id), None)
+        if not pending:
+            self._explicit_navigation_trace_ids.pop(session_id, None)
 
     async def activate_tab(self, session_id: str, tab_id: str, source: str = "auto"):
         page = self._tabs.get(session_id, {}).get(tab_id)
@@ -1861,6 +1915,8 @@ class RPASessionManager:
                 await self.activate_tab(session_id, event_tab_id, source="event")
 
         if evt.get("action") == "navigate":
+            if self._fold_explicit_navigation_redirect(session_id, evt):
+                return
             self._clear_pending_hover_candidates(session_id)
             nav_ts = evt.get("timestamp", 0)
             nav_sequence = evt.get("sequence")
@@ -1937,6 +1993,8 @@ class RPASessionManager:
                         logger.debug(f"[RPA] Preserving nav after {last_step.action}: {evt.get('url', '')[:60]}")
 
             self._attach_harness_navigation_baseline(session_id, evt)
+        else:
+            self._clear_explicit_navigation_trace(session_id, event_tab_id or session.active_tab_id)
 
         self._normalize_event_locator_payload(evt)
 

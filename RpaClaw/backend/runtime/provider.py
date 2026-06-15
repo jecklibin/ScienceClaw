@@ -16,6 +16,18 @@ class RuntimeProvider(Protocol):
 
 def build_runtime_provider(settings) -> RuntimeProvider:
     runtime_mode = getattr(settings, "runtime_mode", "shared")
+    if runtime_mode == "aio":
+        from backend.runtime.aio_runtime_provider import AioApiRuntimeProvider
+
+        return AioApiRuntimeProvider(settings)
+    if runtime_mode == "aio_native":
+        from backend.runtime.aio_runtime_provider import AioNativeRuntimeProvider
+
+        return AioNativeRuntimeProvider(settings)
+    if runtime_mode == "aio_fixed":
+        from backend.runtime.aio_runtime_provider import AioRuntimeProvider
+
+        return AioRuntimeProvider(settings)
     if runtime_mode == "docker":
         from backend.runtime.docker_runtime_provider import DockerRuntimeProvider
 

@@ -209,6 +209,55 @@ class Settings(BaseSettings):
     runtime_image: str = os.environ.get("SESSION_SANDBOX_IMAGE", "rpaclaw-sandbox:local")
     runtime_service_port: int = int(os.environ.get("SESSION_SANDBOX_PORT", "8080"))
     runtime_wait_timeout_seconds: int = int(os.environ.get("RUNTIME_WAIT_TIMEOUT_SECONDS", "30"))
+    aio_runtime_sandbox_id: str = os.environ.get("AIO_RUNTIME_SANDBOX_ID", "")
+    aio_native_base_url: str = (
+        os.environ.get("AIO_BASE_URL")
+        or os.environ.get("AIO_NATIVE_BASE_URL")
+        or ""
+    )
+    aio_native_api_base_url: str = os.environ.get("AIO_NATIVE_API_BASE_URL", "")
+    aio_native_api_token: str = os.environ.get("AIO_NATIVE_API_TOKEN", "")
+    aio_native_template_id: str = os.environ.get("AIO_NATIVE_TEMPLATE_ID", "")
+    aio_native_refresh_duration_seconds: int = int(
+        os.environ.get("AIO_NATIVE_REFRESH_DURATION_SECONDS", "300")
+    )
+    aio_native_create_path: str = os.environ.get(
+        "AIO_NATIVE_CREATE_PATH",
+        "/api/livefunction/sandboxes",
+    )
+    aio_native_status_path_template: str = os.environ.get(
+        "AIO_NATIVE_STATUS_PATH_TEMPLATE",
+        "/api/livefunction/sandboxes/{sandbox_id}",
+    )
+    aio_native_delete_path_template: str = os.environ.get(
+        "AIO_NATIVE_DELETE_PATH_TEMPLATE",
+        "/api/livefunction/sandboxes/{sandbox_id}",
+    )
+    aio_native_refresh_path_template: str = os.environ.get(
+        "AIO_NATIVE_REFRESH_PATH_TEMPLATE",
+        "/api/livefunction/sandboxes/refresh/{sandbox_id}",
+    )
+    aio_runtime_route_base_url: str = os.environ.get("AIO_RUNTIME_ROUTE_BASE_URL", "")
+    aio_runtime_browser_view_url: str = os.environ.get("AIO_RUNTIME_BROWSER_VIEW_URL", "")
+    aio_runtime_token: str = os.environ.get("AIO_RUNTIME_TOKEN", "")
+    aio_runtime_api_base_url: str = os.environ.get("AIO_RUNTIME_API_BASE_URL", "")
+    aio_runtime_api_token: str = os.environ.get("AIO_RUNTIME_API_TOKEN", "")
+    aio_runtime_image: str = os.environ.get("AIO_RUNTIME_IMAGE", "")
+    aio_runtime_create_extra_json: str = os.environ.get("AIO_RUNTIME_CREATE_EXTRA_JSON", "")
+    aio_runtime_adapter_env: str = os.environ.get("AIO_RUNTIME_ADAPTER_ENV", "")
+    aio_runtime_create_path: str = os.environ.get("AIO_RUNTIME_CREATE_PATH", "/v1/sandboxes")
+    aio_runtime_status_path_template: str = os.environ.get(
+        "AIO_RUNTIME_STATUS_PATH_TEMPLATE",
+        "/v1/sandboxes/{sandbox_id}",
+    )
+    aio_runtime_delete_path_template: str = os.environ.get(
+        "AIO_RUNTIME_DELETE_PATH_TEMPLATE",
+        "/v1/sandboxes/{sandbox_id}",
+    )
+    aio_runtime_namespace: str = os.environ.get("AIO_RUNTIME_NAMESPACE", "aio")
+    aio_runtime_ttl_seconds: int = int(
+        os.environ.get("AIO_RUNTIME_TTL_SECONDS", str(runtime_idle_ttl_seconds))
+    )
     docker_runtime_network: str = os.environ.get("DOCKER_RUNTIME_NETWORK", "rpaclaw_default")
     docker_runtime_volumes_from: str = os.environ.get("DOCKER_RUNTIME_VOLUMES_FROM", "")
     docker_runtime_shm_size: str = os.environ.get("DOCKER_RUNTIME_SHM_SIZE", "2gb")

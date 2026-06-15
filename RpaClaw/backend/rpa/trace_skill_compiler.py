@@ -257,6 +257,17 @@ class TraceSkillCompiler:
         return str(url or "").strip().rstrip("/")
 
     @staticmethod
+    def _navigation_replay_target_url(trace: RPAAcceptedTrace) -> str:
+        navigation_signal = _trace_signal(trace, "navigation")
+        signal_target = str(navigation_signal.get("target_url") or "").strip()
+        if signal_target:
+            return signal_target
+        trace_value = str(trace.value or "").strip()
+        if trace_value:
+            return trace_value
+        return str(trace.after_page.url or "").strip()
+
+    @staticmethod
     def _helper_dependency_map() -> Dict[str, List[str]]:
         return {
             "_trace_start": ["_trace_emit"],
@@ -762,7 +773,7 @@ class TraceSkillCompiler:
         trace: RPAAcceptedTrace,
         previous_traces: List[RPAAcceptedTrace],
     ) -> List[str]:
-        url = trace.after_page.url or str(trace.value or "")
+        url = self._navigation_replay_target_url(trace)
         dynamic = self._dynamic_url_expression(url, previous_traces)
         lines = ["", f"    # trace {index}: {trace.description or 'navigation'}"]
         if dynamic:

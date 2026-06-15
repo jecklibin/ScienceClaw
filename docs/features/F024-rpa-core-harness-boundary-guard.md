@@ -3,7 +3,7 @@ id: F024
 doc_kind: feature
 status: review
 created: 2026-06-02
-updated: 2026-06-03
+updated: 2026-06-15
 ---
 
 # F024: RPA Core / Harness Boundary Guard
@@ -55,6 +55,8 @@ updated: 2026-06-03
 | F024.6 | 2026-06-03 | pending | 开启 Full SOP Harness capture 后，生成 Skill 最前面多出 `click body`，导致后续业务步骤编号/时序与未开启 Harness 的脚本不一致；弱 `textbox nth=0` 输入在回放中表现为查询条件未生效。 | 录制入口把启动阶段的无副作用 `body/html` focus click 当成业务 click 写入 Core accepted timeline；既有去噪只覆盖紧贴 fill 的 focus click，无法处理导航前的初始噪声点击。 | Core event 入口仅在 session 尚无 step/trace/recorded action 且点击目标为 `body/html`、无 download/navigation/popup/tab 等副作用证据时丢弃该点击；新增 `test_full_sop_harness_ignores_pre_navigation_body_click_noise`，并跑完整 manager、trace compiler、route trace 回归。 | done |
 
 | F024.7 | 2026-06-03 | pending | Explicit `navigate_active_tab()` with a redirect could record two accepted navigation facts: one from `framenavigated` and one from the explicit navigation trace. | The event suppressor matched only the requested URL. Redirected final URLs escaped suppression during the explicit navigation window. | Core now suppresses all main-frame navigation events for the active tab while explicit `page.goto()` is in flight; the explicit trace records the final `after_page.url`. Added redirect regression plus manager/compiler/route focused checks. | done |
+| F024.8 | 2026-06-15 | pending | Explicit URL navigation that redirects to SSO can compile replay code that starts from the observed login URL instead of the original business entry URL; random login nonce/state then breaks replay. | `TraceSkillCompiler._render_navigation_trace()` treated `trace.after_page.url` as the `page.goto()` target. That preserved trace-first observed facts, but mixed replay intent with post-navigation browser state. | Keep `after_page.url` as recorded fact, add explicit `signals.navigation.target_url/observed_url/redirected` evidence for `navigate_active_tab()`, and make standalone navigation replay prefer `signals.navigation.target_url` / `trace.value` before falling back to `after_page.url`. Focused compiler, manager, and SOP->Skill e2e regressions passed. | done |
+| F024.9 | 2026-06-15 | pending | RPA page address-bar navigation through an SSO chain could still record late login redirect URLs as standalone navigation traces with empty `value`, so generated Skill replay still started from random login URLs. | `navigate_active_tab()` suppressed synchronous `framenavigated` events only while `page.goto()` was in flight. SSO chains can continue after `domcontentloaded`, so the late main-frame redirect escaped the explicit navigation window and entered the manual event recorder without the original target intent. | Core now keeps a pending explicit navigation trace per session/tab and folds later same-tab main-frame redirects into that trace until the next user action. The trace preserves `value/signals.navigation.target_url` as the replay target and updates `after_page.url/signals.navigation.observed_url` as observed browser fact. Focused manager, compiler, and SOP->Skill e2e regressions passed. | done |
 
 ## Patch Churn Review
 

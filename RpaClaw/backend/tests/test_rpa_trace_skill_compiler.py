@@ -108,6 +108,30 @@ def test_navigation_script_only_includes_required_helper_prelude():
     assert "_validate_non_empty_records" not in prelude
 
 
+def test_explicit_navigation_replays_recorded_target_not_redirect_login_url():
+    trace = RPAAcceptedTrace(
+        trace_id="explicit-sso-entry",
+        trace_type=RPATraceType.NAVIGATION,
+        action="navigate",
+        description="Navigate to https://business.example.com/dashboard",
+        value="https://business.example.com/dashboard",
+        after_page=RPAPageState(url="https://sso.example.com/login?nonce=random-123"),
+        signals={
+            "navigation": {
+                "target_url": "https://business.example.com/dashboard",
+                "observed_url": "https://sso.example.com/login?nonce=random-123",
+                "redirected": True,
+            }
+        },
+    )
+
+    script = TraceSkillCompiler().generate_script([trace], is_local=True)
+    body = _execute_body(script)
+
+    assert "_target_url = 'https://business.example.com/dashboard'" in body
+    assert "sso.example.com/login?nonce=random-123" not in body
+
+
 def test_navigation_traces_with_same_tab_id_stay_on_one_page():
     traces = [
         RPAAcceptedTrace(

@@ -21,6 +21,18 @@ from backend.user.dependencies import (
 router = APIRouter(tags=["runtime-proxy"])
 
 
+SENSITIVE_RUNTIME_PUBLIC_KEYWORDS = (
+    "authorization",
+    "api_key",
+    "apikey",
+    "credential",
+    "password",
+    "secret",
+    "token",
+)
+READY_RUNTIME_STATUSES = {"ready"}
+
+
 def _runtime_belongs_to_user(runtime, current_user: User) -> bool:
     return runtime is not None and str(runtime.user_id) == str(current_user.id)
 
@@ -30,12 +42,93 @@ async def _user_owns_runtime_session(session_id: str, current_user: User) -> boo
 
 
 def _filter_upstream_headers(headers) -> dict:
-    excluded = {"host", "content-length", "connection"}
+    excluded = {
+        "authorization",
+        "connection",
+        "content-length",
+        "cookie",
+        "host",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "sec-websocket-accept",
+        "sec-websocket-extensions",
+        "sec-websocket-key",
+        "sec-websocket-protocol",
+        "sec-websocket-version",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    }
     return {k: v for k, v in headers.items() if k.lower() not in excluded}
 
 
-def _build_runtime_http_url(rest_base_url: str, path: str, query_params=None) -> str:
-    base = f"{rest_base_url.rstrip('/')}/{path.lstrip('/')}"
+def _filter_upstream_response_headers(headers) -> dict:
+    excluded = {
+        "authorization",
+        "connection",
+        "content-length",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "set-cookie",
+        "transfer-encoding",
+        "www-authenticate",
+    }
+    return {k: v for k, v in headers.items() if k.lower() not in excluded}
+
+
+def _runtime_base_url(runtime) -> str:
+    return (runtime.route_base_url or runtime.rest_base_url).rstrip("/")
+
+
+def _runtime_adapter_headers(runtime, headers) -> dict:
+    upstream_headers = _filter_upstream_headers(headers)
+    token = (getattr(runtime, "runtime_token", None) or "").strip()
+    if token:
+        upstream_headers["authorization"] = f"Bearer {token}"
+    return upstream_headers
+
+
+def _sanitize_runtime_public_value(value, *, key: str = ""):
+    key_lower = key.lower()
+    if key_lower and any(keyword in key_lower for keyword in SENSITIVE_RUNTIME_PUBLIC_KEYWORDS):
+        return None
+    if isinstance(value, dict):
+        sanitized = {}
+        for item_key, item_value in value.items():
+            sanitized_value = _sanitize_runtime_public_value(item_value, key=str(item_key))
+            if sanitized_value is not None:
+                sanitized[item_key] = sanitized_value
+        return sanitized
+    if isinstance(value, list):
+        return [
+            sanitized_value
+            for item in value
+            if (sanitized_value := _sanitize_runtime_public_value(item)) is not None
+        ]
+    return value
+
+
+def _runtime_public_dict(runtime) -> dict:
+    payload = runtime.model_dump(exclude={"runtime_token"})
+    payload["metadata"] = _sanitize_runtime_public_value(payload.get("metadata") or {})
+    return payload
+
+
+def _runtime_is_ready(runtime) -> bool:
+    return runtime.status in READY_RUNTIME_STATUSES
+
+
+def _runtime_not_ready_detail(runtime, session_id: str) -> dict:
+    return {
+        "status": "runtime_not_ready",
+        "session_id": session_id,
+        "runtime": _runtime_public_dict(runtime),
+    }
+
+
+def _build_runtime_http_url(base_url: str, path: str, query_params=None) -> str:
+    base = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
     if query_params:
         query_string = urlencode(list(query_params.multi_items()))
         if query_string:
@@ -101,7 +194,7 @@ async def get_runtime_status(
     return {
         "status": "success",
         "session_id": session_id,
-        "runtime": runtime.model_dump(),
+        "runtime": _runtime_public_dict(runtime),
     }
 
 
@@ -120,7 +213,7 @@ async def list_runtime_sessions(
             visible_runtimes.append(runtime)
     return {
         "status": "success",
-        "runtimes": [runtime.model_dump() for runtime in visible_runtimes],
+        "runtimes": [_runtime_public_dict(runtime) for runtime in visible_runtimes],
     }
 
 
@@ -140,9 +233,14 @@ async def proxy_runtime_http(
     runtime = await get_session_runtime_manager().ensure_runtime(session_id, current_user.id)
     if not _runtime_belongs_to_user(runtime, current_user):
         raise HTTPException(status_code=404, detail="Runtime not found")
-    upstream_url = _build_runtime_http_url(runtime.rest_base_url, path, request.query_params)
+    if not _runtime_is_ready(runtime):
+        raise HTTPException(
+            status_code=503,
+            detail=_runtime_not_ready_detail(runtime, session_id),
+        )
+    upstream_url = _build_runtime_http_url(_runtime_base_url(runtime), path, request.query_params)
     body = await request.body()
-    headers = _filter_upstream_headers(request.headers)
+    headers = _runtime_adapter_headers(runtime, request.headers)
 
     async with httpx.AsyncClient() as client:
         upstream_response = await client.request(
@@ -152,11 +250,7 @@ async def proxy_runtime_http(
             content=body,
         )
 
-    response_headers = {
-        key: value
-        for key, value in upstream_response.headers.items()
-        if key.lower() not in {"content-length", "transfer-encoding", "connection"}
-    }
+    response_headers = _filter_upstream_response_headers(upstream_response.headers)
     return Response(
         content=upstream_response.content,
         status_code=upstream_response.status_code,
@@ -183,14 +277,20 @@ async def proxy_runtime_websocket(
     if not _runtime_belongs_to_user(runtime, current_user):
         await websocket.close(code=4404)
         return
+    if not _runtime_is_ready(runtime):
+        await websocket.close(code=1013)
+        return
     upstream_url = _build_runtime_ws_url(
-        runtime.rest_base_url,
+        _runtime_base_url(runtime),
         path,
         websocket.url.query,
     )
     await websocket.accept()
 
-    async with websockets.connect(upstream_url) as upstream:
+    async with websockets.connect(
+        upstream_url,
+        additional_headers=_runtime_adapter_headers(runtime, websocket.headers),
+    ) as upstream:
         async def _client_to_upstream():
             while True:
                 message = await websocket.receive()

@@ -8,9 +8,11 @@ from playwright.async_api import async_playwright, Browser, Playwright
 
 from backend.config import settings
 from backend.rpa.playwright_security import get_chromium_launch_kwargs
+from backend.runtime.adapter_client import RuntimeAdapterClient
 from backend.runtime.session_runtime_manager import get_session_runtime_manager
 
 logger = logging.getLogger(__name__)
+READY_RUNTIME_STATUSES = {"ready"}
 
 
 class CDPConnector:
@@ -62,14 +64,21 @@ class CDPConnector:
             cdp_url = await self._fetch_cdp_url(session_id=session_id, user_id=user_id)
             logger.info(f"Connecting to browser via CDP: {cdp_url}")
 
-            # Start Playwright and connect in the dedicated thread/loop
-            playwright, browser = await self._run_in_pw_loop(
-                self._connect(cdp_url)
-            )
+            if self._should_connect_in_current_loop():
+                playwright, browser = await self._connect(cdp_url)
+            else:
+                # Start Playwright and connect in the dedicated thread/loop
+                playwright, browser = await self._run_in_pw_loop(
+                    self._connect(cdp_url)
+                )
             self._playwrights[session_key] = playwright
             self._browsers[session_key] = browser
             logger.info("CDP browser connection established")
             return browser
+
+    @staticmethod
+    def _should_connect_in_current_loop() -> bool:
+        return str(getattr(settings, "runtime_mode", "") or "").strip() == "aio_native"
 
     @staticmethod
     async def _connect(cdp_url: str):
@@ -89,29 +98,35 @@ class CDPConnector:
         We replace the host:port with the one from SANDBOX_MCP_URL so
         the backend can reach it (works for both local dev and Docker).
         """
+        sandbox_base = self._sandbox_base_url
         if session_id:
             runtime = await get_session_runtime_manager().ensure_runtime(
                 session_id,
                 user_id or "system",
             )
-            url = f"{runtime.rest_base_url}/v1/browser/info"
-            sandbox_base = runtime.rest_base_url
+            if runtime.status not in READY_RUNTIME_STATUSES:
+                raise RuntimeError(
+                    "Runtime is not ready for CDP connection: "
+                    f"session_id={session_id}, status={runtime.status}"
+                )
+            data = await RuntimeAdapterClient(runtime).browser_info()
+            sandbox_base = runtime.route_base_url or runtime.rest_base_url
         else:
             url = f"{self._sandbox_base_url}/v1/browser/info"
-            sandbox_base = self._sandbox_base_url
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            data = resp.json()
-            cdp_url = data.get("data", {}).get("cdp_url", "")
-            if not cdp_url:
-                raise RuntimeError(f"No cdp_url in response from {url}: {data}")
-            # Rewrite host:port to match our sandbox base URL
-            from urllib.parse import urlparse
-            sandbox_parsed = urlparse(sandbox_base)
-            cdp_parsed = urlparse(cdp_url)
-            cdp_url = cdp_parsed._replace(netloc=sandbox_parsed.netloc).geturl()
-            return cdp_url
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                data = resp.json()
+
+        cdp_url = data.get("data", {}).get("cdp_url", "")
+        if not cdp_url:
+            raise RuntimeError(f"No cdp_url in browser info response: {data}")
+        # Rewrite host:port to match our reachable runtime/adapter route.
+        from urllib.parse import urlparse
+        sandbox_parsed = urlparse(sandbox_base)
+        cdp_parsed = urlparse(cdp_url)
+        cdp_url = cdp_parsed._replace(netloc=sandbox_parsed.netloc).geturl()
+        return cdp_url
 
     async def close(self):
         """Clean up connections."""
@@ -225,6 +240,9 @@ local_cdp_connector = LocalCDPConnector()
 
 def get_cdp_connector():
     """Return the appropriate CDP connector based on storage_backend."""
+    runtime_mode = str(getattr(settings, "runtime_mode", "shared") or "shared").strip()
+    if runtime_mode in {"aio", "aio_fixed", "aio_native", "docker", "session_pod"}:
+        return cdp_connector
     if settings.storage_backend == "local":
         return local_cdp_connector
     return cdp_connector

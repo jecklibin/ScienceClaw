@@ -1,0 +1,15 @@
+*
+
+!backend/
+backend/*
+!backend/__init__.py
+!backend/runtime/
+!backend/runtime/**
+!backend/requirements.txt
+!runtime-adapter/
+!runtime-adapter/Dockerfile
+!runtime-adapter/requirements.txt
+
+**/__pycache__/
+**/.pytest_cache/
+**/*.pyc

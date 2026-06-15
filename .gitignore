@@ -69,6 +69,11 @@ logs/
 # Testing
 .coverage
 .pytest_cache/
+.pytest-tmp*/
+.pytest-rpa-debug*/
+**/pytest-cache-files-*/
+**/pytest_temp_debug/
+**/debug_snapshot_test_*/
 htmlcov/
 .tox/
 .hypothesis/
@@ -93,6 +98,8 @@ Desktop.ini
 .cache/
 .pytest_cache
 .worktrees/
+/tmp/
+/tmptazo*/
 .cursor
 .trae
 workspace

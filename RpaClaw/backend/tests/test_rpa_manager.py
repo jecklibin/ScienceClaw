@@ -3397,6 +3397,14 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(trace.before_page.url, "about:blank")
         self.assertEqual(trace.after_page.url, "https://example.com")
         self.assertEqual(trace.value, "https://example.com")
+        self.assertEqual(
+            trace.signals["navigation"],
+            {
+                "target_url": "https://example.com",
+                "observed_url": "https://example.com",
+                "redirected": False,
+            },
+        )
 
     async def test_navigate_active_tab_suppresses_redirect_navigation_event(self):
         class _RedirectingPage(_FakePage):
@@ -3421,6 +3429,43 @@ class RPASessionManagerTabTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(trace.before_page.url, "about:blank")
         self.assertEqual(trace.after_page.url, "https://example.com/final")
         self.assertEqual(trace.value, "https://example.com")
+        self.assertEqual(
+            trace.signals["navigation"],
+            {
+                "target_url": "https://example.com",
+                "observed_url": "https://example.com/final",
+                "redirected": True,
+            },
+        )
+
+    async def test_navigate_active_tab_folds_late_redirect_into_explicit_navigation_trace(self):
+        page = _FakePage("about:blank", "Blank")
+        await self.manager.register_page(self.session.id, page, make_active=True)
+
+        await self.manager.navigate_active_tab(self.session.id, "https://console.example.com/mom/")
+
+        late_login_url = "https://login.example.com/login1/?state=random"
+        page.url = late_login_url
+        page.main_frame.url = late_login_url
+        page.handlers["framenavigated"](page.main_frame)
+        await asyncio.sleep(0)
+        await self.manager.wait_for_pending_events(self.session.id, timeout_ms=1000)
+
+        self.assertEqual(len(self.session.steps), 0)
+        self.assertEqual(len(self.session.traces), 1)
+        trace = self.session.traces[0]
+        self.assertEqual(trace.trace_type.value, "navigation")
+        self.assertEqual(trace.action, "navigate")
+        self.assertEqual(trace.value, "https://console.example.com/mom/")
+        self.assertEqual(trace.after_page.url, late_login_url)
+        self.assertEqual(
+            trace.signals["navigation"],
+            {
+                "target_url": "https://console.example.com/mom/",
+                "observed_url": late_login_url,
+                "redirected": True,
+            },
+        )
 
     async def test_navigate_active_tab_does_not_record_trace_when_session_paused(self):
         page = _FakePage("about:blank", "Blank")

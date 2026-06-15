@@ -195,6 +195,55 @@ python C:\Users\HUAWEI\.codex\skills\using-harness\scripts\knowledge_check.py --
 - F024.7 GREEN explicit navigation redirect regression: `1 passed`. Explicit navigation now suppresses in-flight main-frame navigation events while preserving the final `after_page.url`.
 - F024.7 focused navigation regression: `5 passed, 29 warnings`. Core navigation remains recorded without Harness capture, paused sessions still skip navigation facts, and Full SOP entry navigation checkpoint still passes.
 - F024.7 Core SOP->SKILL regression: manager `108 passed`; trace compiler `110 passed`; route trace `42 passed, 29 warnings`. Warnings are existing Python 3.14 / FastAPI deprecation warnings.
+- F024.8 RED explicit SSO target-vs-observed regression: `3 failed` as expected. `TraceSkillCompiler` generated `_target_url` from `after_page.url`, and `navigate_active_tab()` traces did not yet expose `signals.navigation.target_url/observed_url/redirected`.
+- F024.8 GREEN focused regression: `3 passed`. Standalone explicit navigation replay now uses the recorded target URL while preserving the SSO/login URL as observed evidence, and manager traces expose target/observed/redirected signals.
+- F024.8 compiler + manager regression: `219 passed`. Existing redirect folding, tab replay, dynamic URL suffix, and manager navigation tests stayed green.
+- F024.8 Core SOP->Skill e2e regression: `11 passed`. Trace-first runtime-to-compiler replay coverage stayed green after touching Core manager/compiler files.
+
+F024.8 commands:
+
+```powershell
+$env:PYTHONPATH='RpaClaw'; python -m pytest RpaClaw\backend\tests\test_rpa_trace_skill_compiler.py::test_explicit_navigation_replays_recorded_target_not_redirect_login_url RpaClaw\backend\tests\test_rpa_manager.py::RPASessionManagerTabTests::test_navigate_active_tab_records_core_trace_without_harness_capture RpaClaw\backend\tests\test_rpa_manager.py::RPASessionManagerTabTests::test_navigate_active_tab_suppresses_redirect_navigation_event
+```
+
+```powershell
+$env:PYTHONPATH='RpaClaw'; python -m pytest RpaClaw\backend\tests\test_rpa_trace_skill_compiler.py RpaClaw\backend\tests\test_rpa_manager.py
+```
+
+```powershell
+$env:PYTHONPATH='RpaClaw'; python -m pytest RpaClaw\backend\tests\test_rpa_trace_e2e.py
+```
+
+F024.9 late explicit-navigation redirect folding:
+
+Commands:
+
+```powershell
+$env:PYTHONPATH='RpaClaw'; python -m pytest RpaClaw\backend\tests\test_rpa_manager.py::RPASessionManagerTabTests::test_navigate_active_tab_folds_late_redirect_into_explicit_navigation_trace -q
+```
+
+```powershell
+$env:PYTHONPATH='RpaClaw'; python -m pytest RpaClaw\backend\tests\test_rpa_manager.py::RPASessionManagerTabTests::test_navigate_active_tab_records_core_trace_without_harness_capture RpaClaw\backend\tests\test_rpa_manager.py::RPASessionManagerTabTests::test_navigate_active_tab_suppresses_redirect_navigation_event RpaClaw\backend\tests\test_rpa_manager.py::RPASessionManagerTabTests::test_navigate_active_tab_folds_late_redirect_into_explicit_navigation_trace RpaClaw\backend\tests\test_rpa_manager.py::RPASessionManagerTabTests::test_navigate_active_tab_does_not_record_trace_when_session_paused -q
+```
+
+```powershell
+$env:PYTHONPATH='RpaClaw'; python -m pytest RpaClaw\backend\tests\test_rpa_manager.py -q
+```
+
+```powershell
+$env:PYTHONPATH='RpaClaw'; python -m pytest RpaClaw\backend\tests\test_rpa_trace_skill_compiler.py -q
+```
+
+```powershell
+$env:PYTHONPATH='RpaClaw'; python -m pytest RpaClaw\backend\tests\test_rpa_trace_e2e.py -q
+```
+
+Results:
+
+- RED late redirect folding regression: `1 failed` as expected. A post-`navigate_active_tab()` same-tab `framenavigated` event was recorded as one standalone manual navigation step.
+- GREEN focused regression: `1 passed`. Late same-tab redirects after explicit address-bar navigation now update the existing explicit navigation trace instead of adding a separate navigation step.
+- Focused navigation regression: `4 passed`. Core explicit navigation still records without Harness capture, synchronous redirects remain suppressed, late redirects fold into the explicit trace, and paused sessions still skip explicit navigation facts.
+- Core SOP->Skill regression: manager `109 passed`; trace compiler `111 passed`; trace e2e `11 passed`.
 
 ## Harness Validation
 

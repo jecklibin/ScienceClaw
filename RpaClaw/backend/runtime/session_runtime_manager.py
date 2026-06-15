@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 
 from backend.runtime.models import SessionRuntimeRecord
@@ -10,6 +11,12 @@ from backend.runtime.repository import get_runtime_repository
 
 _manager: SessionRuntimeManager | None = None
 logger = logging.getLogger(__name__)
+
+_SENSITIVE_LOG_VALUE_RE = re.compile(
+    r"(?i)\b([A-Za-z0-9_-]*(?:authorization|api[_-]?key|password|secret|token)[A-Za-z0-9_-]*)"
+    r"\s*[:=]\s*[^,\s;]+"
+)
+_SENSITIVE_BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
 
 
 class SessionRuntimeManager:
@@ -31,35 +38,86 @@ class SessionRuntimeManager:
     def _compute_expires_at(self, now_ts: int) -> int:
         return now_ts + int(getattr(self.settings, "runtime_idle_ttl_seconds", 3600))
 
+    @staticmethod
+    def _is_duplicate_insert_error(exc: Exception) -> bool:
+        return exc.__class__.__name__ == "DuplicateKeyError"
+
+    @staticmethod
+    def _sanitize_exception_for_log(
+        exc: Exception,
+        sensitive_values: list[str | None] | None = None,
+    ) -> str:
+        message = str(exc)
+        message = _SENSITIVE_BEARER_RE.sub("Bearer <redacted>", message)
+        message = _SENSITIVE_LOG_VALUE_RE.sub(
+            lambda match: f"{match.group(1)}=<redacted>",
+            message,
+        )
+        for value in sensitive_values or []:
+            sensitive_value = (value or "").strip()
+            if sensitive_value:
+                message = message.replace(sensitive_value, "<redacted>")
+        return message
+
+    async def _refresh_existing_runtime(self, existing: dict, now_ts: int):
+        refreshed = await self.provider.refresh_runtime(SessionRuntimeRecord(**existing))
+        if refreshed.status == "missing":
+            await self.repository.delete_one({"session_id": refreshed.session_id})
+            return None
+        refreshed.last_used_at = now_ts
+        refreshed.expires_at = self._compute_expires_at(now_ts)
+        refreshed_payload = refreshed.model_dump()
+        await self.repository.update_one(
+            {"session_id": refreshed.session_id},
+            {
+                "$set": refreshed_payload
+            },
+        )
+        return refreshed
+
+    async def _persist_refreshed_runtime(self, refreshed: SessionRuntimeRecord) -> None:
+        await self.repository.update_one(
+            {"session_id": refreshed.session_id},
+            {
+                "$set": refreshed.model_dump(),
+            },
+        )
+
     async def ensure_runtime(self, session_id: str, user_id: str):
         now_ts = int(time.time())
-        existing = await self.repository.find_one({"session_id": session_id, "status": "ready"})
+        existing = await self.repository.find_one({"session_id": session_id})
         if existing:
-            refreshed = await self.provider.refresh_runtime(SessionRuntimeRecord(**existing))
-            if refreshed.status == "missing":
-                await self.repository.delete_one({"session_id": session_id})
-            else:
-                existing["status"] = refreshed.status
-                existing["last_used_at"] = now_ts
-                existing["expires_at"] = self._compute_expires_at(now_ts)
-                await self.repository.update_one(
-                    {"session_id": session_id},
-                    {
-                        "$set": {
-                            "status": existing["status"],
-                            "last_used_at": existing["last_used_at"],
-                            "expires_at": existing["expires_at"],
-                        }
-                    },
-                )
-                return SessionRuntimeRecord(**existing)
+            refreshed = await self._refresh_existing_runtime(existing, now_ts)
+            if refreshed is not None:
+                return refreshed
 
         created = await self.provider.create_runtime(session_id, user_id)
         created_ts = max(int(created.created_at), now_ts)
         created.created_at = created_ts
         created.last_used_at = created_ts
         created.expires_at = self._compute_expires_at(created_ts)
-        await self.repository.insert_one(created.model_dump())
+        created_payload = created.model_dump()
+        created_payload["_id"] = session_id
+        try:
+            await self.repository.insert_one(created_payload)
+        except Exception as exc:
+            if not self._is_duplicate_insert_error(exc):
+                raise
+            try:
+                await self.provider.delete_runtime(created)
+            except Exception as cleanup_exc:
+                logger.warning(
+                    "Failed to delete duplicate-created runtime for session "
+                    f"{session_id}: "
+                    f"{self._sanitize_exception_for_log(cleanup_exc, [created.runtime_token])}"
+                )
+            existing_after_duplicate = await self.repository.find_one({"session_id": session_id})
+            if not existing_after_duplicate:
+                raise
+            refreshed = await self._refresh_existing_runtime(existing_after_duplicate, now_ts)
+            if refreshed is not None:
+                return refreshed
+            return await self.ensure_runtime(session_id, user_id)
         return created
 
     async def get_runtime(self, session_id: str, refresh: bool = False) -> SessionRuntimeRecord | None:
@@ -75,14 +133,7 @@ class SessionRuntimeManager:
         if refreshed.status == "missing":
             await self.repository.delete_one({"session_id": refreshed.session_id})
             return None
-        await self.repository.update_one(
-            {"session_id": session_id},
-            {
-                "$set": {
-                    "status": refreshed.status,
-                }
-            },
-        )
+        await self._persist_refreshed_runtime(refreshed)
         return refreshed
 
     async def list_runtimes(
@@ -102,14 +153,7 @@ class SessionRuntimeManager:
             if refreshed.status == "missing":
                 await self.repository.delete_one({"session_id": refreshed.session_id})
                 continue
-            await self.repository.update_one(
-                {"session_id": refreshed.session_id},
-                {
-                    "$set": {
-                        "status": refreshed.status,
-                    }
-                },
-            )
+            await self._persist_refreshed_runtime(refreshed)
             refreshed_records.append(refreshed)
         return refreshed_records
 
@@ -134,7 +178,9 @@ class SessionRuntimeManager:
                 await self.provider.delete_runtime(record)
             except Exception as exc:
                 logger.warning(
-                    f"Failed to delete runtime for session {record.session_id}: {exc}"
+                    "Failed to delete runtime for session "
+                    f"{record.session_id}: "
+                    f"{self._sanitize_exception_for_log(exc, [record.runtime_token])}"
                 )
                 continue
             await self.repository.delete_one({"session_id": record.session_id})
@@ -154,7 +200,9 @@ class SessionRuntimeManager:
                 await self.provider.delete_runtime(record)
             except Exception as exc:
                 logger.warning(
-                    f"Failed to delete expired runtime for session {record.session_id}: {exc}"
+                    "Failed to delete expired runtime for session "
+                    f"{record.session_id}: "
+                    f"{self._sanitize_exception_for_log(exc, [record.runtime_token])}"
                 )
                 continue
             await self.repository.delete_one({"session_id": record.session_id})
